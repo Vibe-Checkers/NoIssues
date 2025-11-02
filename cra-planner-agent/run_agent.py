@@ -9,6 +9,7 @@ import os
 import sys
 import subprocess
 import shutil
+import time
 from pathlib import Path
 
 from planner_agent import create_planner_agent
@@ -92,6 +93,7 @@ def analyze_repository(agent, repo_path: str, repo_name: str, callback_handler):
     final_instructions = None
     total_tokens = {"input": 0, "output": 0, "total": 0}
     tool_usage = {}  # Track how many times each tool is used
+    start_time = time.time()  # Track analysis duration
 
     for i, query in enumerate(queries, 1):
         print(f"\n{'-'*70}")
@@ -100,10 +102,20 @@ def analyze_repository(agent, repo_path: str, repo_name: str, callback_handler):
         print(f"Query: {query}\n")
 
         try:
+            # Format chat history as readable text
+            formatted_history = ""
+            if chat_history:
+                formatted_history = "\n".join([
+                    f"Previous Query: {msg['content']}" if msg['role'] == 'user'
+                    else f"Previous Answer: {msg['content'][:500]}..." if len(msg['content']) > 500
+                    else f"Previous Answer: {msg['content']}"
+                    for msg in chat_history
+                ])
+
             # Invoke agent with accumulated chat history for context continuity
             result = agent.invoke({
                 "input": query,
-                "chat_history": chat_history
+                "chat_history": formatted_history or "No previous context."
             })
 
             output = result['output']
@@ -192,6 +204,21 @@ def analyze_repository(agent, repo_path: str, repo_name: str, callback_handler):
         print(f"{'Total tool calls':20s} : {total_tool_calls:3d}")
     else:
         print("[WARNING] Tool usage information not available")
+    print('='*70)
+
+    # Calculate duration
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    duration_minutes = duration_seconds / 60
+
+    # Print duration report
+    print(f"\n{'='*70}")
+    print("Analysis Duration")
+    print('='*70)
+    if duration_minutes >= 1:
+        print(f"Total time: {int(duration_minutes)} min {int(duration_seconds % 60)} sec ({duration_seconds:.2f} seconds)")
+    else:
+        print(f"Total time: {duration_seconds:.2f} seconds")
     print('='*70)
 
     # Print token usage summary

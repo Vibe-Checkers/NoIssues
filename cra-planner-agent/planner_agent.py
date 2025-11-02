@@ -106,6 +106,31 @@ class GPT5NanoWrapper(BaseChatModel):
 REPOSITORY_BASE_PATH = None
 
 
+def _make_relative_path(absolute_path: str) -> str:
+    """
+    Convert an absolute path to a relative path from the repository base.
+    This is used in tool outputs so the agent sees relative paths.
+
+    Args:
+        absolute_path: Absolute path to convert
+
+    Returns:
+        Relative path from repository base, or original path if no base set
+    """
+    if REPOSITORY_BASE_PATH is None:
+        return absolute_path
+
+    try:
+        # Get relative path from repository base
+        rel_path = os.path.relpath(absolute_path, REPOSITORY_BASE_PATH)
+        # If it doesn't go up directories, use it; otherwise return as-is
+        if not rel_path.startswith('..'):
+            return rel_path
+        return absolute_path
+    except (ValueError, TypeError):
+        return absolute_path
+
+
 def _resolve_path(user_path: str) -> str:
     """
     Convert user-provided paths to absolute paths using repository base.
@@ -129,6 +154,7 @@ def _resolve_path(user_path: str) -> str:
         return REPOSITORY_BASE_PATH
 
     # Otherwise, resolve relative to repository base
+    # Tools now return relative paths, so this works correctly
     return os.path.join(REPOSITORY_BASE_PATH, user_path)
 
 
@@ -254,7 +280,7 @@ def grep_files(input_str: str) -> str:
                     for i, line in enumerate(lines, 1):
                         if regex.search(line):
                             match_info = {
-                                "file": filepath,
+                                "file": _make_relative_path(filepath),
                                 "line_number": i,
                                 "line": line.rstrip(),
                                 "context_before": [],
@@ -372,9 +398,9 @@ def find_files(input_str: str) -> str:
                     try:
                         stat = os.stat(filepath)
                         matches.append({
-                            "path": filepath,
+                            "path": _make_relative_path(filepath),
                             "name": filename,
-                            "directory": root,
+                            "directory": _make_relative_path(root),
                             "size_bytes": stat.st_size,
                             "depth": current_depth
                         })
@@ -453,7 +479,7 @@ def extract_json_field(input_str: str) -> str:
                 return json.dumps({"error": f"Path '{json_path}' not found in file"})
 
         result = {
-            "file": filepath,
+            "file": _make_relative_path(filepath),
             "path": json_path,
             "value": current
         }
@@ -510,7 +536,7 @@ def get_file_metadata(filepath: str) -> str:
             pass
 
         result = {
-            "path": filepath,
+            "path": _make_relative_path(filepath),
             "name": os.path.basename(filepath),
             "size_bytes": stat.st_size,
             "size_kb": round(stat.st_size / 1024, 2),
@@ -781,10 +807,17 @@ ANALYSIS APPROACH - Discovery over Assumptions:
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 1. After "Action:", you MUST write "Action Input:" on the next line
-2. After "Action Input:", STOP IMMEDIATELY - do not write anything else
-3. Do NOT write "Observation:" - the system provides it
-4. Do NOT write "Final Answer" until you have all observations
-5. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
+2. After "Action Input:", write the input WITHOUT quotes (e.g., .,2,false,true NOT '.,2,false,true')
+3. After "Action Input:", STOP IMMEDIATELY - do not write anything else
+4. Do NOT write "Observation:" - the system provides it
+5. WHEN TO STOP AND PROVIDE FINAL ANSWER:
+   - You have examined the main configuration files (package.json, Cargo.toml, Makefile, etc.)
+   - You have read key documentation (README, INSTALL, BUILD files)
+   - You have found the core information requested in the question
+   - Typically 5-10 tool calls is sufficient for most questions
+   - Maximum 15 tool calls per question - after that, provide Final Answer with what you have
+6. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
+7. AVOID OVER-EXPLORATION: Do not read every file or search exhaustively. Focus on the specific question and answer it.
 
 CORRECT FORMAT EXAMPLES:
 
@@ -816,7 +849,10 @@ Final Answer: ...           ← WRONG! Do not put Final Answer after an Action!
 
 Now begin!
 
-Question: {input}
+Previous conversation context (if any):
+{chat_history}
+
+Current Question: {input}
 Thought:{agent_scratchpad}"""
 
     prompt = PromptTemplate.from_template(template)
@@ -835,6 +871,8 @@ Thought:{agent_scratchpad}"""
         callbacks=callbacks,
         handle_parsing_errors=True,
         max_iterations=max_iterations,
+        max_execution_time=None,  # No time limit
+        early_stopping_method="generate",  # Generate final answer if max iterations reached
         return_intermediate_steps=True  # Enable to track tool usage
     )
 
