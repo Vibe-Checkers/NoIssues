@@ -1,437 +1,643 @@
 #!/usr/bin/env python3
 """
-Builder Agent Module
-Executes build instructions by running terminal commands and managing the build process.
-Works in conjunction with the planner agent to build projects.
+Builder Agent - Dockerized, Hardened, and Fully Logged
+
+Executes build instructions by running terminal commands in an isolated Docker container.
+Adds robust logging, environment sanitization, output redaction, container restarts on timeout,
+and guardrails for destructive commands. Includes a post-run integrity check to ensure
+all steps were logged.
+
+Usage:
+    python builder.py <repository_path> <instructions_file> [github_url]
+
+Environment overrides (optional):
+    OPENAI_API_KEY=...                    # required
+    OPENAI_MODEL=gpt-4o-mini              # default
+    BUILDER_USE_DOCKER=1                  # default 1 (on)
+    BUILDER_DOCKER_IMAGE=auto             # auto chooses a base image from repo, or set explicit image (e.g., node:20-bullseye)
+    BUILDER_DOCKER_NETWORK=bridge         # or "none" to disable egress
+    BUILDER_DOCKER_MEMORY=4g              # memory limit
+    BUILDER_DOCKER_CPUS=2                 # number of CPUs (integer or float)
+    BUILDER_DOCKER_READONLY=0             # 1 enables read-only rootfs (may break some builds)
 """
 
 import os
+import io
+import re
 import json
 import logging
-import subprocess
 import shutil
-from typing import Any, List, Optional, Dict
+import threading
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
+import docker
 from dotenv import load_dotenv
+
 from langchain_openai import ChatOpenAI
 from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_core.tools import Tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.callbacks import BaseCallbackHandler
 
-# Load environment variables
+# =============================================================================
+# Global configuration & logging
+# =============================================================================
+
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("builder")
 
 # Suppress verbose HTTP request logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+# Globals set during runtime
+BUILD_WORKING_DIRECTORY: Optional[str] = None
+BUILD_STATE = None
+USE_DOCKER: bool = os.getenv("BUILDER_USE_DOCKER", "1") == "1"
+DOCKER_SANDBOX = None
 
-# ============================================================================
-# Custom Callback Handler for Better Formatting
-# ============================================================================
+# =============================================================================
+# Constants and helpers
+# =============================================================================
+
+ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+SENSITIVE_NAME_PATTERNS = re.compile(r"(SECRET|TOKEN|KEY|PASS|PWD|PASSWORD|CREDENTIAL|COOKIE|SESSION)", re.IGNORECASE)
+EXPLICIT_DENY = {
+    "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
+    "GITHUB_TOKEN", "GITLAB_TOKEN",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+}
+
+DANGEROUS_REGEX = re.compile(
+    r"(?:\brm\s+-rf\s+(?:/|--no-preserve-root|\.|~)\b)|"
+    r"(?:\bmkfs\b)|(?:\bdd\s+if=)|(?:\bshred\b)|"
+    r"(?:\bmount\b)|(?:\bumount\b)|"
+    r"(?:\bcurl\b.*\|\s*(?:sh|bash))|(?:\bwget\b.*\|\s*(?:sh|bash))|"
+    r"(?:\:\(\)\{\:\|\:\&\}\;\:)",  # fork bomb pattern
+    re.IGNORECASE
+)
+
+CRITICAL_PATHS = {"/", "/root", "/home", "/Users", "/etc", "/var", "/usr", "C:\\"}
+
+
+def _now_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _slug(s: str) -> str:
+    s = s.strip().replace("/", "_").replace(" ", "_")
+    return re.sub(r"[^A-Za-z0-9._-]+", "", s)[:60] or "cmd"
+
+
+def _init_run_logs(repo_path: str) -> str:
+    root = os.path.join(repo_path, "builder_logs", _now_stamp())
+    os.makedirs(root, exist_ok=True)
+    os.makedirs(os.path.join(root, "commands"), exist_ok=True)
+    return root
+
+
+def _safe_rmtree(path: str, allowed_base: Optional[str] = None):
+    path = os.path.abspath(path)
+    if path in CRITICAL_PATHS or any(path == p or path.startswith(p + os.sep) for p in CRITICAL_PATHS):
+        raise ValueError(f"Refusing to remove critical path: {path}")
+    if allowed_base:
+        base = os.path.abspath(allowed_base)
+        if not (path == base or path.startswith(base + os.sep)):
+            raise ValueError(f"Refusing to remove path outside allowed base ({base}): {path}")
+    shutil.rmtree(path)
+
+
+def _select_base_image(repo_path: str) -> str:
+    override = os.getenv("BUILDER_DOCKER_IMAGE")
+    if override and override.lower() != "auto":
+        return override
+    p = Path(repo_path)
+    if (p / "package.json").exists():
+        return "node:20-bullseye"
+    if (p / "pyproject.toml").exists() or (p / "requirements.txt").exists():
+        return "python:3.11-slim"
+    if (p / "Cargo.toml").exists():
+        return "rust:1-bullseye"
+    if (p / "go.mod").exists():
+        return "golang:1.22-bullseye"
+    if (p / "pom.xml").exists():
+        return "maven:3-eclipse-temurin-17"
+    if (p / "build.gradle").exists() or (p / "gradlew").exists():
+        return "gradle:8-jdk17"
+    return "ubuntu:22.04"
+
+
+def _allowed_env_base() -> set:
+    return {"PATH", "HOME", "LANG", "LC_ALL", "SHELL", "USER", "TMPDIR", "TERM"}
+
+
+def make_sanitized_env(base: Dict[str, str]) -> Dict[str, str]:
+    """Return a sanitized environment for subprocess/containers (no secrets)."""
+    env: Dict[str, str] = {}
+    allow = _allowed_env_base()
+    for k, v in base.items():
+        if k in allow:
+            env[k] = v
+        elif k in EXPLICIT_DENY or SENSITIVE_NAME_PATTERNS.search(k):
+            continue
+    extras = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"]
+    env["PATH"] = ":".join(dict.fromkeys(env.get("PATH", "").split(":") + extras))
+    if BUILD_WORKING_DIRECTORY:
+        env.setdefault("HOME", BUILD_WORKING_DIRECTORY)
+        env.setdefault("TMPDIR", os.path.join(BUILD_WORKING_DIRECTORY, ".tmp"))
+        os.makedirs(env["TMPDIR"], exist_ok=True)
+    return env
+
+
+def _compiled_secret_values(env: Dict[str, str]) -> List[str]:
+    vals: List[str] = []
+    # From sanitized env (names only may remain, but keep heuristic)
+    for k, v in env.items():
+        if v and (k in EXPLICIT_DENY or SENSITIVE_NAME_PATTERNS.search(k)):
+            vals.append(v)
+    # Also add from real process env (explicit deny only)
+    for k in EXPLICIT_DENY:
+        v = os.environ.get(k)
+        if v and v not in vals:
+            vals.append(v)
+    # Keep only reasonable length strings
+    return [s for s in vals if 4 <= len(s) <= 200]
+
+
+def redact(text: str, secrets: List[str]) -> str:
+    out = text
+    for s in secrets:
+        out = out.replace(s, "****REDACTED****")
+    return out
+
+
+# =============================================================================
+# Docker sandbox
+# =============================================================================
+
+class DockerSandbox:
+    """
+    Manages a persistent Docker container to run all build commands safely.
+    - Runs as host user (non-root) when possible.
+    - Drops capabilities, sets resource limits.
+    - Restarts on command timeout to guarantee a clean state.
+    """
+
+    def __init__(self, image: str, mount_host_dir: str, workdir: str = "/workspace"):
+        self.client = docker.from_env()
+        self.image = image
+        self.workdir = workdir
+        self.mount_host_dir = mount_host_dir
+        self.container = None
+
+        # Configurable via env
+        self.network_mode = os.getenv("BUILDER_DOCKER_NETWORK", "bridge")
+        self.mem_limit = os.getenv("BUILDER_DOCKER_MEMORY", "4g")
+        cpus_env = os.getenv("BUILDER_DOCKER_CPUS", "2")
+        try:
+            # Docker Python SDK expects nano_cpus as int (e.g., 2 CPUs => 2e9)
+            self.nano_cpus = int(float(cpus_env) * 1_000_000_000)
+        except Exception:
+            self.nano_cpus = 2_000_000_000
+        self.readonly_root = os.getenv("BUILDER_DOCKER_READONLY", "0") == "1"
+
+    def start(self):
+        # Pull image (best effort)
+        try:
+            self.client.images.pull(self.image)
+        except Exception as e:
+            logger.warning(f"Image pull warning for {self.image}: {e}")
+
+        # Use host UID:GID to avoid root-owned files on the volume
+        uidgid = None
+        try:
+            uidgid = f"{os.getuid()}:{os.getgid()}"  # Linux/Unix
+        except Exception:
+            uidgid = None  # On Windows/macOS (no getuid) -> fall back to default
+
+        kwargs = {
+            "image": self.image,
+            "command": "sleep infinity",
+            "detach": True,
+            "working_dir": self.workdir,
+            "volumes": {self.mount_host_dir: {"bind": self.workdir, "mode": "rw"}},
+            "network_mode": self.network_mode,
+            "mem_limit": self.mem_limit,
+            "nano_cpus": self.nano_cpus,
+            "tty": False,
+            "security_opt": ["no-new-privileges"],
+            "cap_drop": ["ALL"],
+            "read_only": self.readonly_root,
+        }
+        if uidgid:
+            kwargs["user"] = uidgid
+        if self.readonly_root:
+            kwargs["tmpfs"] = {"/tmp": "", "/run": ""}
+
+        self.container = self.client.containers.run(**kwargs)
+        logger.info(f"Docker started: {self.container.short_id} ({self.image}) -> {self.mount_host_dir}:/workspace")
+
+    def stop(self):
+        if self.container:
+            try:
+                self.container.kill()
+            except Exception:
+                pass
+            try:
+                self.container.remove(force=True)
+            except Exception:
+                pass
+            logger.info("Docker sandbox stopped")
+            self.container = None
+
+    def exec(self, cmd: str, timeout: int = 600, environment: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+        """Run a shell command inside the container with a timeout; auto-restart on timeout."""
+        assert self.container, "Sandbox not started"
+        full_cmd = f"bash -lc {repr(cmd)}"
+        result_buf = io.StringIO()
+        exit_code: Optional[int] = None
+        done = threading.Event()
+
+        def run():
+            nonlocal exit_code
+            try:
+                exec_result = self.container.exec_run(
+                    full_cmd, stdout=True, stderr=True, demux=True, environment=environment
+                )
+                # docker SDK returns an object with `exit_code` & `output` when demux=False,
+                # with demux=True we get exit_code & (stdout, stderr)
+                if hasattr(exec_result, "exit_code"):
+                    exit_code = exec_result.exit_code
+                    out, err = exec_result.output if hasattr(exec_result, "output") else (b"", b"")
+                else:
+                    # older SDK tuple shape
+                    exit_code, (out, err) = exec_result
+                text = ""
+                if out:
+                    text += out.decode("utf-8", errors="ignore")
+                if err:
+                    text += err.decode("utf-8", errors="ignore")
+                text = ANSI_RE.sub("", text)
+                result_buf.write(text)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        if not done.wait(timeout):
+            # Hard reset container to guarantee no runaway processes
+            try:
+                self.stop()
+            finally:
+                try:
+                    self.start()
+                except Exception as _:
+                    pass
+            text = result_buf.getvalue() + f"\n[TIMEOUT after {timeout}s - container restarted]"
+            return 124, text
+
+        return exit_code or 0, result_buf.getvalue()
+
+
+# =============================================================================
+# Build State (logging & stats)
+# =============================================================================
+
+class BuildState:
+    """Tracks build state, environment, and logs per-command outputs and indices."""
+
+    def __init__(self, working_dir: str, logs_dir: Optional[str] = None):
+        self.working_dir = working_dir
+        self.logs_dir = logs_dir or _init_run_logs(working_dir)
+        os.makedirs(self.logs_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.logs_dir, "commands"), exist_ok=True)
+        os.makedirs(os.path.join(self.working_dir, ".tmp"), exist_ok=True)
+
+        # Host base env (sanitized) and user-provided overrides tracked separately
+        self.host_env = make_sanitized_env(os.environ.copy())
+        self.env_overrides: Dict[str, str] = {}
+        self.start_time = datetime.now()
+        self.command_seq = 0
+        self.commands_executed: List[Dict[str, Any]] = []
+        self.commands_failed: List[Dict[str, Any]] = []
+
+        # Files we maintain:
+        self.index_path = os.path.join(self.logs_dir, "commands.jsonl")
+        self.trace_path = os.path.join(self.logs_dir, "agent_trace.log")
+        self.token_usage_path = os.path.join(self.logs_dir, "token_usage.json")
+
+    def _write(self, path: str, text: str, append: bool = True):
+        mode = "a" if append else "w"
+        with open(path, mode, encoding="utf-8") as f:
+            f.write(text)
+
+    def record(self, command: str, success: bool, output: str, return_code: int):
+        """Record a command execution and write per-step logs + index entry."""
+        self.command_seq += 1
+        record = {
+            "seq": self.command_seq,
+            "command": command,
+            "success": success,
+            "return_code": return_code,
+            "timestamp": datetime.now().isoformat()
+        }
+        # Keep aggregated stats in memory
+        (self.commands_executed if success else self.commands_failed).append(record)
+
+        # Write full output to a dedicated log file
+        cmd_slug = _slug(command)
+        step_log_path = os.path.join(self.logs_dir, "commands", f"{self.command_seq:03d}_{cmd_slug}.log")
+        with open(step_log_path, "w", encoding="utf-8") as f:
+            f.write(output)
+
+        # Append to commands.jsonl index (easy to query later)
+        index_entry = {**record, "log_file": step_log_path}
+        self._write(self.index_path, json.dumps(index_entry) + "\n", append=True)
+
+    def summary_dict(self) -> Dict[str, Any]:
+        duration = (datetime.now() - self.start_time).total_seconds()
+        return {
+            "working_directory": self.working_dir,
+            "duration_seconds": round(duration, 2),
+            "commands_succeeded": len(self.commands_executed),
+            "commands_failed": len(self.commands_failed),
+            "total_commands": len(self.commands_executed) + len(self.commands_failed)
+        }
+
+    def get_summary(self) -> str:
+        return json.dumps(self.summary_dict(), indent=2)
+
+
+# =============================================================================
+# File-based agent trace handler
+# =============================================================================
 
 class FormattedOutputHandler(BaseCallbackHandler):
-    """Custom callback handler to format agent output with proper spacing and track token usage."""
+    """Pretty prints agent Thought/Action/Observation and writes to agent_trace.log + token usage."""
 
-    def __init__(self):
+    def __init__(self, logs_dir: Optional[str] = None):
         super().__init__()
+        self.logs_dir = logs_dir
         self.token_usage = {"input": 0, "output": 0, "total": 0}
-        self.commands_executed = []
+
+    def _append_trace(self, text: str):
+        if not self.logs_dir:
+            return
+        trace_path = os.path.join(self.logs_dir, "agent_trace.log")
+        with open(trace_path, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
 
     def on_agent_action(self, action, **kwargs):
-        """Called when agent takes an action."""
-        print(f"\n{'─'*70}")
-        print(f"[THOUGHT] {action.log.split('Action:')[0].strip() if 'Action:' in action.log else action.log.strip()}")
-        print(f"\n[ACTION] {action.tool}")
-        print(f"[INPUT] {action.tool_input}")
-        print(f"{'─'*70}")
+        block = (
+            f"\n{'─'*70}\n"
+            f"[THOUGHT] {action.log.split('Action:')[0].strip() if 'Action:' in action.log else action.log.strip()}\n\n"
+            f"[ACTION] {action.tool}\n"
+            f"[INPUT] {action.tool_input}\n"
+            f"{'─'*70}"
+        )
+        print(block)
+        self._append_trace(block)
 
     def on_tool_end(self, output, **kwargs):
-        """Called when tool finishes."""
         output_str = str(output)
-        
-        # For command execution, show more output (up to 3000 chars)
-        # For other tools, keep it shorter
-        if '"command":' in output_str or '"success":' in output_str:
-            # This is likely a command execution result
-            max_length = 3000
-        else:
-            max_length = 1000
-        
-        if len(output_str) > max_length:
-            # Show first and last parts
-            half = max_length // 2
-            output_preview = output_str[:half] + f"\n\n... [OUTPUT TRUNCATED - {len(output_str)} total chars] ...\n\n" + output_str[-half:]
-        else:
-            output_preview = output_str
-        
-        print(f"\n[OBSERVATION] {output_preview}\n")
+        # Print and log full output (no truncation)
+        print(f"\n[OBSERVATION] {output_str}\n")
+        self._append_trace(f"\n[OBSERVATION] {output_str}\n")
 
     def on_llm_end(self, response, **kwargs):
-        """Called when LLM finishes - capture token usage."""
         if hasattr(response, 'llm_output') and response.llm_output:
             usage = response.llm_output.get('token_usage', {})
             if usage:
                 self.token_usage["input"] += usage.get('prompt_tokens', 0)
                 self.token_usage["output"] += usage.get('completion_tokens', 0)
                 self.token_usage["total"] += usage.get('total_tokens', 0)
+                if self.logs_dir:
+                    with open(os.path.join(self.logs_dir, "token_usage.json"), "w", encoding="utf-8") as f:
+                        json.dump(self.token_usage, f, indent=2)
 
 
-# ============================================================================
-# Path Resolution Infrastructure
-# ============================================================================
-
-# Global variable to track the current working directory for build operations
-BUILD_WORKING_DIRECTORY = None
-
-
-def _resolve_path(user_path: str) -> str:
-    """
-    Convert user-provided paths to absolute paths using build working directory.
-
-    Args:
-        user_path: Path provided by the user (can be relative or absolute)
-
-    Returns:
-        Absolute path resolved against build working directory if set
-    """
-    if BUILD_WORKING_DIRECTORY is None:
-        return user_path
-
-    # If user provides absolute path, use it directly
-    if os.path.isabs(user_path):
-        return user_path
-
-    # Special case: "." refers to the build working directory itself
-    if user_path == ".":
-        return BUILD_WORKING_DIRECTORY
-
-    # Otherwise, resolve relative to build working directory
-    return os.path.join(BUILD_WORKING_DIRECTORY, user_path)
-
-
-# ============================================================================
-# Build Execution State
-# ============================================================================
-
-class BuildState:
-    """Track the state of the build process."""
-    
-    def __init__(self, working_dir: str):
-        self.working_dir = working_dir
-        self.commands_executed = []
-        self.commands_failed = []
-        self.start_time = datetime.now()
-        # Use full environment including PATH
-        self.env_vars = os.environ.copy()
-        # Ensure common paths are included
-        if 'PATH' in self.env_vars:
-            # Add common binary locations if not already present
-            common_paths = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/local/sbin', '/usr/sbin', '/sbin']
-            current_paths = self.env_vars['PATH'].split(':')
-            for path in common_paths:
-                if path not in current_paths:
-                    current_paths.append(path)
-            self.env_vars['PATH'] = ':'.join(current_paths)
-        
-    def add_command(self, command: str, success: bool, output: str, return_code: int):
-        """Record a command execution."""
-        record = {
-            "command": command,
-            "success": success,
-            "output": output,
-            "return_code": return_code,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        if success:
-            self.commands_executed.append(record)
-        else:
-            self.commands_failed.append(record)
-            
-    def get_summary(self) -> str:
-        """Get a summary of the build process."""
-        duration = (datetime.now() - self.start_time).total_seconds()
-        return json.dumps({
-            "working_directory": self.working_dir,
-            "duration_seconds": round(duration, 2),
-            "commands_succeeded": len(self.commands_executed),
-            "commands_failed": len(self.commands_failed),
-            "total_commands": len(self.commands_executed) + len(self.commands_failed)
-        }, indent=2)
-
-
-# Global build state
-BUILD_STATE = None
-
-
-# ============================================================================
-# Tool Functions
-# ============================================================================
+# =============================================================================
+# Tool functions
+# =============================================================================
 
 def execute_command(command: str) -> str:
     """
-    Execute a shell command in the build working directory.
-    
-    Args:
-        command: Shell command to execute (e.g., "npm install", "cargo build")
-        
-    Returns:
-        JSON with command output, return code, and success status
+    Execute a shell command in the build working directory (Docker if enabled).
+
+    Returns a JSON string with fields: success, command, rc, output (redacted, truncated for JSON),
+    and working_directory.
     """
-    global BUILD_STATE
-    
+    global BUILD_STATE, DOCKER_SANDBOX, USE_DOCKER
+
     try:
         working_dir = BUILD_WORKING_DIRECTORY or os.getcwd()
         logger.info(f"Executing command in {working_dir}: {command}")
-        
-        # Debug: Log PATH being used (only for first few commands)
-        if BUILD_STATE and len(BUILD_STATE.commands_executed) < 2:
-            logger.info(f"PATH being used: {BUILD_STATE.env_vars.get('PATH', 'NOT SET')}")
-        
-        # Security: Basic validation to prevent dangerous commands and sudo
-        dangerous_patterns = ['rm -rf /', 'dd if=', 'mkfs', 'format', ':(){:|:&};:']
-        if any(pattern in command.lower() for pattern in dangerous_patterns):
-            error_msg = f"Command rejected for safety: {command}"
-            logger.warning(error_msg)
+
+        # Deny obviously dangerous shapes
+        if command.strip().startswith("sudo "):
+            err = "sudo commands are blocked - cannot run interactive commands that require password"
+            logger.warning(err)
             if BUILD_STATE:
-                BUILD_STATE.add_command(command, False, error_msg, -1)
-            return json.dumps({
-                "success": False,
-                "command": command,
-                "error": "Command rejected for safety reasons",
-                "return_code": -1
-            }, indent=2)
-        
-        # Block sudo commands - they require password and will hang
-        if command.strip().startswith('sudo '):
-            error_msg = f"sudo commands are not allowed - they require password input. If a tool is missing, report the error instead of trying to install it."
-            logger.warning(error_msg)
+                BUILD_STATE.record(command, False, err, -1)
+            return json.dumps({"success": False, "command": command, "error": err, "rc": -1}, indent=2)
+        if DANGEROUS_REGEX.search(command):
+            err = f"Command rejected for safety: {command}"
+            logger.warning(err)
             if BUILD_STATE:
-                BUILD_STATE.add_command(command, False, error_msg, -1)
-            return json.dumps({
-                "success": False,
-                "command": command,
-                "error": "sudo commands are blocked - cannot run interactive commands that require password",
-                "return_code": -1
-            }, indent=2)
-        
-        # Execute command
-        result = subprocess.run(
-            command,
-            shell=True,
-            executable='/bin/bash',  # Force bash instead of default /bin/sh
-            cwd=working_dir,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 minute timeout
-            env=BUILD_STATE.env_vars if BUILD_STATE else None
-        )
-        
-        success = result.returncode == 0
-        output = result.stdout + result.stderr
-        
-        # Record in build state
+                BUILD_STATE.record(command, False, err, -1)
+            return json.dumps({"success": False, "command": command, "error": err, "rc": -1}, indent=2)
+
+        # Exec in Docker or locally
+        if USE_DOCKER and DOCKER_SANDBOX:
+            # Pass only explicit overrides; do not clobber container default PATH
+            env_for_container = (BUILD_STATE.env_overrides if BUILD_STATE and BUILD_STATE.env_overrides else None)
+            rc, combined = DOCKER_SANDBOX.exec(command, timeout=600, environment=env_for_container)
+            success = (rc == 0)
+            output = combined
+            result_code = rc
+        else:
+            # Local fallback (rare): we keep it simple but safe
+            try:
+                # Use Popen to be able to enforce timeouts and potentially kill group if extended
+                proc = subprocess.run(
+                    command,
+                    shell=True,
+                    executable="/bin/bash",
+                    cwd=working_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    env={(BUILD_STATE.host_env if BUILD_STATE else os.environ) | (BUILD_STATE.env_overrides if BUILD_STATE else {})}
+                )
+                success = proc.returncode == 0
+                output = proc.stdout + proc.stderr
+                result_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                success = False
+                result_code = 124
+                output = f"[TIMEOUT after 600s] {command}"
+
+        # Redact secrets from outputs before logging
+        combined_env = {}
         if BUILD_STATE:
-            BUILD_STATE.add_command(command, success, output, result.returncode)
-        
-        # Log detailed error for debugging
-        if not success:
-            logger.error(f"Command failed: {command}")
-            logger.error(f"Return code: {result.returncode}")
-            logger.error(f"Stdout: {result.stdout}")
-            logger.error(f"Stderr: {result.stderr}")
-        
-        # Truncate very long output (only if extremely large)
-        if len(output) > 50000:
-            output = output[:25000] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + output[-25000:]
-        
+            combined_env = (BUILD_STATE.host_env | BUILD_STATE.env_overrides)
+        secrets = _compiled_secret_values(combined_env)
+        output_redacted = redact(output, secrets)
+
+        # Truncate extremely large output for the JSON return; keep full in file log
+        json_preview = output_redacted
+        if len(json_preview) > 50_000:
+            json_preview = json_preview[:25_000] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + json_preview[-25_000:]
+
+        # Record to state (writes per-command file + index)
+        if BUILD_STATE:
+            BUILD_STATE.record(command, success, output_redacted, result_code)
+
         response = {
             "success": success,
             "command": command,
-            "return_code": result.returncode,
-            "output": output,
+            "rc": result_code,
+            "output": json_preview,
             "working_directory": working_dir
         }
-        
-        logger.info(f"Command {'succeeded' if success else 'failed'} with return code {result.returncode}")
+        logger.info(f"Command {'succeeded' if success else 'failed'} with return code {result_code}")
         return json.dumps(response, indent=2)
-        
-    except subprocess.TimeoutExpired:
-        error_msg = f"Command timed out after 600 seconds: {command}"
-        logger.error(error_msg)
-        if BUILD_STATE:
-            BUILD_STATE.add_command(command, False, error_msg, -1)
-        return json.dumps({
-            "success": False,
-            "command": command,
-            "error": "Command timed out after 600 seconds",
-            "return_code": -1
-        }, indent=2)
+
     except Exception as e:
-        error_msg = f"Error executing command: {str(e)}"
-        logger.error(error_msg)
+        msg = f"Error executing command: {e}"
+        logger.error(msg)
         if BUILD_STATE:
-            BUILD_STATE.add_command(command, False, error_msg, -1)
-        return json.dumps({
-            "success": False,
-            "command": command,
-            "error": str(e),
-            "return_code": -1
-        }, indent=2)
+            BUILD_STATE.record(command, False, msg, -1)
+        return json.dumps({"success": False, "command": command, "error": str(e), "rc": -1}, indent=2)
 
 
 def set_environment_variable(input_str: str) -> str:
     """
-    Set an environment variable for subsequent commands.
-    
-    Args:
-        input_str: Format "KEY=VALUE" or "KEY=VALUE,KEY2=VALUE2"
-                   Example: "NODE_ENV=production" or "CC=gcc,CXX=g++"
-        
-    Returns:
-        JSON with success status
+    Set environment variables for subsequent commands.
+    Input format: "KEY=VALUE" or "KEY=VALUE,KEY2=VALUE2"
     """
     global BUILD_STATE
-    
     try:
         if not BUILD_STATE:
-            return json.dumps({
-                "success": False,
-                "error": "Build state not initialized"
-            }, indent=2)
-        
-        # Parse environment variables
-        env_pairs = []
-        for pair in input_str.split(','):
-            if '=' not in pair:
-                return json.dumps({
-                    "success": False,
-                    "error": f"Invalid format: {pair}. Use KEY=VALUE"
-                }, indent=2)
-            
-            key, value = pair.split('=', 1)
-            key = key.strip()
-            value = value.strip()
-            
-            BUILD_STATE.env_vars[key] = value
-            env_pairs.append({"key": key, "value": value})
-            logger.info(f"Set environment variable: {key}={value}")
-        
-        return json.dumps({
-            "success": True,
-            "variables_set": env_pairs
-        }, indent=2)
-        
+            return json.dumps({"success": False, "error": "Build state not initialized"}, indent=2)
+
+        env_pairs_masked: List[Dict[str, str]] = []
+        # Parse and set
+        for pair in filter(None, [p.strip() for p in input_str.split(",")]):
+            if "=" not in pair:
+                return json.dumps({"success": False, "error": f"Invalid format: {pair}. Use KEY=VALUE"}, indent=2)
+            key, value = pair.split("=", 1)
+            key, value = key.strip(), value.strip()
+            BUILD_STATE.env_overrides[key] = value
+            masked = "****REDACTED****" if SENSITIVE_NAME_PATTERNS.search(key) else value
+            env_pairs_masked.append({"key": key, "value": masked})
+            logger.info(f"Set environment variable: {key}={masked}")
+
+        # Persist the action log
+        if BUILD_STATE.logs_dir:
+            try:
+                path = os.path.join(BUILD_STATE.logs_dir, f"env-{datetime.now().strftime('%H%M%S')}.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"action": "set_env", "variables": env_pairs_masked, "ts": datetime.now().isoformat()}, f, indent=2)
+            except Exception:
+                pass
+
+        return json.dumps({"success": True, "variables_set": env_pairs_masked}, indent=2)
+
     except Exception as e:
         logger.error(f"Error setting environment variable: {e}")
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        }, indent=2)
+        return json.dumps({"success": False, "error": str(e)}, indent=2)
 
 
-def get_build_status() -> str:
-    """
-    Get current build status and summary.
-    
-    Returns:
-        JSON with build statistics and command history
-    """
+def get_build_status(_: str = "") -> str:
+    """Return current build status and summary as a JSON string."""
     global BUILD_STATE
-    
     if not BUILD_STATE:
-        return json.dumps({
-            "error": "Build state not initialized"
-        }, indent=2)
-    
+        return json.dumps({"error": "Build state not initialized"}, indent=2)
     return BUILD_STATE.get_summary()
 
 
-# ============================================================================
-# Agent Creation
-# ============================================================================
+# =============================================================================
+# Agent creation
+# =============================================================================
 
 def create_builder_agent(
     max_iterations: int = 20,
     verbose: bool = True,
-    working_directory: str = None
-):
+    working_directory: Optional[str] = None,
+    use_docker: bool = True,
+    docker_image: Optional[str] = None,
+    logs_dir: Optional[str] = None
+) -> Tuple[AgentExecutor, Optional[FormattedOutputHandler]]:
     """
-    Create and return a builder agent configured with Azure OpenAI.
-    
-    Args:
-        max_iterations: Maximum number of agent iterations
-        verbose: Whether to print agent steps
-        working_directory: Working directory for build operations
-        
-    Returns:
-        Tuple of (AgentExecutor instance, FormattedOutputHandler for accessing token usage)
+    Prepare the builder agent (LLM + tools + docker sandbox + logging).
+    Returns (AgentExecutor, FormattedOutputHandler).
     """
-    global BUILD_WORKING_DIRECTORY, BUILD_STATE
-    
-    # Set working directory
-    if working_directory:
-        BUILD_WORKING_DIRECTORY = os.path.abspath(working_directory)
-        BUILD_STATE = BuildState(BUILD_WORKING_DIRECTORY)
-        logger.info(f"Build working directory set to: {BUILD_WORKING_DIRECTORY}")
+    global BUILD_WORKING_DIRECTORY, BUILD_STATE, USE_DOCKER, DOCKER_SANDBOX
+
+    # Set working directory & build state
+    BUILD_WORKING_DIRECTORY = os.path.abspath(working_directory or os.getcwd())
+    # Initialize logs directory if not provided
+    logs_dir = logs_dir or _init_run_logs(BUILD_WORKING_DIRECTORY)
+    BUILD_STATE = BuildState(BUILD_WORKING_DIRECTORY, logs_dir=logs_dir)
+    logger.info(f"Working directory: {BUILD_WORKING_DIRECTORY}")
+    logger.info(f"Logs directory:    {logs_dir}")
+
+    # Docker
+    USE_DOCKER = use_docker
+    if USE_DOCKER:
+        try:
+            chosen_image = docker_image or _select_base_image(BUILD_WORKING_DIRECTORY)
+            DOCKER_SANDBOX = DockerSandbox(image=chosen_image, mount_host_dir=BUILD_WORKING_DIRECTORY, workdir="/workspace")
+            DOCKER_SANDBOX.start()
+            logger.info(f"Docker sandbox started with image {chosen_image}, mounting {BUILD_WORKING_DIRECTORY} -> /workspace")
+        except Exception as e:
+            raise RuntimeError(f"Failed to start Docker sandbox: {e}")
     else:
-        BUILD_WORKING_DIRECTORY = os.getcwd()
-        BUILD_STATE = BuildState(BUILD_WORKING_DIRECTORY)
-        logger.info(f"Using current directory: {BUILD_WORKING_DIRECTORY}")
-    
-    logger.info("Creating builder agent...")
-    
-    # Get configuration from environment
+        DOCKER_SANDBOX = None
+        logger.info("Docker disabled; running commands on host (not recommended).")
+
+    # LLM
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    
     if not api_key:
         raise ValueError("Missing OPENAI_API_KEY environment variable. Please check your .env file.")
-    
-    # Initialize OpenAI
-    llm = ChatOpenAI(
-        model=model,
-        api_key=api_key,
-        temperature=0
-    )
-    
-    # Define tools - minimal set for build execution
+    llm = ChatOpenAI(model=model, api_key=api_key, temperature=0)
+
+    # Tools
     tools = [
         Tool(
             name="ExecuteCommand",
             func=execute_command,
-            description="Execute a shell command in the working directory. Input: command string (e.g., 'npm install', 'cargo build --release', 'make', 'python setup.py install'). Returns output, return code, and success status. Use this to run all build commands, install dependencies, compile code, run tests, etc."
+            description="Execute a shell command in the working directory. Input: command string (e.g., 'npm install', 'cargo build --release', 'make', 'python -m pytest'). Returns JSON with success, rc, and output."
         ),
         Tool(
             name="SetEnvironmentVariable",
             func=set_environment_variable,
-            description="Set environment variables for subsequent commands. Input: 'KEY=VALUE' or 'KEY=VALUE,KEY2=VALUE2' (comma-separated for multiple). Example: 'NODE_ENV=production' or 'CC=gcc,CXX=g++'. Useful for configuring build environment."
+            description="Set environment variables for subsequent commands. Input: 'KEY=VALUE' or 'KEY=VALUE,KEY2=VALUE2'. Sensitive keys are redacted from logs."
         ),
         Tool(
             name="GetBuildStatus",
             func=get_build_status,
-            description="Get current build status with command history and statistics. No input required. Shows commands executed, successes, failures, and timing information."
+            description="Get current build summary. No input."
         )
     ]
-    
-    # Custom ReAct prompt for builder agent
+
+    # Prompt
     template = """You are a builder agent that executes build instructions to compile and build software projects.
 
 IMPORTANT CONTEXT:
 - The repository is ALREADY CLONED at: {working_directory}
 - You are working inside the repository - DO NOT clone it again
-- Skip any "clone repository" or "git clone" steps in the instructions
 - Start directly with installation, dependency setup, or build commands
 
 Available tools: {tool_names}
@@ -439,79 +645,49 @@ Available tools: {tool_names}
 {tools}
 
 BUILD EXECUTION APPROACH:
-1. SKIP CLONING: The repository is already present, start with setup/install steps
-2. SET ENVIRONMENT: Use SetEnvironmentVariable if build requires specific env vars
-3. RUN COMMANDS: Use ExecuteCommand to run build steps (install, compile, test, etc.)
-4. HANDLE ERRORS: If a command fails, analyze the error output and try to resolve
-5. CHECK STATUS: Use GetBuildStatus to review progress when needed
-6. REPORT: Provide clear feedback on success or failure of the build
+1. SET ENVIRONMENT: Use SetEnvironmentVariable if build requires specific env vars
+2. RUN COMMANDS: Use ExecuteCommand to run build steps (install, compile, test, etc.)
+3. HANDLE ERRORS: If a command fails, analyze the error output and try to resolve
+4. CHECK STATUS: Use GetBuildStatus to review progress when needed
+5. REPORT: Provide a clear Final Answer with the outcome
 
-CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
-1. After "Action:", you MUST write "Action Input:" on the next line
+CRITICAL FORMAT RULES (FOLLOW EXACTLY):
+1. After "Action:", write "Action Input:" on the next line
 2. After "Action Input:", write the input WITHOUT quotes
 3. After "Action Input:", STOP IMMEDIATELY - do not write anything else
 4. Do NOT write "Observation:" - the system provides it
 5. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
 
 COMMAND EXECUTION GUIDELINES:
-- The repository is already at {working_directory} - you're working inside it
-- Run commands one at a time and check their output
-- If a command fails with "command not found" (return code 127), try using 'which <command>' to locate it
-- If 'which' finds the command, use the full path (e.g., '/usr/bin/node' instead of 'node')
-- Common issues: missing dependencies, wrong environment variables, incorrect permissions
-- You can use shell commands to check prerequisites (e.g., 'which npm', 'python --version')
+- The repository is at {working_directory}
+- Run commands one at a time and check output
+- If 'command not found' (rc=127), try 'which <command>'
+- Common issues: missing dependencies, wrong env vars, permissions
 
-CORRECT FORMAT EXAMPLES:
-
-Example 1 - Checking prerequisites:
-Thought: I should verify that Node.js is installed before proceeding.
+Example:
+Thought: I should verify Node.js is installed.
 Action: ExecuteCommand
 Action Input: node --version
 
-Example 2 - Installing dependencies:
-Thought: Now I will install the dependencies using npm install.
-Action: ExecuteCommand
-Action Input: npm install
-
-Example 3 - Setting environment variable:
-Thought: The build requires NODE_ENV to be set to production.
-Action: SetEnvironmentVariable
-Action Input: NODE_ENV=production
-
-Example 4 - Checking build status:
-Thought: Let me check the build status to see how many commands have been executed.
-Action: GetBuildStatus
-Action Input: 
-
-Example 5 - Providing final answer:
-Thought: All build steps completed successfully. The project has been built.
-Final Answer: Build completed successfully. Executed 5 commands: npm install, npm run build, npm test. All tests passed. Build artifacts are in the dist/ directory.
-
-SAFETY NOTES:
-- Dangerous commands (rm -rf /, format, etc.) are automatically blocked
-- Commands have a 10-minute timeout
-- All commands run in the specified working directory: {working_directory}
-
-Now begin!
+Now begin.
 
 Build Instructions (NOTE: Repository is already cloned at {working_directory}, skip any clone/checkout steps):
 {input}
 
 Thought:{agent_scratchpad}"""
-    
     prompt = PromptTemplate.from_template(template)
-    
-    # Create the agent
+
+    # Agent
     agent = create_react_agent(llm, tools, prompt)
-    
-    # Create agent executor with custom callback
-    callback_handler = FormattedOutputHandler() if verbose else None
+
+    # Callback
+    callback_handler = FormattedOutputHandler(logs_dir=logs_dir) if verbose else None
     callbacks = [callback_handler] if callback_handler else []
-    
+
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
-        verbose=False,  # Disable default verbose output
+        verbose=False,
         callbacks=callbacks,
         handle_parsing_errors=True,
         max_iterations=max_iterations,
@@ -519,158 +695,295 @@ Thought:{agent_scratchpad}"""
         early_stopping_method="generate",
         return_intermediate_steps=True
     )
-    
+
     logger.info("Builder agent created successfully")
     return agent_executor, callback_handler
 
 
-# ============================================================================
-# Main Execution Function
-# ============================================================================
+# =============================================================================
+# Logging integrity check
+# =============================================================================
+
+def verify_logging_integrity(logs_dir: str, expected_seq: int) -> Dict[str, Any]:
+    """
+    Verify that:
+      - commands.jsonl has 'expected_seq' lines,
+      - each index entry's log_file exists,
+      - agent_trace.log exists and is non-empty,
+      - token_usage.json exists,
+      - summary files are present.
+    Returns a dict with results.
+    """
+    results = {
+        "ok": True,
+        "issues": [],
+        "counts": {}
+    }
+
+    idx_path = os.path.join(logs_dir, "commands.jsonl")
+    trace_path = os.path.join(logs_dir, "agent_trace.log")
+    token_path = os.path.join(logs_dir, "token_usage.json")
+    summary_path = os.path.join(logs_dir, "build_summary.json")
+    execres_path = os.path.join(logs_dir, "execution_result.json")
+
+    # commands.jsonl check
+    idx_lines: List[str] = []
+    if os.path.exists(idx_path):
+        with open(idx_path, "r", encoding="utf-8") as f:
+            idx_lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        results["counts"]["commands_indexed"] = len(idx_lines)
+        if len(idx_lines) != expected_seq:
+            results["ok"] = False
+            results["issues"].append(f"commands.jsonl line count {len(idx_lines)} != expected {expected_seq}")
+    else:
+        results["ok"] = False
+        results["issues"].append("Missing commands.jsonl")
+
+    # Log files existence
+    missing_logs = 0
+    for ln in idx_lines:
+        try:
+            entry = json.loads(ln)
+            log_file = entry.get("log_file")
+            if not log_file or not os.path.exists(log_file):
+                missing_logs += 1
+        except Exception:
+            missing_logs += 1
+    if missing_logs:
+        results["ok"] = False
+        results["issues"].append(f"{missing_logs} command log files missing")
+
+    # Trace
+    if not (os.path.exists(trace_path) and os.path.getsize(trace_path) > 0):
+        results["ok"] = False
+        results["issues"].append("agent_trace.log missing or empty")
+
+    # Token usage
+    if not os.path.exists(token_path):
+        results["issues"].append("token_usage.json missing (not fatal)")
+
+    # Summaries
+    if not os.path.exists(summary_path):
+        results["issues"].append("build_summary.json missing (not fatal)")
+    if not os.path.exists(execres_path):
+        results["issues"].append("execution_result.json missing (not fatal)")
+
+    return results
+
+
+# =============================================================================
+# Main execution function
+# =============================================================================
 
 def execute_build(
     repository_path: str,
     instructions_file: str,
-    github_url: str = None,
+    github_url: Optional[str] = None,
     max_iterations: int = 20,
-    verbose: bool = True
+    verbose: bool = True,
+    use_docker: bool = True,
+    docker_image: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Execute build instructions using the builder agent.
-    
-    Args:
-        repository_path: Path where the repository should be/is located
-        instructions_file: Path to markdown file containing build instructions
-        github_url: Optional GitHub URL to clone. If provided, clones repo to repository_path
-        max_iterations: Maximum number of agent iterations
-        verbose: Whether to print detailed output
-        
-    Returns:
-        Dictionary with build results, including success status, output, and statistics
+
+    Returns a dict with final status, output, build_summary, token_usage, intermediate_steps, paths, and logging_integrity.
     """
+    global DOCKER_SANDBOX, USE_DOCKER, BUILD_STATE
+
+    run_logs_dir = None
+
     try:
-        # If GitHub URL provided, clone the repository first
+        # Optionally clone repository into repository_path (safe delete if necessary)
         if github_url:
             logger.info(f"Cloning repository from {github_url} to {repository_path}")
-            
-            # Check if directory already exists
+
             if os.path.exists(repository_path):
                 if os.path.isdir(repository_path) and os.listdir(repository_path):
-                    # Directory exists and is not empty
-                    logger.warning(f"Directory {repository_path} already exists and is not empty. Removing...")
-                    shutil.rmtree(repository_path)
+                    logger.warning(f"Directory {repository_path} already exists and is not empty. Removing safely...")
+                    _safe_rmtree(repository_path, allowed_base=os.path.dirname(repository_path))
                 elif os.path.isfile(repository_path):
                     raise ValueError(f"Path exists but is a file, not a directory: {repository_path}")
-            
-            # Create parent directory if it doesn't exist
+
             parent_dir = os.path.dirname(repository_path)
             if parent_dir and not os.path.exists(parent_dir):
                 os.makedirs(parent_dir, exist_ok=True)
-            
-            # Clone the repository
+
             clone_result = subprocess.run(
-                ['git', 'clone', github_url, repository_path],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout for cloning
+                ["git", "clone", github_url, repository_path],
+                capture_output=True, text=True, timeout=300
             )
-            
             if clone_result.returncode != 0:
                 raise ValueError(f"Failed to clone repository: {clone_result.stderr}")
-            
             logger.info(f"Successfully cloned repository to {repository_path}")
-        
+
         # Validate paths
         if not os.path.exists(repository_path):
             raise ValueError(f"Repository path does not exist: {repository_path}")
-        
         if not os.path.isdir(repository_path):
             raise ValueError(f"Repository path is not a directory: {repository_path}")
-        
         if not os.path.exists(instructions_file):
             raise ValueError(f"Instructions file does not exist: {instructions_file}")
-        
-        # Read instructions from markdown file
+
+        # Read instructions
         logger.info(f"Reading instructions from: {instructions_file}")
-        with open(instructions_file, 'r', encoding='utf-8') as f:
+        with open(instructions_file, "r", encoding="utf-8") as f:
             instructions = f.read()
-        
         if not instructions.strip():
             raise ValueError(f"Instructions file is empty: {instructions_file}")
-        
+
         logger.info(f"Starting build execution in {repository_path}")
         logger.info(f"Instructions length: {len(instructions)} characters")
-        
+
+        # Prepare logs directory per run now (so handler can write there)
+        run_logs_dir = _init_run_logs(repository_path)
+
         # Create agent
         agent_executor, callback_handler = create_builder_agent(
             max_iterations=max_iterations,
             verbose=verbose,
-            working_directory=repository_path
+            working_directory=repository_path,
+            use_docker=use_docker,
+            docker_image=docker_image,
+            logs_dir=run_logs_dir
         )
-        
+
         # Execute build
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print("BUILDER AGENT - Starting Execution")
         if github_url:
             print(f"Cloned from: {github_url}")
         print(f"Repository: {repository_path}")
         print(f"Instructions: {instructions_file}")
-        print("="*70 + "\n")
-        
-        result = agent_executor.invoke({
-            "input": instructions,
-            "working_directory": repository_path
-        })
-        
-        print("\n" + "="*70)
+        print("=" * 70 + "\n")
+
+        try:
+            result = agent_executor.invoke({
+                "input": instructions,
+                "working_directory": repository_path
+            })
+        finally:
+            # Ensure Docker sandbox is stopped
+            if USE_DOCKER and DOCKER_SANDBOX:
+                try:
+                    DOCKER_SANDBOX.stop()
+                except Exception:
+                    pass
+
+        print("\n" + "=" * 70)
         print("BUILDER AGENT - Execution Complete")
-        print("="*70 + "\n")
-        
-        # Get build summary
-        build_summary = json.loads(get_build_status())
-        
+        print("=" * 70 + "\n")
+
+        # Build summary
+        build_summary = json.loads(get_build_status())  # get_build_status returns JSON string
+
+        # Compute success from actual execution: at least one command ran and none failed
+        ran_any = bool(BUILD_STATE and getattr(BUILD_STATE, "command_seq", 0) > 0)
+        num_failed = int(BUILD_STATE and len(getattr(BUILD_STATE, "commands_failed", [])) or 0)
+        no_failures = num_failed == 0
+        success_flag = ran_any and no_failures
+
         # Compile results
         execution_result = {
-            "success": True,
+            "success": success_flag,
             "output": result.get("output", ""),
             "build_summary": build_summary,
-            "token_usage": callback_handler.token_usage if callback_handler else {},
+            "token_usage": (callback_handler.token_usage if callback_handler else {}),
             "intermediate_steps": len(result.get("intermediate_steps", [])),
             "repository_path": repository_path,
             "instructions_file": instructions_file,
-            "github_url": github_url
+            "github_url": github_url,
+            "logs_dir": run_logs_dir
         }
-        
+
+        # Persist summaries
+        try:
+            with open(os.path.join(run_logs_dir, "build_summary.json"), "w", encoding="utf-8") as f:
+                json.dump(build_summary, f, indent=2)
+            with open(os.path.join(run_logs_dir, "token_usage.json"), "w", encoding="utf-8") as f:
+                json.dump(callback_handler.token_usage if callback_handler else {}, f, indent=2)
+            with open(os.path.join(run_logs_dir, "execution_result.json"), "w", encoding="utf-8") as f:
+                json.dump(execution_result, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to persist summary files: {e}")
+
+        # Logging integrity check
+        integrity = verify_logging_integrity(run_logs_dir, BUILD_STATE.command_seq if BUILD_STATE else 0)
+        try:
+            with open(os.path.join(run_logs_dir, "logging_integrity.json"), "w", encoding="utf-8") as f:
+                json.dump(integrity, f, indent=2)
+        except Exception:
+            pass
+        execution_result["logging_integrity"] = integrity
+        # If integrity failed, mark as unsuccessful
+        if not integrity.get("ok", False):
+            execution_result["success"] = False
+
+        # If not successful, attach a clear error reason
+        if not execution_result["success"]:
+            reasons = []
+            if not ran_any:
+                reasons.append("no commands executed")
+            if not no_failures:
+                reasons.append(f"{num_failed} command(s) failed")
+            if not integrity.get("ok", False):
+                reasons.append("logging integrity failed")
+            execution_result["error"] = "; ".join(reasons) or "unsuccessful"
+
         # Print summary
         print("\n[BUILD SUMMARY]")
         print(json.dumps(build_summary, indent=2))
-        
         if callback_handler:
             print(f"\n[TOKEN USAGE]")
-            print(f"Input tokens: {callback_handler.token_usage['input']}")
-            print(f"Output tokens: {callback_handler.token_usage['output']}")
-            print(f"Total tokens: {callback_handler.token_usage['total']}")
-        
-        logger.info("Build execution completed successfully")
+            print(f"Input tokens: {callback_handler.token_usage.get('input', 0)}")
+            print(f"Output tokens: {callback_handler.token_usage.get('output', 0)}")
+            print(f"Total tokens: {callback_handler.token_usage.get('total', 0)}")
+
+        if execution_result.get("success"):
+            logger.info("Build execution completed successfully")
+        else:
+            logger.error(f"Build execution failed: {execution_result.get('error', 'unspecified')}")
         return execution_result
-        
+
     except Exception as e:
         logger.error(f"Build execution failed: {e}")
-        return {
+        # Try to include partial summary if available
+        partial_summary = {}
+        try:
+            partial_summary = json.loads(get_build_status()) if BUILD_STATE else {}
+        except Exception:
+            partial_summary = {}
+        # Attempt to stop sandbox
+        try:
+            if USE_DOCKER and DOCKER_SANDBOX:
+                DOCKER_SANDBOX.stop()
+        except Exception:
+            pass
+        err_result = {
             "success": False,
             "error": str(e),
-            "build_summary": json.loads(get_build_status()) if BUILD_STATE else {},
+            "build_summary": partial_summary,
             "repository_path": repository_path if 'repository_path' in locals() else None,
-            "instructions_file": instructions_file if 'instructions_file' in locals() else None
+            "instructions_file": instructions_file if 'instructions_file' in locals() else None,
+            "logs_dir": run_logs_dir
         }
+        # Persist failure
+        try:
+            if run_logs_dir:
+                with open(os.path.join(run_logs_dir, "execution_result.json"), "w", encoding="utf-8") as f:
+                    json.dump(err_result, f, indent=2)
+        except Exception:
+            pass
+        return err_result
 
+
+# =============================================================================
+# CLI
+# =============================================================================
 
 if __name__ == "__main__":
-    """
-    Example usage when run directly.
-    """
     import sys
-    
+
     if len(sys.argv) < 3:
         print("Usage: python builder.py <repository_path> <instructions_file> [github_url]")
         print("\nArguments:")
@@ -684,24 +997,23 @@ if __name__ == "__main__":
         print('  # Clone and build:')
         print('  python builder.py /path/to/repo /path/to/instructions.md https://github.com/user/repo.git')
         sys.exit(1)
-    
+
     repo_path = sys.argv[1]
     instructions_path = sys.argv[2]
     github_url = sys.argv[3] if len(sys.argv) > 3 else None
-    
-    # Execute build
+
     result = execute_build(
         repository_path=repo_path,
         instructions_file=instructions_path,
         github_url=github_url,
-        verbose=True
+        verbose=True,
+        use_docker=USE_DOCKER,
+        docker_image=os.getenv("BUILDER_DOCKER_IMAGE")  # "auto" or explicit
     )
-    
-    # Exit with appropriate code
-    if result["success"]:
+
+    if result.get("success"):
         print("\n✓ Build completed successfully!")
         sys.exit(0)
     else:
         print(f"\n✗ Build failed: {result.get('error', 'Unknown error')}")
         sys.exit(1)
-
