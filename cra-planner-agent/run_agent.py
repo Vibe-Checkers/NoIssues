@@ -11,8 +11,11 @@ import subprocess
 import shutil
 import time
 import json
+import tempfile
+import io
 from pathlib import Path
 from datetime import datetime
+from contextlib import redirect_stdout, redirect_stderr
 
 from planner_agent import create_planner_agent
 
@@ -73,7 +76,8 @@ def save_analysis_reports(
     tool_usage: dict,
     total_tokens: dict,
     duration_seconds: float,
-    callback_handler
+    callback_handler,
+    log_file_path: Path = None
 ):
     """
     Save all analysis reports, metrics, and performance data to a structured folder.
@@ -154,7 +158,7 @@ def save_analysis_reports(
             "unique_tools": len(tool_usage)
         }
     
-    # 3. Save comprehensive performance report as JSON (includes everything)
+    # 3. Save performance report as JSON
     performance_json_file = report_dir / "performance_report.json"
     try:
         with open(performance_json_file, 'w', encoding='utf-8') as f:
@@ -163,7 +167,16 @@ def save_analysis_reports(
     except Exception as e:
         print(f"[ERROR] Failed to save performance report (JSON): {e}")
     
-    # 4. Save human-readable performance report
+    # 4. Save logs file if provided
+    if log_file_path and log_file_path.exists():
+        logs_file = report_dir / "logs.txt"
+        try:
+            shutil.copy2(log_file_path, logs_file)
+            print(f"[OK] Agent logs saved: {logs_file.name}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save logs: {e}")
+    
+    # 5. Save human-readable performance report
     performance_txt_file = report_dir / "performance_report.txt"
     try:
         with open(performance_txt_file, 'w', encoding='utf-8') as f:
@@ -223,7 +236,22 @@ def save_analysis_reports(
     return report_dir
 
 
-def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, callback_handler):
+class TeeOutput:
+    """Helper class to tee output to both terminal and log file"""
+    def __init__(self, *files):
+        self.files = files
+    
+    def write(self, text):
+        for f in self.files:
+            f.write(text)
+            f.flush()
+    
+    def flush(self):
+        for f in self.files:
+            f.flush()
+
+
+def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, callback_handler, log_file_path=None):
     """
     Run analysis queries on a cloned repository.
 
@@ -233,102 +261,156 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         repo_name: Name of the repository
         repo_url: URL of the repository
         callback_handler: FormattedOutputHandler instance for token tracking
+        log_file_path: Optional path to log file for saving agent steps
     """
-    print(f"\n{'='*70}")
-    print(f"Analyzing Repository: {repo_name}")
-    print('='*70)
+    # Create temporary log file to capture all output
+    temp_log_file = None
+    if log_file_path is None:
+        temp_log_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8')
+        log_file_path = Path(temp_log_file.name)
+        temp_log_file.close()
+    
+    # Open log file for writing
+    log_file_handle = open(log_file_path, 'w', encoding='utf-8')
+    
+    # Create a tee that writes to both stdout and log file
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    
+    try:
+        # Redirect stdout and stderr to both terminal and log file
+        sys.stdout = TeeOutput(original_stdout, log_file_handle)
+        sys.stderr = TeeOutput(original_stderr, log_file_handle)
+        
+        # Reconfigure logging to use redirected stderr so INFO logs are captured
+        import logging
+        # Remove all existing handlers
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        # Create a new StreamHandler that writes to current stderr (which is now redirected)
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logging.root.addHandler(handler)
+        logging.root.setLevel(logging.INFO)
+        
+        print(f"\n{'='*70}")
+        print(f"Analyzing Repository: {repo_name}")
+        print('='*70)
 
-    # Define analysis queries using discovery-based approach with relative paths
-    queries = [
+        # Define analysis queries using discovery-based approach with relative paths
+        queries = [
         "Analyze the repository. First show me the directory tree structure (depth 2), then identify what type of project this is by finding and examining configuration files.",
 
         "Based on what you discovered in the previous step, find all build-related configuration files and extract the key information like dependencies and build scripts.",
 
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install' or 'build' commands mentioned in configuration files or scripts.",
 
-        "Now create a comprehensive step-by-step build instruction document that includes: 1) Project type and language, 2) Prerequisites, 3) Installation commands, 4) Build commands, 5) How to run/test. Use all the information you've gathered in previous steps."
-    ]
+            "Now create a comprehensive step-by-step build instruction document that includes: 1) Project type and language, 2) Prerequisites, 3) Installation commands, 4) Build commands, 5) How to run/test. Use all the information you've gathered in previous steps."
+        ]
 
-    # Initialize conversation history to maintain context across queries
-    chat_history = []
-    final_instructions = None
-    total_tokens = {"input": 0, "output": 0, "total": 0}
-    tool_usage = {}  # Track how many times each tool is used
-    start_time = time.time()  # Track analysis duration
+        # Initialize conversation history to maintain context across queries
+        chat_history = []
+        final_instructions = None
+        total_tokens = {"input": 0, "output": 0, "total": 0}
+        tool_usage = {}  # Track how many times each tool is used
+        start_time = time.time()  # Track analysis duration
 
-    for i, query in enumerate(queries, 1):
-        print(f"\n{'-'*70}")
-        print(f"Analysis Step {i}/{len(queries)}")
-        print(f"{'-'*70}")
-        print(f"Query: {query}\n")
+        for i, query in enumerate(queries, 1):
+            print(f"\n{'-'*70}")
+            print(f"Analysis Step {i}/{len(queries)}")
+            print(f"{'-'*70}")
+            print(f"Query: {query}\n")
 
-        try:
-            # Format chat history as readable text
-            formatted_history = ""
-            if chat_history:
-                formatted_history = "\n".join([
-                    f"Previous Query: {msg['content']}" if msg['role'] == 'user'
-                    else f"Previous Answer: {msg['content'][:500]}..." if len(msg['content']) > 500
-                    else f"Previous Answer: {msg['content']}"
-                    for msg in chat_history
+            try:
+                # Format chat history as readable text
+                formatted_history = ""
+                if chat_history:
+                    formatted_history = "\n".join([
+                        f"Previous Query: {msg['content']}" if msg['role'] == 'user'
+                        else f"Previous Answer: {msg['content'][:500]}..." if len(msg['content']) > 500
+                        else f"Previous Answer: {msg['content']}"
+                        for msg in chat_history
+                    ])
+
+                # Invoke agent with accumulated chat history for context continuity
+                result = agent.invoke({
+                    "input": query,
+                    "chat_history": formatted_history or "No previous context."
+                })
+
+                output = result['output']
+                print(f"\n[RESULT]\n{output}\n")
+
+                # Track tool usage if intermediate steps are available
+                if 'intermediate_steps' in result:
+                    for action, _ in result['intermediate_steps']:
+                        tool_name = action.tool
+                        tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
+
+                # Track token usage if available in result - try multiple possible keys
+                usage_found = False
+
+                # Try different possible locations for usage data
+                for key in ['usage_metadata', 'usage', 'token_usage', 'llm_output']:
+                    if key in result and result[key]:
+                        usage = result[key]
+                        if isinstance(usage, dict):
+                            # Try different token key names
+                            input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens') or usage.get('total_input_tokens', 0)
+                            output_tokens = usage.get('output_tokens') or usage.get('completion_tokens') or usage.get('total_output_tokens', 0)
+                            total = usage.get('total_tokens', input_tokens + output_tokens)
+
+                            if input_tokens or output_tokens:
+                                total_tokens["input"] += input_tokens
+                                total_tokens["output"] += output_tokens
+                                total_tokens["total"] += total
+                                usage_found = True
+                                break
+
+                # Debug: print available keys on first iteration if no usage found
+                if i == 1 and not usage_found:
+                    print(f"[DEBUG] Result keys available: {list(result.keys())}")
+
+                # Save the final step output (build instructions)
+                if i == len(queries):
+                    final_instructions = output
+
+                # Add this interaction to chat history for next query
+                chat_history.extend([
+                    {"role": "user", "content": query},
+                    {"role": "assistant", "content": output}
                 ])
 
-            # Invoke agent with accumulated chat history for context continuity
-            result = agent.invoke({
-                "input": query,
-                "chat_history": formatted_history or "No previous context."
-            })
+            except Exception as e:
+                print(f"\n[ERROR] {e}\n")
+                import traceback
+                traceback.print_exc()
 
-            output = result['output']
-            print(f"\n[RESULT]\n{output}\n")
+        # Calculate duration
+        end_time = time.time()
+        duration_seconds = end_time - start_time
 
-            # Track tool usage if intermediate steps are available
-            if 'intermediate_steps' in result:
-                for action, _ in result['intermediate_steps']:
-                    tool_name = action.tool
-                    tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
-
-            # Track token usage if available in result - try multiple possible keys
-            usage_found = False
-
-            # Try different possible locations for usage data
-            for key in ['usage_metadata', 'usage', 'token_usage', 'llm_output']:
-                if key in result and result[key]:
-                    usage = result[key]
-                    if isinstance(usage, dict):
-                        # Try different token key names
-                        input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens') or usage.get('total_input_tokens', 0)
-                        output_tokens = usage.get('output_tokens') or usage.get('completion_tokens') or usage.get('total_output_tokens', 0)
-                        total = usage.get('total_tokens', input_tokens + output_tokens)
-
-                        if input_tokens or output_tokens:
-                            total_tokens["input"] += input_tokens
-                            total_tokens["output"] += output_tokens
-                            total_tokens["total"] += total
-                            usage_found = True
-                            break
-
-            # Debug: print available keys on first iteration if no usage found
-            if i == 1 and not usage_found:
-                print(f"[DEBUG] Result keys available: {list(result.keys())}")
-
-            # Save the final step output (build instructions)
-            if i == len(queries):
-                final_instructions = output
-
-            # Add this interaction to chat history for next query
-            chat_history.extend([
-                {"role": "user", "content": query},
-                {"role": "assistant", "content": output}
-            ])
-
-        except Exception as e:
-            print(f"\n[ERROR] {e}\n")
-
-    # Calculate duration
-    end_time = time.time()
-    duration_seconds = end_time - start_time
-
+    finally:
+        # Restore original stdout/stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        
+        # Restore logging handlers to original stderr
+        import logging
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        # Reconfigure with original stderr
+        handler = logging.StreamHandler(original_stderr)
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logging.root.addHandler(handler)
+        logging.root.setLevel(logging.INFO)
+        
+        log_file_handle.close()
+    
     # Print summary to console (for immediate feedback)
     print(f"\n{'='*70}")
     print("Analysis Summary")
@@ -351,7 +433,7 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         print(f"Tokens: {total_tokens['total']:,} (input: {total_tokens['input']:,}, output: {total_tokens['output']:,})")
     
     print('='*70)
-
+    
     # Save all reports and metrics to structured folder
     report_dir = save_analysis_reports(
         repo_name=repo_name,
@@ -361,8 +443,16 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         tool_usage=tool_usage,
         total_tokens=total_tokens,
         duration_seconds=duration_seconds,
-        callback_handler=callback_handler
+        callback_handler=callback_handler,
+        log_file_path=log_file_path
     )
+    
+    # Clean up temporary log file
+    if temp_log_file and log_file_path and log_file_path.exists():
+        try:
+            log_file_path.unlink()
+        except:
+            pass
     
     return report_dir
 
