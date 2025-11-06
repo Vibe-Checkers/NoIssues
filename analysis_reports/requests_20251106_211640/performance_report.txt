@@ -1,0 +1,31 @@
+======================================================================
+ANALYSIS PERFORMANCE REPORT
+======================================================================
+
+Repository Information
+----------------------------------------------------------------------
+Name: requests
+URL: https://github.com/psf/requests
+Local Path: ./temp\requests
+Analysis Date: 2025-11-06 21:16:40
+
+Analysis Duration
+----------------------------------------------------------------------
+Total time: 3 min 41 sec (221.56 seconds)
+
+Token Usage Summary
+----------------------------------------------------------------------
+Token usage information not available
+
+Tool Usage Report
+----------------------------------------------------------------------
+ReadFile                       :  12 calls ( 44.4%)
+FindFiles                      :   8 calls ( 29.6%)
+DirectoryTree                  :   5 calls ( 18.5%)
+_Exception                     :   1 calls (  3.7%)
+GrepFiles                      :   1 calls (  3.7%)
+----------------------------------------------------------------------
+Total tool calls               :  27
+Unique tools used              :   5
+
+======================================================================
