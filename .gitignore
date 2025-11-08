@@ -1,4 +1,6 @@
 venv
 .venv
 .env
-test
+test__pycache__/
+.DS_Store
+*.pyc

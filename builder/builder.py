@@ -25,10 +25,13 @@ import os
 import io
 import re
 import json
+import errno
 import logging
 import shutil
 import threading
 import subprocess
+import hashlib
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -41,6 +44,10 @@ from langchain_classic.agents import AgentExecutor, create_react_agent
 from langchain_core.tools import Tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.agents import AgentAction, AgentFinish
+from langchain_classic.agents.output_parsers.react_single_input import (
+    ReActSingleInputOutputParser,
+)
 
 # =============================================================================
 # Global configuration & logging
@@ -88,6 +95,12 @@ DANGEROUS_REGEX = re.compile(
 
 CRITICAL_PATHS = {"/", "/root", "/home", "/Users", "/etc", "/var", "/usr", "C:\\"}
 
+SUPPORTED_STACK_KEYS = ("node", "python", "rust", "go", "java")
+
+STEP_TIMEOUT = int(os.getenv("BUILDER_STEP_TIMEOUT", "900"))
+
+PROVISION_CONTEXT: Dict[str, Any] = {}
+
 
 def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -107,13 +120,29 @@ def _init_run_logs(repo_path: str) -> str:
 
 def _safe_rmtree(path: str, allowed_base: Optional[str] = None):
     path = os.path.abspath(path)
-    if path in CRITICAL_PATHS or any(path == p or path.startswith(p + os.sep) for p in CRITICAL_PATHS):
+    normalized_critical = {os.path.abspath(p) for p in CRITICAL_PATHS}
+    if path in normalized_critical:
         raise ValueError(f"Refusing to remove critical path: {path}")
     if allowed_base:
         base = os.path.abspath(allowed_base)
         if not (path == base or path.startswith(base + os.sep)):
             raise ValueError(f"Refusing to remove path outside allowed base ({base}): {path}")
-    shutil.rmtree(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        if exc.errno != errno.ENOTEMPTY:
+            raise
+        # macOS Finder can recreate .DS_Store between rmtree steps; remove leftovers and retry once
+        try:
+            for entry in os.listdir(path):
+                if entry == ".DS_Store":
+                    try:
+                        os.remove(os.path.join(path, entry))
+                    except FileNotFoundError:
+                        pass
+        except FileNotFoundError:
+            return
+        shutil.rmtree(path)
 
 
 def _select_base_image(repo_path: str) -> str:
@@ -136,8 +165,273 @@ def _select_base_image(repo_path: str) -> str:
     return "ubuntu:22.04"
 
 
+def detect_stack(repo_path: str) -> Dict[str, bool]:
+    """Return a dictionary describing which language toolchains a repo needs."""
+    repo = Path(repo_path)
+    stack = {key: False for key in SUPPORTED_STACK_KEYS}
+
+    if (repo / "package.json").exists() or any(repo.glob("*/package.json")):
+        stack["node"] = True
+
+    python_markers = [
+        "pyproject.toml",
+        "requirements.txt",
+        "Pipfile",
+        "setup.py",
+        "setup.cfg",
+    ]
+    if any((repo / marker).exists() for marker in python_markers):
+        stack["python"] = True
+
+    if (repo / "Cargo.toml").exists() or any(repo.glob("*/Cargo.toml")):
+        stack["rust"] = True
+
+    if (repo / "go.mod").exists() or any(repo.glob("*/go.mod")):
+        stack["go"] = True
+
+    java_markers = ["pom.xml", "build.gradle", "build.gradle.kts", "gradlew"]
+    if any((repo / marker).exists() for marker in java_markers):
+        stack["java"] = True
+
+    return stack
+
+
+def _merge_stack(base_stack: Dict[str, bool], extras: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    """Merge boolean language flags from extras into a copy of base_stack."""
+    merged = {key: bool(base_stack.get(key)) for key in SUPPORTED_STACK_KEYS}
+    if extras:
+        for key in SUPPORTED_STACK_KEYS:
+            if bool(extras.get(key)):
+                merged[key] = True
+    return merged
+
+
+def _normalize_language_flags(source: Optional[Dict[str, Any]]) -> Dict[str, bool]:
+    """Extract language flags from planner metadata or similar structures."""
+    flags = {key: False for key in SUPPORTED_STACK_KEYS}
+    if not isinstance(source, dict):
+        return flags
+
+    language_section = source.get("languages") if isinstance(source.get("languages"), dict) else None
+    candidates = [language_section, source]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in SUPPORTED_STACK_KEYS:
+            if key in candidate:
+                flags[key] = flags[key] or bool(candidate[key])
+    return flags
+
+
+def _dedupe_string_list(values: Optional[Any]) -> List[str]:
+    items: List[str] = []
+    if isinstance(values, (list, tuple)):
+        seen: set[str] = set()
+        for value in values:
+            text = str(value)
+            if text in seen:
+                continue
+            seen.add(text)
+            items.append(text)
+    return items
+
+
+def _extras_from_planner(source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    extras: Dict[str, Any] = {}
+    if not isinstance(source, dict):
+        return extras
+    for list_key in ("apt_packages", "pip_packages"):
+        collected = _dedupe_string_list(source.get(list_key))
+        if collected:
+            extras[list_key] = collected
+    return extras
+
+
+def generate_provisioning_dockerfile(
+    base_image: str,
+    stack: Dict[str, bool],
+    uid: int,
+    gid: int,
+    extras: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return a Dockerfile string that provisions required toolchains."""
+    extras = extras or {}
+    merged_stack = _merge_stack(stack, extras)
+
+    base_packages = [
+        "git",
+        "curl",
+        "ca-certificates",
+        "build-essential",
+        "pkg-config",
+        "libssl-dev",
+        "python3",
+        "python3-pip",
+        "python3-venv",
+    ]
+
+    if merged_stack["node"]:
+        base_packages.extend(["nodejs", "npm"])
+    if merged_stack["go"]:
+        base_packages.append("golang-go")
+    if merged_stack["java"]:
+        base_packages.extend(["openjdk-17-jdk", "maven", "gradle"])
+    apt_extras = extras.get("apt_packages")
+    if isinstance(apt_extras, (list, tuple)):
+        base_packages.extend(apt_extras)
+
+    apt_install = " ".join(sorted(dict.fromkeys(base_packages)))
+
+    dockerfile_lines = [
+        f"FROM {base_image}",
+        "ENV DEBIAN_FRONTEND=noninteractive",
+        textwrap.dedent(
+            f"""
+            RUN set -eux; \
+                apt-get update; \
+                apt-get install -y --no-install-recommends {apt_install}; \
+                rm -rf /var/lib/apt/lists/*
+            """.strip()
+        ),
+        textwrap.dedent(
+            f"""
+            RUN set -eux; \
+                if ! getent group {gid} >/dev/null 2>&1; then \
+                    groupadd -g {gid} app; \
+                fi; \
+                if id -u app >/dev/null 2>&1; then \
+                    usermod -u {uid} -g {gid} app; \
+                else \
+                    useradd -m -u {uid} -g {gid} app; \
+                fi; \
+                mkdir -p /workspace /home/app/.npm /home/app/.cache/pip /home/app/.cargo /home/app/.rustup /home/app/go; \
+                chown -R app:$(id -gn app) /workspace /home/app
+            """.strip()
+        ),
+    ]
+
+    if merged_stack["node"]:
+        dockerfile_lines.append(
+            textwrap.dedent(
+                """
+                RUN set -eux; \
+                    npm install -g corepack >/dev/null 2>&1 || true; \
+                    corepack enable || true
+                """.strip()
+            )
+        )
+
+    if merged_stack["rust"]:
+        dockerfile_lines.append(
+            textwrap.dedent(
+                """
+                RUN set -eux; \
+                    su app -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"; \
+                    su app -c "/home/app/.cargo/bin/rustup component add rustfmt clippy"
+                """.strip()
+            )
+        )
+
+    pip_extras = extras.get("pip_packages")
+    if isinstance(pip_extras, (list, tuple)) and pip_extras:
+        pkgs = " ".join(pip_extras)
+        dockerfile_lines.append(
+            textwrap.dedent(
+                f"""
+                RUN set -eux; \
+                    pip3 install --no-cache-dir {pkgs}
+                """.strip()
+            )
+        )
+
+    dockerfile_lines.extend(
+        [
+            "ENV HOME=/home/app",
+            "ENV CARGO_HOME=/home/app/.cargo",
+            "ENV RUSTUP_HOME=/home/app/.rustup",
+            "ENV GOPATH=/home/app/go",
+            "ENV PATH=/home/app/.cargo/bin:/home/app/go/bin:$PATH",
+            "USER app",
+            "WORKDIR /workspace",
+        ]
+    )
+
+    return "\n".join(dockerfile_lines) + "\n"
+
+
+def build_provisioned_image(
+    repo_path: str,
+    base_image: str,
+    stack: Dict[str, bool],
+    extras: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build (or rebuild) the provisioned Docker image and return its tag."""
+    repo = Path(repo_path)
+    ctx_dir = repo / ".builder_ctx"
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+
+    stack = {key: bool(stack.get(key)) for key in SUPPORTED_STACK_KEYS}
+    extras = extras or {}
+
+    try:
+        uid = os.getuid()
+        gid = os.getgid()
+    except AttributeError:
+        uid = 1000
+        gid = 1000
+
+    dockerfile_content = generate_provisioning_dockerfile(base_image, stack, uid, gid, extras)
+    dockerfile_path = ctx_dir / "Dockerfile"
+    dockerfile_path.write_text(dockerfile_content, encoding="utf-8")
+
+    # Compose a deterministic tag based on base image + stack + extras + uid/gid to enable caching
+    tag_payload = json.dumps(
+        {
+            "base": base_image,
+            "stack": stack,
+            "extras": extras or {},
+            "uid": uid,
+            "gid": gid,
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(tag_payload.encode("utf-8")).hexdigest()[:12]
+    tag = f"builder-provisioned:{digest}"
+
+    client = docker.from_env()
+    try:
+        client.images.pull(base_image)
+    except Exception as exc:  # pragma: no cover - pull failures are non-fatal
+        logger.warning(f"Failed to pull base image {base_image}: {exc}")
+
+    try:
+        client.images.build(path=str(ctx_dir), tag=tag, rm=True)
+    except Exception as exc:
+        raise RuntimeError(f"Provisioning image build failed: {exc}")
+
+    return tag
+
 def _allowed_env_base() -> set:
-    return {"PATH", "HOME", "LANG", "LC_ALL", "SHELL", "USER", "TMPDIR", "TERM"}
+    return {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "SHELL",
+        "USER",
+        "TMPDIR",
+        "TERM",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "GOPROXY",
+        "GOSUMDB",
+        "NPM_CONFIG_REGISTRY",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+    }
 
 
 def make_sanitized_env(base: Dict[str, str]) -> Dict[str, str]:
@@ -224,12 +518,33 @@ class DockerSandbox:
         except Exception:
             uidgid = None  # On Windows/macOS (no getuid) -> fall back to default
 
+        cache_root = os.path.join(self.mount_host_dir, ".builder_caches")
+        cache_map = {
+            os.path.join(cache_root, "npm"): "/home/app/.npm",
+            os.path.join(cache_root, "pip"): "/home/app/.cache/pip",
+            os.path.join(cache_root, "cargo"): "/home/app/.cargo",
+            os.path.join(cache_root, "rustup"): "/home/app/.rustup",
+            os.path.join(cache_root, "go"): "/home/app/go",
+        }
+        try:
+            os.makedirs(cache_root, exist_ok=True)
+            for host_path in cache_map:
+                os.makedirs(host_path, exist_ok=True)
+        except OSError as exc:
+            logger.warning(f"Failed to prepare cache directories: {exc}")
+
+        volumes: Dict[str, Dict[str, str]] = {
+            self.mount_host_dir: {"bind": self.workdir, "mode": "rw"}
+        }
+        for host_path, container_path in cache_map.items():
+            volumes[host_path] = {"bind": container_path, "mode": "rw"}
+
         kwargs = {
             "image": self.image,
             "command": "sleep infinity",
             "detach": True,
             "working_dir": self.workdir,
-            "volumes": {self.mount_host_dir: {"bind": self.workdir, "mode": "rw"}},
+            "volumes": volumes,
             "network_mode": self.network_mode,
             "mem_limit": self.mem_limit,
             "nano_cpus": self.nano_cpus,
@@ -237,6 +552,8 @@ class DockerSandbox:
             "security_opt": ["no-new-privileges"],
             "cap_drop": ["ALL"],
             "read_only": self.readonly_root,
+            "environment": {"HOME": "/home/app"},
+            "user": "app",
         }
         if uidgid:
             kwargs["user"] = uidgid
@@ -259,7 +576,7 @@ class DockerSandbox:
             logger.info("Docker sandbox stopped")
             self.container = None
 
-    def exec(self, cmd: str, timeout: int = 600, environment: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+    def exec(self, cmd: str, timeout: int = STEP_TIMEOUT, environment: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
         """Run a shell command inside the container with a timeout; auto-restart on timeout."""
         assert self.container, "Sandbox not started"
         full_cmd = f"bash -lc {repr(cmd)}"
@@ -314,7 +631,7 @@ class DockerSandbox:
 
 class BuildState:
     """Tracks build state, environment, and logs per-command outputs and indices."""
-
+    
     def __init__(self, working_dir: str, logs_dir: Optional[str] = None):
         self.working_dir = working_dir
         self.logs_dir = logs_dir or _init_run_logs(working_dir)
@@ -413,6 +730,11 @@ class FormattedOutputHandler(BaseCallbackHandler):
         print(f"\n[OBSERVATION] {output_str}\n")
         self._append_trace(f"\n[OBSERVATION] {output_str}\n")
 
+    def on_chain_error(self, error, **kwargs):
+        msg = f"\n[PARSE/CHAIN ERROR] {error}\n"
+        print(msg)
+        self._append_trace(msg)
+
     def on_llm_end(self, response, **kwargs):
         if hasattr(response, 'llm_output') and response.llm_output:
             usage = response.llm_output.get('token_usage', {})
@@ -423,6 +745,48 @@ class FormattedOutputHandler(BaseCallbackHandler):
                 if self.logs_dir:
                     with open(os.path.join(self.logs_dir, "token_usage.json"), "w", encoding="utf-8") as f:
                         json.dump(self.token_usage, f, indent=2)
+
+
+class LoopGuard(BaseCallbackHandler):
+    """Stops execution if the agent repeats the same tool + input too many times."""
+
+    def __init__(self, max_repeats: int = 3):
+        super().__init__()
+        self.max_repeats = max_repeats
+        self._recent: List[Tuple[str, str]] = []
+
+    def on_agent_action(self, action, **kwargs):
+        tool = getattr(action, "tool", "")
+        tool_input = str(getattr(action, "tool_input", "")).strip()
+        self._recent.append((tool, tool_input))
+        if len(self._recent) > self.max_repeats:
+            self._recent.pop(0)
+        if (
+            len(self._recent) == self.max_repeats
+            and len({tuple(item) for item in self._recent}) == 1
+        ):
+            raise RuntimeError(
+                f"Loop detected: repeated {tool} with identical input {self.max_repeats} times"
+            )
+
+
+class LenientReActOutputParser(ReActSingleInputOutputParser):
+    """ReAct parser that tolerates tool name decorations like ExecuteCommand(...)."""
+
+    def parse(self, text: str) -> AgentAction | AgentFinish:
+        parsed = super().parse(text)
+        if isinstance(parsed, AgentAction):
+            cleaned = self._clean_tool_name(parsed.tool)
+            return AgentAction(cleaned, parsed.tool_input, parsed.log)
+        return parsed
+
+    @staticmethod
+    def _clean_tool_name(tool: str) -> str:
+        candidate = tool.strip()
+        for sep in ("(", ":"):
+            if sep in candidate:
+                candidate = candidate.split(sep, 1)[0].strip()
+        return candidate
 
 
 # =============================================================================
@@ -437,11 +801,17 @@ def execute_command(command: str) -> str:
     and working_directory.
     """
     global BUILD_STATE, DOCKER_SANDBOX, USE_DOCKER
-
+    
     try:
         working_dir = BUILD_WORKING_DIRECTORY or os.getcwd()
         logger.info(f"Executing command in {working_dir}: {command}")
 
+        if BUILD_STATE:
+            combined_env = dict(BUILD_STATE.host_env)
+            combined_env.update(BUILD_STATE.env_overrides)
+        else:
+            combined_env = dict(os.environ)
+        
         # Deny obviously dangerous shapes
         if command.strip().startswith("sudo "):
             err = "sudo commands are blocked - cannot run interactive commands that require password"
@@ -460,7 +830,7 @@ def execute_command(command: str) -> str:
         if USE_DOCKER and DOCKER_SANDBOX:
             # Pass only explicit overrides; do not clobber container default PATH
             env_for_container = (BUILD_STATE.env_overrides if BUILD_STATE and BUILD_STATE.env_overrides else None)
-            rc, combined = DOCKER_SANDBOX.exec(command, timeout=600, environment=env_for_container)
+            rc, combined = DOCKER_SANDBOX.exec(command, timeout=STEP_TIMEOUT, environment=env_for_container)
             success = (rc == 0)
             output = combined
             result_code = rc
@@ -475,8 +845,8 @@ def execute_command(command: str) -> str:
                     cwd=working_dir,
                     capture_output=True,
                     text=True,
-                    timeout=600,
-                    env={(BUILD_STATE.host_env if BUILD_STATE else os.environ) | (BUILD_STATE.env_overrides if BUILD_STATE else {})}
+                    timeout=STEP_TIMEOUT,
+                    env=combined_env,
                 )
                 success = proc.returncode == 0
                 output = proc.stdout + proc.stderr
@@ -484,12 +854,9 @@ def execute_command(command: str) -> str:
             except subprocess.TimeoutExpired:
                 success = False
                 result_code = 124
-                output = f"[TIMEOUT after 600s] {command}"
+                output = f"[TIMEOUT after {STEP_TIMEOUT}s] {command}"
 
         # Redact secrets from outputs before logging
-        combined_env = {}
-        if BUILD_STATE:
-            combined_env = (BUILD_STATE.host_env | BUILD_STATE.env_overrides)
         secrets = _compiled_secret_values(combined_env)
         output_redacted = redact(output, secrets)
 
@@ -501,7 +868,7 @@ def execute_command(command: str) -> str:
         # Record to state (writes per-command file + index)
         if BUILD_STATE:
             BUILD_STATE.record(command, success, output_redacted, result_code)
-
+        
         response = {
             "success": success,
             "command": command,
@@ -511,7 +878,7 @@ def execute_command(command: str) -> str:
         }
         logger.info(f"Command {'succeeded' if success else 'failed'} with return code {result_code}")
         return json.dumps(response, indent=2)
-
+        
     except Exception as e:
         msg = f"Error executing command: {e}"
         logger.error(msg)
@@ -552,7 +919,7 @@ def set_environment_variable(input_str: str) -> str:
                 pass
 
         return json.dumps({"success": True, "variables_set": env_pairs_masked}, indent=2)
-
+        
     except Exception as e:
         logger.error(f"Error setting environment variable: {e}")
         return json.dumps({"success": False, "error": str(e)}, indent=2)
@@ -566,6 +933,94 @@ def get_build_status(_: str = "") -> str:
     return BUILD_STATE.get_summary()
 
 
+def provision_packages(spec_json: str) -> str:
+    """Rebuild the provisioned image with extra packages or languages and restart the sandbox."""
+    global PROVISION_CONTEXT, DOCKER_SANDBOX
+
+    if not USE_DOCKER:
+        return json.dumps({"success": False, "error": "Docker provisioning is disabled"}, indent=2)
+
+    if not PROVISION_CONTEXT:
+        return json.dumps({"success": False, "error": "Provisioning context unavailable"}, indent=2)
+
+    try:
+        spec = json.loads(spec_json) if spec_json else {}
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"Invalid JSON: {exc}"}, indent=2)
+
+    if not isinstance(spec, dict):
+        return json.dumps({"success": False, "error": "Provision spec must be a JSON object"}, indent=2)
+
+    existing_extras = dict(PROVISION_CONTEXT.get("extras", {}))
+
+    # Merge boolean language flags
+    for key in SUPPORTED_STACK_KEYS:
+        if key in spec:
+            existing_extras[key] = bool(spec[key])
+
+    # Merge optional package lists (pip, apt)
+    for list_key in ("apt_packages", "pip_packages"):
+        if list_key in spec:
+            value = spec[list_key]
+            if isinstance(value, (list, tuple)):
+                current = list(existing_extras.get(list_key, []))
+                current.extend(str(item) for item in value)
+                # Remove duplicates while preserving order
+                seen = set()
+                deduped = []
+                for item in current:
+                    if item in seen:
+                        continue
+                    seen.add(item)
+                    deduped.append(item)
+                existing_extras[list_key] = deduped
+
+    combined_stack = _merge_stack(PROVISION_CONTEXT.get("stack", {}), existing_extras)
+
+    if (
+        combined_stack == PROVISION_CONTEXT.get("stack")
+        and existing_extras == PROVISION_CONTEXT.get("extras", {})
+    ):
+        return json.dumps(
+            {"success": True, "image": PROVISION_CONTEXT.get("image_tag")},
+            indent=2,
+        )
+
+    try:
+        new_tag = build_provisioned_image(
+            PROVISION_CONTEXT["repo_path"],
+            PROVISION_CONTEXT["base_image"],
+            combined_stack,
+            existing_extras,
+        )
+    except Exception as exc:
+        return json.dumps({"success": False, "error": str(exc)}, indent=2)
+
+    # Restart sandbox with new image
+    if DOCKER_SANDBOX:
+        try:
+            DOCKER_SANDBOX.stop()
+        except Exception:
+            pass
+
+    DOCKER_SANDBOX = DockerSandbox(
+        image=new_tag,
+        mount_host_dir=BUILD_WORKING_DIRECTORY,
+        workdir="/workspace",
+    )
+    DOCKER_SANDBOX.start()
+
+    PROVISION_CONTEXT.update(
+        {
+            "extras": existing_extras,
+            "stack": combined_stack,
+            "image_tag": new_tag,
+        }
+    )
+
+    return json.dumps({"success": True, "image": new_tag}, indent=2)
+
+
 # =============================================================================
 # Agent creation
 # =============================================================================
@@ -576,7 +1031,8 @@ def create_builder_agent(
     working_directory: Optional[str] = None,
     use_docker: bool = True,
     docker_image: Optional[str] = None,
-    logs_dir: Optional[str] = None
+    logs_dir: Optional[str] = None,
+    planner_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[AgentExecutor, Optional[FormattedOutputHandler]]:
     """
     Prepare the builder agent (LLM + tools + docker sandbox + logging).
@@ -592,20 +1048,51 @@ def create_builder_agent(
     logger.info(f"Working directory: {BUILD_WORKING_DIRECTORY}")
     logger.info(f"Logs directory:    {logs_dir}")
 
-    # Docker
+    detected_stack = detect_stack(BUILD_WORKING_DIRECTORY)
+    planner_flags = _normalize_language_flags(planner_context)
+    chosen_image = docker_image or _select_base_image(BUILD_WORKING_DIRECTORY)
+
+    merged_stack = {key: planner_flags.get(key, False) or detected_stack.get(key, False) for key in SUPPORTED_STACK_KEYS}
+    planner_extras = _extras_from_planner(planner_context)
+
+    PROVISION_CONTEXT.clear()
+    PROVISION_CONTEXT.update(
+        {
+            "repo_path": BUILD_WORKING_DIRECTORY,
+            "base_image": chosen_image,
+            "stack": merged_stack,
+            "extras": planner_extras,
+            "image_tag": chosen_image,
+        }
+    )
+
     USE_DOCKER = use_docker
     if USE_DOCKER:
         try:
-            chosen_image = docker_image or _select_base_image(BUILD_WORKING_DIRECTORY)
-            DOCKER_SANDBOX = DockerSandbox(image=chosen_image, mount_host_dir=BUILD_WORKING_DIRECTORY, workdir="/workspace")
+            provisioned_image = build_provisioned_image(
+                BUILD_WORKING_DIRECTORY,
+                chosen_image,
+                PROVISION_CONTEXT["stack"],
+                PROVISION_CONTEXT["extras"],
+            )
+            PROVISION_CONTEXT["image_tag"] = provisioned_image
+            DOCKER_SANDBOX = DockerSandbox(
+                image=provisioned_image,
+                mount_host_dir=BUILD_WORKING_DIRECTORY,
+                workdir="/workspace",
+            )
             DOCKER_SANDBOX.start()
-            logger.info(f"Docker sandbox started with image {chosen_image}, mounting {BUILD_WORKING_DIRECTORY} -> /workspace")
+            logger.info(
+                "Docker sandbox started with image %s, mounting %s -> /workspace",
+                provisioned_image,
+                BUILD_WORKING_DIRECTORY,
+            )
         except Exception as e:
             raise RuntimeError(f"Failed to start Docker sandbox: {e}")
     else:
         DOCKER_SANDBOX = None
         logger.info("Docker disabled; running commands on host (not recommended).")
-
+    
     # LLM
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -629,61 +1116,74 @@ def create_builder_agent(
             name="GetBuildStatus",
             func=get_build_status,
             description="Get current build summary. No input."
+        ),
+        Tool(
+            name="ProvisionPackages",
+            func=provision_packages,
+            description="Request additional tooling. Input: JSON, e.g. '{\"rust\": true}' to install languages or lists like 'apt_packages'."
         )
     ]
-
+    
     # Prompt
-    template = """You are a builder agent that executes build instructions to compile and build software projects.
+    template = """You are a hardened build engineer operating inside an isolated Docker sandbox.
 
-IMPORTANT CONTEXT:
-- The repository is ALREADY CLONED at: {working_directory}
-- You are working inside the repository - DO NOT clone it again
-- Start directly with installation, dependency setup, or build commands
-
-Available tools: {tool_names}
+CONTEXT:
+- The repository is already cloned at {working_directory}. Never run git clone or modify the workspace owner.
+- Tooling is provisioned *before* you start. Runtime privilege escalations (sudo, apt-get, curl|bash, etc.) are forbidden.
+- Available tools: {tool_names}
 
 {tools}
 
-BUILD EXECUTION APPROACH:
-1. SET ENVIRONMENT: Use SetEnvironmentVariable if build requires specific env vars
-2. RUN COMMANDS: Use ExecuteCommand to run build steps (install, compile, test, etc.)
-3. HANDLE ERRORS: If a command fails, analyze the error output and try to resolve
-4. CHECK STATUS: Use GetBuildStatus to review progress when needed
-5. REPORT: Provide a clear Final Answer with the outcome
+MANDATORY PREFLIGHT:
+- For every relevant toolchain, first run deterministic version checks:
+  * Node: `node --version`, `npm --version`
+  * Python: `python3 --version`, `pip3 --version`
+  * Rust: `cargo --version`, `rustc --version`
+  * Go: `go version`
+  * Java: `mvn -v` or `./gradlew -v`
+- If any command is missing, call ProvisionPackages with JSON, e.g. `{{"rust": true}}` or `{{"apt_packages": ["git-lfs"]}}`.
 
-CRITICAL FORMAT RULES (FOLLOW EXACTLY):
-1. After "Action:", write "Action Input:" on the next line
-2. After "Action Input:", write the input WITHOUT quotes
-3. After "Action Input:", STOP IMMEDIATELY - do not write anything else
-4. Do NOT write "Observation:" - the system provides it
-5. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
+EXECUTION GUIDELINES:
+- Use deterministic build/test commands:
+  * Node: `npm ci` then `npm test` (or project scripts)
+  * Python: `python3 -m pip install -r requirements.txt` then `python3 -m pytest`
+  * Rust: `cargo build --locked` then `cargo test --locked`
+  * Go: `go build ./...` then `go test ./...`
+  * Java: `mvn -B verify` or `./gradlew test`
+- Use SetEnvironmentVariable for configuration (e.g., `SetEnvironmentVariable` with `KEY=VALUE`).
+- Never install packages inside the running container beyond these commands; rely on ProvisionPackages.
+- Keep actions focused, inspect results, and retry intelligently.
 
-COMMAND EXECUTION GUIDELINES:
-- The repository is at {working_directory}
-- Run commands one at a time and check output
-- If 'command not found' (rc=127), try 'which <command>'
-- Common issues: missing dependencies, wrong env vars, permissions
+FORMAT RULES (MUST FOLLOW EXACTLY):
+1. Your response is either (Thought + Action + Action Input) or (Thought + Final Answer).
+2. After "Action:", immediately write "Action Input:" on the next line.
+3. The action input must be raw text without quotes.
+4. Stop immediately after the action input; the system supplies observations.
+5. Do not write "Observation:" yourself.
 
-Example:
-Thought: I should verify Node.js is installed.
+INVALID EXAMPLE (never do this):
+Action: ExecuteCommand(command: "npm ci")
+Action Input: npm ci
+
+VALID EXAMPLE:
 Action: ExecuteCommand
-Action Input: node --version
+Action Input: npm ci
 
-Now begin.
-
-Build Instructions (NOTE: Repository is already cloned at {working_directory}, skip any clone/checkout steps):
+Build Instructions (skip any clone/checkout steps):
 {input}
 
 Thought:{agent_scratchpad}"""
     prompt = PromptTemplate.from_template(template)
-
+    
     # Agent
-    agent = create_react_agent(llm, tools, prompt)
-
+    parser = LenientReActOutputParser()
+    agent = create_react_agent(llm, tools, prompt, output_parser=parser)
+    
     # Callback
     callback_handler = FormattedOutputHandler(logs_dir=logs_dir) if verbose else None
-    callbacks = [callback_handler] if callback_handler else []
-
+    loop_guard = LoopGuard()
+    callbacks = [cb for cb in (callback_handler, loop_guard) if cb]
+    
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
@@ -692,10 +1192,10 @@ Thought:{agent_scratchpad}"""
         handle_parsing_errors=True,
         max_iterations=max_iterations,
         max_execution_time=None,
-        early_stopping_method="generate",
+        early_stopping_method="force",
         return_intermediate_steps=True
     )
-
+    
     logger.info("Builder agent created successfully")
     return agent_executor, callback_handler
 
@@ -782,33 +1282,35 @@ def execute_build(
     max_iterations: int = 20,
     verbose: bool = True,
     use_docker: bool = True,
-    docker_image: Optional[str] = None
+    docker_image: Optional[str] = None,
+    planner_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Execute build instructions using the builder agent.
-
+    
     Returns a dict with final status, output, build_summary, token_usage, intermediate_steps, paths, and logging_integrity.
     """
     global DOCKER_SANDBOX, USE_DOCKER, BUILD_STATE
 
     run_logs_dir = None
+    result: Optional[Dict[str, Any]] = None
 
     try:
         # Optionally clone repository into repository_path (safe delete if necessary)
         if github_url:
             logger.info(f"Cloning repository from {github_url} to {repository_path}")
-
+            
             if os.path.exists(repository_path):
                 if os.path.isdir(repository_path) and os.listdir(repository_path):
                     logger.warning(f"Directory {repository_path} already exists and is not empty. Removing safely...")
                     _safe_rmtree(repository_path, allowed_base=os.path.dirname(repository_path))
                 elif os.path.isfile(repository_path):
                     raise ValueError(f"Path exists but is a file, not a directory: {repository_path}")
-
+            
             parent_dir = os.path.dirname(repository_path)
             if parent_dir and not os.path.exists(parent_dir):
                 os.makedirs(parent_dir, exist_ok=True)
-
+            
             clone_result = subprocess.run(
                 ["git", "clone", github_url, repository_path],
                 capture_output=True, text=True, timeout=300
@@ -816,7 +1318,7 @@ def execute_build(
             if clone_result.returncode != 0:
                 raise ValueError(f"Failed to clone repository: {clone_result.stderr}")
             logger.info(f"Successfully cloned repository to {repository_path}")
-
+        
         # Validate paths
         if not os.path.exists(repository_path):
             raise ValueError(f"Repository path does not exist: {repository_path}")
@@ -824,20 +1326,20 @@ def execute_build(
             raise ValueError(f"Repository path is not a directory: {repository_path}")
         if not os.path.exists(instructions_file):
             raise ValueError(f"Instructions file does not exist: {instructions_file}")
-
+        
         # Read instructions
         logger.info(f"Reading instructions from: {instructions_file}")
         with open(instructions_file, "r", encoding="utf-8") as f:
             instructions = f.read()
         if not instructions.strip():
             raise ValueError(f"Instructions file is empty: {instructions_file}")
-
+        
         logger.info(f"Starting build execution in {repository_path}")
         logger.info(f"Instructions length: {len(instructions)} characters")
 
         # Prepare logs directory per run now (so handler can write there)
         run_logs_dir = _init_run_logs(repository_path)
-
+        
         # Create agent
         agent_executor, callback_handler = create_builder_agent(
             max_iterations=max_iterations,
@@ -845,9 +1347,10 @@ def execute_build(
             working_directory=repository_path,
             use_docker=use_docker,
             docker_image=docker_image,
-            logs_dir=run_logs_dir
+            logs_dir=run_logs_dir,
+            planner_context=planner_context,
         )
-
+        
         # Execute build
         print("\n" + "=" * 70)
         print("BUILDER AGENT - Starting Execution")
@@ -856,7 +1359,7 @@ def execute_build(
         print(f"Repository: {repository_path}")
         print(f"Instructions: {instructions_file}")
         print("=" * 70 + "\n")
-
+        
         try:
             result = agent_executor.invoke({
                 "input": instructions,
@@ -882,14 +1385,17 @@ def execute_build(
         num_failed = int(BUILD_STATE and len(getattr(BUILD_STATE, "commands_failed", [])) or 0)
         no_failures = num_failed == 0
         success_flag = ran_any and no_failures
-
+        
         # Compile results
+        resolved_output = result.get("output", "") if isinstance(result, dict) else ""
+        resolved_steps = len(result.get("intermediate_steps", [])) if isinstance(result, dict) else 0
+
         execution_result = {
             "success": success_flag,
-            "output": result.get("output", ""),
+            "output": resolved_output,
             "build_summary": build_summary,
             "token_usage": (callback_handler.token_usage if callback_handler else {}),
-            "intermediate_steps": len(result.get("intermediate_steps", [])),
+            "intermediate_steps": resolved_steps,
             "repository_path": repository_path,
             "instructions_file": instructions_file,
             "github_url": github_url,
@@ -944,7 +1450,7 @@ def execute_build(
         else:
             logger.error(f"Build execution failed: {execution_result.get('error', 'unspecified')}")
         return execution_result
-
+        
     except Exception as e:
         logger.error(f"Build execution failed: {e}")
         # Try to include partial summary if available
@@ -983,7 +1489,7 @@ def execute_build(
 
 if __name__ == "__main__":
     import sys
-
+    
     if len(sys.argv) < 3:
         print("Usage: python builder.py <repository_path> <instructions_file> [github_url]")
         print("\nArguments:")
@@ -997,11 +1503,11 @@ if __name__ == "__main__":
         print('  # Clone and build:')
         print('  python builder.py /path/to/repo /path/to/instructions.md https://github.com/user/repo.git')
         sys.exit(1)
-
+    
     repo_path = sys.argv[1]
     instructions_path = sys.argv[2]
     github_url = sys.argv[3] if len(sys.argv) > 3 else None
-
+    
     result = execute_build(
         repository_path=repo_path,
         instructions_file=instructions_path,
@@ -1010,7 +1516,7 @@ if __name__ == "__main__":
         use_docker=USE_DOCKER,
         docker_image=os.getenv("BUILDER_DOCKER_IMAGE")  # "auto" or explicit
     )
-
+    
     if result.get("success"):
         print("\n✓ Build completed successfully!")
         sys.exit(0)
