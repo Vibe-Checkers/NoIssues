@@ -1,6 +1,9 @@
 venv
 .venv
 .env
-test__pycache__/
+__pycache__/
 .DS_Store
 *.pyc
+
+# Test folder (embedded git repo)
+test/

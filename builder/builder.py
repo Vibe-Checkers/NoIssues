@@ -84,6 +84,12 @@ EXPLICIT_DENY = {
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
 }
 
+# Observation compaction and repeat detection
+REPEAT_WINDOW = int(os.getenv("BUILDER_REPEAT_WINDOW", "6"))
+OBS_MAX_CHARS = int(os.getenv("BUILDER_OBS_MAXCHARS", "6000"))
+OBS_HEAD = int(os.getenv("BUILDER_OBS_HEAD", "2000"))
+OBS_TAIL = int(os.getenv("BUILDER_OBS_TAIL", "2000"))
+
 DANGEROUS_REGEX = re.compile(
     r"(?:\brm\s+-rf\s+(?:/|--no-preserve-root|\.|~)\b)|"
     r"(?:\bmkfs\b)|(?:\bdd\s+if=)|(?:\bshred\b)|"
@@ -143,6 +149,19 @@ def _safe_rmtree(path: str, allowed_base: Optional[str] = None):
         except FileNotFoundError:
             return
         shutil.rmtree(path)
+
+
+def _base_provides_language(base_image: str, language: str) -> bool:
+    """Check if a base image already provides a specific language runtime."""
+    base_name = (base_image or "").split(":", 1)[0].lower()
+    language_map = {
+        "node": ["node"],
+        "python": ["python"],
+        "rust": ["rust"],
+        "go": ["golang", "go"],
+        "java": ["maven", "gradle", "openjdk", "eclipse-temurin"],
+    }
+    return base_name in language_map.get(language, [])
 
 
 def _select_base_image(repo_path: str) -> str:
@@ -270,11 +289,12 @@ def generate_provisioning_dockerfile(
         "python3-venv",
     ]
 
-    if merged_stack["node"]:
+    # Only install language runtimes if not already provided by base image
+    if merged_stack["node"] and not _base_provides_language(base_image, "node"):
         base_packages.extend(["nodejs", "npm"])
-    if merged_stack["go"]:
+    if merged_stack["go"] and not _base_provides_language(base_image, "go"):
         base_packages.append("golang-go")
-    if merged_stack["java"]:
+    if merged_stack["java"] and not _base_provides_language(base_image, "java"):
         base_packages.extend(["openjdk-17-jdk", "maven", "gradle"])
     apt_extras = extras.get("apt_packages")
     if isinstance(apt_extras, (list, tuple)):
@@ -505,9 +525,10 @@ class DockerSandbox:
         self.readonly_root = os.getenv("BUILDER_DOCKER_READONLY", "0") == "1"
 
     def start(self):
-        # Pull image (best effort)
+        # Pull image (best effort), skip locally built tags
         try:
-            self.client.images.pull(self.image)
+            if not str(self.image).startswith("builder-provisioned:"):
+                self.client.images.pull(self.image)
         except Exception as e:
             logger.warning(f"Image pull warning for {self.image}: {e}")
 
@@ -860,10 +881,43 @@ def execute_command(command: str) -> str:
         secrets = _compiled_secret_values(combined_env)
         output_redacted = redact(output, secrets)
 
-        # Truncate extremely large output for the JSON return; keep full in file log
-        json_preview = output_redacted
-        if len(json_preview) > 50_000:
-            json_preview = json_preview[:25_000] + "\n\n... [OUTPUT TRUNCATED] ...\n\n" + json_preview[-25_000:]
+        # Compute status label
+        status = "OK"
+        if result_code == 127:
+            status = "NOT_FOUND"
+        elif result_code == 124:
+            status = "TIMEOUT"
+        elif result_code != 0:
+            status = "ERROR"
+
+        # Prepend a compact, machine-friendly header
+        header = f"[[STATUS {status} rc={result_code}]] cmd={command}\n"
+
+        # Aggressive preview (head + tail), keep full in file logs as-is
+        preview = output_redacted
+        if len(preview) > OBS_MAX_CHARS:
+            head = preview[:OBS_HEAD]
+            tail = preview[-OBS_TAIL:]
+            preview = head + f"\n\n... [OUTPUT TRUNCATED - {len(output_redacted)} chars total] ...\n\n" + tail
+
+        json_preview = header + preview
+
+        # Repeat detection hint (still general-purpose)
+        if BUILD_STATE:
+            # Track last N outcomes to detect "stuck" pattern
+            recent = getattr(BUILD_STATE, "_recent", [])
+            tail_text = (output_redacted or "")[-2000:]
+            h = hashlib.sha256(tail_text.encode("utf-8", errors="ignore")).hexdigest()
+            recent.append({"cmd": command, "rc": result_code, "h": h})
+            BUILD_STATE._recent = recent[-REPEAT_WINDOW:]
+
+            same_cmd = [r for r in BUILD_STATE._recent if r["cmd"] == command]
+            if len(same_cmd) >= 3 and all(r["rc"] == same_cmd[-1]["rc"] and r["h"] == same_cmd[-1]["h"] for r in same_cmd[-3:]):
+                json_preview += (
+                    "\n[HINT] This command produced the same result ≥3 times. "
+                    "If STATUS is NOT_FOUND (rc=127), use ProvisionPackages to add the missing tool, then retry once. "
+                    "Otherwise, adjust strategy or continue to the next step.\n"
+                )
 
         # Record to state (writes per-command file + index)
         if BUILD_STATE:
@@ -871,6 +925,7 @@ def execute_command(command: str) -> str:
         
         response = {
             "success": success,
+            "status": status,
             "command": command,
             "rc": result_code,
             "output": json_preview,
@@ -1050,6 +1105,11 @@ def create_builder_agent(
 
     detected_stack = detect_stack(BUILD_WORKING_DIRECTORY)
     planner_flags = _normalize_language_flags(planner_context)
+    
+    # Normalize "auto" to None for heuristic selection
+    if docker_image and isinstance(docker_image, str) and docker_image.lower() == "auto":
+        docker_image = None
+    
     chosen_image = docker_image or _select_base_image(BUILD_WORKING_DIRECTORY)
 
     merged_stack = {key: planner_flags.get(key, False) or detected_stack.get(key, False) for key in SUPPORTED_STACK_KEYS}
@@ -1134,14 +1194,19 @@ CONTEXT:
 
 {tools}
 
-MANDATORY PREFLIGHT:
-- For every relevant toolchain, first run deterministic version checks:
-  * Node: `node --version`, `npm --version`
-  * Python: `python3 --version`, `pip3 --version`
-  * Rust: `cargo --version`, `rustc --version`
-  * Go: `go version`
-  * Java: `mvn -v` or `./gradlew -v`
-- If any command is missing, call ProvisionPackages with JSON, e.g. `{{"rust": true}}` or `{{"apt_packages": ["git-lfs"]}}`.
+PREFLIGHT & PROVISIONING (GENERAL):
+- Run each required version check ONCE (e.g., `node --version`, `python3 --version`, `cargo --version`, `go version`, etc.).
+- If a preflight command returns STATUS NOT_FOUND (rc=127), DO NOT retry it more than once.
+- Immediately call ProvisionPackages with a minimal JSON spec for the missing tool (e.g., {{"node": true}}).
+- After provisioning, re-run only the previously missing checks ONCE to confirm.
+
+OBSERVATIONS:
+- Every ExecuteCommand observation begins with [[STATUS <label> rc=<code>]]. Use this to decide the next step.
+  NOT_FOUND (127) → ProvisionPackages; TIMEOUT (124) → simplify/split command; ERROR (nonzero) → read last lines and adjust.
+
+REPETITION RULES:
+- Never run the same version-check or failing command more than twice. Use prior observations or change strategy.
+- If the same command yields the same outcome repeatedly, stop repeating, summarize the blocking issue, and propose the next action.
 
 EXECUTION GUIDELINES:
 - Use deterministic build/test commands:
@@ -1184,13 +1249,16 @@ Thought:{agent_scratchpad}"""
     loop_guard = LoopGuard()
     callbacks = [cb for cb in (callback_handler, loop_guard) if cb]
     
+    # Allow overriding max iterations via environment
+    max_iter_env = int(os.getenv("BUILDER_MAX_ITER", str(max_iterations)))
+    
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=False,
         callbacks=callbacks,
         handle_parsing_errors=True,
-        max_iterations=max_iterations,
+        max_iterations=max_iter_env,
         max_execution_time=None,
         early_stopping_method="force",
         return_intermediate_steps=True
