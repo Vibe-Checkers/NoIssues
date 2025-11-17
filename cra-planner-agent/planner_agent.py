@@ -164,23 +164,61 @@ def _resolve_path(user_path: str) -> str:
 
 def search_web(query: str) -> str:
     """
-    Search the web using DuckDuckGo.
+    Search the web using DuckDuckGo for official product documentation.
+    This tool searches for real product documentation, not general web pages.
 
     Args:
-        query: Search query string
+        query: Search query string (should include "documentation" for best results)
 
     Returns:
-        Search results as a string
+        Search results as a formatted string with relevant documentation links
     """
     try:
         logger.info(f"Searching the web for: {query}")
-        search = DuckDuckGoSearchRun()
-        results = search.run(query)
-        logger.info(f"Search completed, {len(results)} chars returned")
-        return results
+        
+        # Use duckduckgo_search directly for better reliability
+        try:
+            from ddgs import DDGS
+            
+            formatted_results = f"Documentation Search Results for: {query}\n"
+            formatted_results += "=" * 70 + "\n\n"
+            
+            with DDGS() as ddgs:
+                results_list = []
+                # Search for documentation, prioritizing official sources
+                for r in ddgs.text(query, max_results=8):
+                    title = r.get('title', 'No title')
+                    body = r.get('body', 'No description')
+                    href = r.get('href', 'No URL')
+                    
+                    # Format each result
+                    result_entry = f"Title: {title}\n"
+                    result_entry += f"Description: {body[:200]}...\n" if len(body) > 200 else f"Description: {body}\n"
+                    result_entry += f"URL: {href}\n"
+                    result_entry += "-" * 70 + "\n"
+                    results_list.append(result_entry)
+                
+                if results_list:
+                    formatted_results += "\n".join(results_list)
+                    formatted_results += f"\n[Found {len(results_list)} results. Focus on official documentation sources (official websites, GitHub, documentation sites).]"
+                else:
+                    formatted_results += "No results found. Try a more specific query."
+            
+            logger.info(f"Search completed, {len(formatted_results)} chars returned")
+            return formatted_results
+            
+        except ImportError as e:
+            error_msg = "Search dependencies not available. Please install: pip install -U ddgs"
+            logger.error(f"{error_msg}. Error: {e}")
+            return f"Search error: {error_msg}"
+        except Exception as e:
+            error_msg = f"Search failed: {str(e)}"
+            logger.error(error_msg)
+            return f"Search error: {error_msg}. Please try again or check your internet connection."
+            
     except Exception as e:
-        logger.error(f"Search error: {e}")
-        return f"Search error: {str(e)}"
+        logger.error(f"Unexpected search error: {e}")
+        return f"Search error: {str(e)}. Please ensure ddgs package is installed: pip install -U ddgs"
 
 
 def read_local_file(filepath: str) -> str:
@@ -699,6 +737,65 @@ def create_directory_tree(input_str: str) -> str:
         return f"Error creating directory tree: {str(e)}"
 
 
+def fetch_web_page(url: str) -> str:
+    """
+    Fetch and extract text content from a web page URL.
+    This tool actually visits the URL and retrieves the page content.
+
+    Args:
+        url: Full URL of the web page to fetch (e.g., "https://docs.python-requests.org/")
+
+    Returns:
+        Extracted text content from the web page, or error message
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        
+        logger.info(f"Fetching web page: {url}")
+        
+        # Set headers to appear as a browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # Fetch the page
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Parse HTML and extract text
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+        
+        # Get text content
+        text = soup.get_text()
+        
+        # Clean up whitespace
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        
+        # Limit to first 5000 characters to avoid token limits
+        if len(text) > 5000:
+            text = text[:5000] + "\n\n[Content truncated - page is very long. Focus on the most relevant sections.]"
+        
+        logger.info(f"Successfully fetched {len(text)} chars from {url}")
+        return f"Content from {url}:\n{'='*70}\n{text}"
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching URL {url}: {e}")
+        return f"Error fetching web page: {str(e)}. The URL may be invalid or inaccessible."
+    except ImportError:
+        logger.error("BeautifulSoup4 not installed. Please install: pip install beautifulsoup4")
+        return "Error: beautifulsoup4 package required. Install with: pip install beautifulsoup4"
+    except Exception as e:
+        logger.error(f"Unexpected error fetching web page: {e}")
+        return f"Error fetching web page: {str(e)}"
+
+
 # ============================================================================
 # Agent Creation
 # ============================================================================
@@ -706,7 +803,9 @@ def create_directory_tree(input_str: str) -> str:
 def create_planner_agent(
     max_iterations: int = 10,
     verbose: bool = True,
-    repository_path: str = None
+    repository_path: str = None,
+    repo_name: str = None,
+    detected_language: str = None
 ):
     """
     Create and return a planner agent configured with Azure OpenAI.
@@ -715,6 +814,8 @@ def create_planner_agent(
         max_iterations: Maximum number of agent iterations
         verbose: Whether to print agent steps
         repository_path: Base path for repository operations (tools will resolve relative paths against this)
+        repo_name: Name of the repository (for documentation search context)
+        detected_language: Detected programming language (for documentation search context)
 
     Returns:
         Tuple of (AgentExecutor instance, FormattedOutputHandler for accessing token usage)
@@ -725,6 +826,10 @@ def create_planner_agent(
     logger.info("Creating planner agent...")
     if repository_path:
         logger.info(f"Repository base path set to: {repository_path}")
+    if repo_name:
+        logger.info(f"Repository name: {repo_name}")
+    if detected_language:
+        logger.info(f"Detected language: {detected_language}")
 
     # Get configuration from environment
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -751,7 +856,12 @@ def create_planner_agent(
         Tool(
             name="SearchWeb",
             func=search_web,
-            description="Search the web using DuckDuckGo for current information, documentation, or build tool guides. Use sparingly - prefer local analysis first. Input: search query string."
+            description="**MANDATORY FIRST STEP**: Search the web for official product documentation, API references, and build guides. You MUST use this tool at the beginning of your analysis. Search format: '<repo_name> <language> documentation' or '<library_name> official documentation'. This tool searches for real product documentation from official sources. Input: search query string (e.g., 'requests Python documentation' or 'requests official documentation'). Returns search results with URLs - use FetchWebPage to get actual content."
+        ),
+        Tool(
+            name="FetchWebPage",
+            func=fetch_web_page,
+            description="Fetch and extract text content from a web page URL. Use this after SearchWeb to get the actual page content. Input: full URL (e.g., 'https://docs.python-requests.org/')."
         ),
         Tool(
             name="ReadFile",
@@ -790,6 +900,20 @@ def create_planner_agent(
         )
     ]
 
+    # Build documentation search context
+    doc_search_context = ""
+    if repo_name and detected_language:
+        doc_search_context = f"\n\nDOCUMENTATION SEARCH GUIDANCE:\n"
+        doc_search_context += f"- Repository: {repo_name}\n"
+        doc_search_context += f"- Detected Language: {detected_language}\n"
+        doc_search_context += f"- Recommended search: '{repo_name} {detected_language} documentation' or '{repo_name} official documentation'\n"
+        doc_search_context += f"- Search for official documentation early in your analysis to understand build requirements, dependencies, and setup procedures.\n"
+    elif repo_name:
+        doc_search_context = f"\n\nDOCUMENTATION SEARCH GUIDANCE:\n"
+        doc_search_context += f"- Repository: {repo_name}\n"
+        doc_search_context += f"- Recommended search: '{repo_name} documentation' or '{repo_name} official documentation'\n"
+        doc_search_context += f"- Search for official documentation early in your analysis.\n"
+
     # Custom ReAct prompt for reasoning models
     template = """You are analyzing a repository to understand its structure and create build instructions.
 
@@ -798,54 +922,65 @@ Available tools: {tool_names}
 {tools}
 
 ANALYSIS APPROACH - Discovery over Assumptions:
-1. START BROAD: Use DirectoryTree to see overall structure
-2. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
-3. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
-4. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
-5. CROSS-REFERENCE: Verify findings from multiple sources
-6. WEB SEARCH: Only if critical info is missing from repository
+1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation" or "{repo_name} official documentation". This gives you authoritative build instructions, prerequisites, and setup guides from official sources. Do this BEFORE exploring local files.
+2. START BROAD: Use DirectoryTree to see overall structure
+3. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
+4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
+5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
+6. CROSS-REFERENCE: Verify findings from web documentation with local files{doc_search_context}
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
-1. After "Action:", you MUST write "Action Input:" on the next line
-2. After "Action Input:", write the input WITHOUT quotes (e.g., .,2,false,true NOT '.,2,false,true')
-3. After "Action Input:", STOP IMMEDIATELY - do not write anything else
-4. Do NOT write "Observation:" - the system provides it
-5. WHEN TO STOP AND PROVIDE FINAL ANSWER:
+1. **NEVER write free text or explanations outside the format below**
+2. After "Thought:", you MUST write "Action:" followed by the tool name on the SAME line
+3. After "Action: <tool_name>", you MUST write "Action Input:" on the next line
+4. After "Action Input:", write the input WITHOUT quotes on the SAME line
+5. After "Action Input: <input>", STOP IMMEDIATELY - do not write anything else
+6. Do NOT write "Observation:" - the system provides it
+7. **If you want to provide a final answer, write "Final Answer:" after Thought, not free text**
+8. WHEN TO STOP AND PROVIDE FINAL ANSWER:
+   - You have searched for official documentation using SearchWeb
    - You have examined the main configuration files (package.json, Cargo.toml, Makefile, etc.)
    - You have read key documentation (README, INSTALL, BUILD files)
    - You have found the core information requested in the question
    - Typically 5-10 tool calls is sufficient for most questions
    - Maximum 15 tool calls per question - after that, provide Final Answer with what you have
-6. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
-7. AVOID OVER-EXPLORATION: Do not read every file or search exhaustively. Focus on the specific question and answer it.
+9. Each response: EITHER (Thought + Action + Action Input) OR (Thought + Final Answer), NEVER BOTH
+10. AVOID OVER-EXPLORATION: Do not read every file or search exhaustively. Focus on the specific question and answer it.
+11. **DO NOT REPEAT THE SAME ACTION** - if you already searched, move on to the next step
 
 CORRECT FORMAT EXAMPLES:
 
 Example 1 - Using a tool:
-Question: Show me the directory tree
-Thought: I need to see the directory structure to understand the project layout.
+Thought: I need to see the directory structure.
 Action: DirectoryTree
 Action Input: .,2,false,true
-[STOP HERE - wait for system to provide Observation]
 
-Example 2 - Using another tool:
-Question: Find package.json files
-Thought: I should locate all package.json files in the repository.
-Action: FindFiles
-Action Input: .,package.json,5
-[STOP HERE - wait for system to provide Observation]
+Example 2 - Using web search:
+Thought: I should search for official documentation.
+Action: SearchWeb
+Action Input: requests Python documentation
 
 Example 3 - Providing final answer:
-Thought: I have gathered all the necessary information from the files I examined.
+Thought: I have gathered all necessary information.
 Final Answer: This is a Node.js project with TypeScript. Prerequisites: Node.js 18+. Installation: npm install. Build: npm run build.
-[STOP HERE - task complete]
 
 WRONG FORMAT (DO NOT DO THIS):
-Thought: I will check the directory
-Action: DirectoryTree
-Action Input: .,2,false,true
-Observation: [some result]  ← WRONG! Do not write Observation!
-Final Answer: ...           ← WRONG! Do not put Final Answer after an Action!
+Thought: I cannot provide a final answer yet. I will first search...
+[WRONG - This is free text, not the required format!]
+
+Thought: I need to search
+Action:
+Action Input: requests Python documentation
+[WRONG - Missing tool name after Action:]
+
+Thought: I need to search
+Action: SearchWeb
+[WRONG - Missing Action Input:]
+
+IMPORTANT: 
+- If you already performed SearchWeb in this conversation, do NOT search again - use the results you already have
+- If you already read a file, do NOT read it again - use the information you already have
+- Move forward with your analysis, don't repeat actions
 
 Now begin!
 
@@ -854,6 +989,20 @@ Previous conversation context (if any):
 
 Current Question: {input}
 Thought:{agent_scratchpad}"""
+
+    # Format the template with repo_name and language if available
+    if repo_name and detected_language:
+        template = template.replace("{repo_name}", repo_name)
+        template = template.replace("{language}", detected_language)
+    elif repo_name:
+        template = template.replace("{repo_name}", repo_name)
+        template = template.replace("{language}", "programming language")
+    else:
+        template = template.replace("{repo_name}", "the repository")
+        template = template.replace("{language}", "programming language")
+    
+    # Insert doc_search_context
+    template = template.replace("{doc_search_context}", doc_search_context)
 
     prompt = PromptTemplate.from_template(template)
 
@@ -864,12 +1013,21 @@ Thought:{agent_scratchpad}"""
     callback_handler = FormattedOutputHandler() if verbose else None
     callbacks = [callback_handler] if callback_handler else []
 
+    # Custom parsing error handler function
+    def handle_parsing_error(error: Exception) -> str:
+        """Handle parsing errors by providing a clear message to the agent."""
+        error_str = str(error)
+        logger.warning(f"Parsing error: {error_str}")
+        if "Could not parse" in error_str or "Missing 'Action:'" in error_str or "Invalid Format" in error_str:
+            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text. Example:\nThought: I need to search for documentation.\nAction: SearchWeb\nAction Input: requests Python documentation"
+        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. I cannot write free text."
+
     agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=False,  # Disable default verbose output
         callbacks=callbacks,
-        handle_parsing_errors=True,
+        handle_parsing_errors=handle_parsing_error,  # Use the function, not True
         max_iterations=max_iterations,
         max_execution_time=None,  # No time limit
         early_stopping_method="generate",  # Generate final answer if max iterations reached

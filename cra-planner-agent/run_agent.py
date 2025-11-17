@@ -251,6 +251,60 @@ class TeeOutput:
             f.flush()
 
 
+def detect_project_language(repo_path: str) -> str:
+    """
+    Detect the primary programming language of a repository.
+    
+    Args:
+        repo_path: Path to the repository
+        
+    Returns:
+        Detected language name (e.g., "Python", "JavaScript", "Go", "Rust")
+    """
+    import os
+    
+    # Common file patterns that indicate language
+    language_indicators = {
+        "Python": ["*.py", "requirements.txt", "setup.py", "pyproject.toml", "Pipfile"],
+        "JavaScript": ["package.json", "*.js", "*.ts", "yarn.lock", "package-lock.json"],
+        "TypeScript": ["tsconfig.json", "*.ts", "*.tsx"],
+        "Go": ["go.mod", "go.sum", "*.go"],
+        "Rust": ["Cargo.toml", "Cargo.lock", "*.rs"],
+        "Java": ["pom.xml", "build.gradle", "*.java"],
+        "C++": ["CMakeLists.txt", "Makefile", "*.cpp", "*.hpp"],
+        "C": ["Makefile", "*.c", "*.h"],
+        "Ruby": ["Gemfile", "*.rb", "Rakefile"],
+        "PHP": ["composer.json", "*.php"],
+        "C#": ["*.csproj", "*.sln", "*.cs"],
+        "Swift": ["Package.swift", "*.swift"],
+        "Kotlin": ["build.gradle.kts", "*.kt"],
+    }
+    
+    # Count matches for each language
+    language_scores = {}
+    
+    for root, dirs, files in os.walk(repo_path):
+        # Skip hidden directories
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        
+        for file in files:
+            for lang, patterns in language_indicators.items():
+                for pattern in patterns:
+                    if file == pattern or file.endswith(pattern.replace('*', '')):
+                        language_scores[lang] = language_scores.get(lang, 0) + 1
+                        break
+    
+    # Return the language with highest score, or "Unknown" if none found
+    if language_scores:
+        detected = max(language_scores.items(), key=lambda x: x[1])[0]
+        # Special case: TypeScript often comes with JavaScript
+        if detected == "TypeScript" and "JavaScript" in language_scores:
+            return "TypeScript"
+        return detected
+    
+    return "Unknown"
+
+
 def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, callback_handler, log_file_path=None):
     """
     Run analysis queries on a cloned repository.
@@ -299,15 +353,19 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         print(f"Analyzing Repository: {repo_name}")
         print('='*70)
 
+        # Detect project language before analysis
+        detected_language = detect_project_language(repo_path)
+        print(f"[INFO] Detected primary language: {detected_language}")
+
         # Define analysis queries using discovery-based approach with relative paths
         queries = [
-        "Analyze the repository. First show me the directory tree structure (depth 2), then identify what type of project this is by finding and examining configuration files.",
+        "Analyze the repository. **FIRST**: Search the web for official documentation using 'requests Python documentation'. Then show me the directory tree structure (depth 2), and identify what type of project this is by finding and examining configuration files.",
 
-        "Based on what you discovered in the previous step, find all build-related configuration files and extract the key information like dependencies and build scripts.",
+        "Based on what you discovered in the previous step, find all build-related configuration files and extract the key information like dependencies and build scripts. Also cross-reference with the official documentation you found earlier.",
 
-        "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install' or 'build' commands mentioned in configuration files or scripts.",
+        "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install' or 'build' commands mentioned in configuration files or scripts. Compare with official documentation.",
 
-            "Now create a comprehensive step-by-step build instruction document that includes: 1) Project type and language, 2) Prerequisites, 3) Installation commands, 4) Build commands, 5) How to run/test. Use all the information you've gathered in previous steps."
+            "Now create a comprehensive step-by-step build instruction document that includes: 1) Project type and language, 2) Prerequisites, 3) Installation commands, 4) Build commands, 5) How to run/test. Use all the information you've gathered from web documentation and local files in previous steps."
         ]
 
         # Initialize conversation history to maintain context across queries
@@ -487,11 +545,21 @@ def main():
         repo_path = clone_repository(repo_url)
         repo_name = os.path.basename(repo_path)
 
+        # Detect language
+        detected_language = detect_project_language(repo_path)
+        print(f"[INFO] Detected primary language: {detected_language}")
+
         # Step 2: Initialize the agent
         print("\n" + "="*70)
         print("Step 2: Initializing Agent")
         print("="*70)
-        agent, callback_handler = create_planner_agent(max_iterations=25, verbose=True, repository_path=repo_path)
+        agent, callback_handler = create_planner_agent(
+            max_iterations=25, 
+            verbose=True, 
+            repository_path=repo_path,
+            repo_name=repo_name,
+            detected_language=detected_language
+        )
         print("\n[OK] Agent initialized successfully!")
 
         # Step 3: Analyze the repository

@@ -1,0 +1,547 @@
+
+======================================================================
+Analyzing Repository: requests
+======================================================================
+[INFO] Detected primary language: Python
+
+----------------------------------------------------------------------
+Analysis Step 1/4
+----------------------------------------------------------------------
+Query: Analyze the repository. **FIRST**: Search the web for official documentation using 'requests Python documentation'. Then show me the directory tree structure (depth 2), and identify what type of project this is by finding and examining configuration files.
+
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I should search for official documentation.
+
+[ACTION] SearchWeb
+[INPUT] requests Python documentation
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:44:07,245 - planner_agent - INFO - Searching the web for: requests Python documentation
+2025-11-18 00:44:07,946 - primp - INFO - response: https://search.brave.com/search?q=requests+Python+documentation&source=web 200
+2025-11-18 00:44:08,379 - primp - INFO - response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=requests%20Python%20documentation 200
+2025-11-18 00:44:09,802 - primp - INFO - response: https://www.mojeek.com/search?q=requests+Python+documentation 200
+2025-11-18 00:44:09,887 - planner_agent - INFO - Search completed, 3020 chars returned
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will inspect the repository structure to identify project type.
+
+[ACTION] DirectoryTree
+[INPUT] .,2,false,true
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:44:15,239 - planner_agent - INFO - Creating tree for ./temp\requests (depth=2, hidden=False, files=True)
+2025-11-18 00:44:15,245 - planner_agent - INFO - Tree created with 57 lines
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will locate common config/configuration files to identify project type.
+
+[ACTION] FindFiles
+[INPUT] .,pyproject.toml,2
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:44:22,373 - planner_agent - INFO - Finding files matching 'pyproject.toml' in ./temp\requests (depth 2)
+2025-11-18 00:44:22,378 - planner_agent - INFO - Found 1 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will examine pyproject.toml to understand the build system and project type.
+
+[ACTION] ReadFile
+[INPUT] pyproject.toml
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:44:28,299 - planner_agent - INFO - Reading local file: ./temp\requests\pyproject.toml
+2025-11-18 00:44:28,304 - planner_agent - INFO - Successfully read ./temp\requests\pyproject.toml (238 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will inspect Makefile to see build/test commands.
+
+[ACTION] ReadFile
+[INPUT] Makefile
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:44:37,784 - planner_agent - INFO - Reading local file: ./temp\requests\Makefile
+2025-11-18 00:44:37,784 - planner_agent - INFO - Successfully read ./temp\requests\Makefile (834 chars)
+
+[RESULT]
+- Official documentation found (web): 
+  - https://docs.python-requests.org/en/latest/ 
+  - https://requests.readthedocs.io/en/latest/
+
+- Directory tree (depth 2):
+  - docs/
+  - ext/
+  - src/
+  - tests/
+  - AUTHORS.rst
+  - HISTORY.md
+  - LICENSE
+  - MANIFEST.in
+  - Makefile
+  - NOTICE
+  - README.md
+  - pyproject.toml
+  - requirements-dev.txt
+  - setup.cfg
+  - setup.py
+  - tox.ini
+
+- What type of project is this:
+  - A Python library (the Requests HTTP library).
+  - Key indicators:
+    - Package source under src/requests
+    - setup.py and pyproject.toml for packaging
+    - Makefile and tox.ini for development/testing/build workflows
+    - tests/ directory with pytest-based tests
+    - Sphinx-based docs under docs/
+
+- How to build and work with it (recommended steps):
+  - Prerequisites:
+    - Python 3.9+ (as per official Requests documentation)
+  - Setup (development environment):
+    - Create and activate a virtual environment
+      - On Unix/macOS: python3 -m venv .venv; source .venv/bin/activate
+      - On Windows: python -m venv .venv; .\.venv\Scripts\activate
+    - Install development dependencies (from repo):
+      - Makefile target: make init
+      - Or manually: pip install -r requirements-dev.txt
+    - Install the package in editable mode for development:
+      - pip install -e .
+  - Run tests:
+    - pytest
+  - Build distributions (wheel and sdist):
+    - python -m build
+    - This will emit dist/ with .whl and .tar.gz
+  - Publish to PyPI (optional, requires credentials):
+    - Use the provided Makefile target or run:
+      - python -m twine upload dist/*
+  - Build documentation:
+    - cd docs
+    - make html
+    - View at docs/_build/html/index.html
+  - Additional tooling:
+    - The project uses pytest (tests folder) and tox (tox.ini) for test environments
+    - You can run tests via tox if you prefer:
+      - tox
+  - Notes:
+    - The repository layout and Makefile indicate typical modern Python packaging (setup.py, pyproject.toml, and dist publishing workflow).
+    - For quick development, you can follow Makefile targets (e.g., make init, make docs) to mirror common setup tasks.
+
+[DEBUG] Result keys available: ['input', 'chat_history', 'output', 'intermediate_steps']
+
+----------------------------------------------------------------------
+Analysis Step 2/4
+----------------------------------------------------------------------
+Query: Based on what you discovered in the previous step, find all build-related configuration files and extract the key information like dependencies and build scripts. Also cross-reference with the official documentation you found earlier.
+
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read setup.py to extract build configuration such as install_requires, setup() metadata, and entry points.
+
+[ACTION] ReadFile
+[INPUT] ./setup.py
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:06,128 - planner_agent - INFO - Reading local file: ./temp\requests\./setup.py
+2025-11-18 00:45:06,129 - planner_agent - INFO - Successfully read ./temp\requests\./setup.py (3229 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I should locate build configuration files like pyproject.toml and Makefile.
+
+[ACTION] FindFiles
+[INPUT] .,pyproject.toml,5
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:13,693 - planner_agent - INFO - Finding files matching 'pyproject.toml' in ./temp\requests (depth 5)
+2025-11-18 00:45:13,698 - planner_agent - INFO - Found 1 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read pyproject.toml to extract build-system and dependencies.
+
+[ACTION] ReadFile
+[INPUT] ./pyproject.toml
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:18,110 - planner_agent - INFO - Reading local file: ./temp\requests\./pyproject.toml
+2025-11-18 00:45:18,112 - planner_agent - INFO - Successfully read ./temp\requests\./pyproject.toml (238 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will locate remaining build-related configuration files such as Makefile, setup.cfg, tox.ini, and requirements*.txt to extract build scripts and dependencies.
+
+[ACTION] FindFiles
+[INPUT] .,Makefile,3
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:24,035 - planner_agent - INFO - Finding files matching 'Makefile' in ./temp\requests (depth 3)
+2025-11-18 00:45:24,041 - planner_agent - INFO - Found 2 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read the top-level Makefile to extract common build targets and scripts.
+
+[ACTION] ReadFile
+[INPUT] ./Makefile
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:29,156 - planner_agent - INFO - Reading local file: ./temp\requests\./Makefile
+2025-11-18 00:45:29,157 - planner_agent - INFO - Successfully read ./temp\requests\./Makefile (834 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I should locate setup.cfg and tox.ini to see build/test configurations and metadata.
+
+[ACTION] FindFiles
+[INPUT] .,setup.cfg,5
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:35,609 - planner_agent - INFO - Finding files matching 'setup.cfg' in ./temp\requests (depth 5)
+2025-11-18 00:45:35,622 - planner_agent - INFO - Found 1 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read setup.cfg to extract metadata and build/lint options.
+
+[ACTION] ReadFile
+[INPUT] ./setup.cfg
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:42,683 - planner_agent - INFO - Reading local file: ./temp\requests\./setup.cfg
+2025-11-18 00:45:42,683 - planner_agent - INFO - Successfully read ./temp\requests\./setup.cfg (350 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read requirements-dev.txt
+
+[ACTION] ReadFile
+[INPUT] ./requirements-dev.txt
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:52,403 - planner_agent - INFO - Reading local file: ./temp\requests\./requirements-dev.txt
+2025-11-18 00:45:52,404 - planner_agent - INFO - Successfully read ./temp\requests\./requirements-dev.txt (92 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will locate remaining build-related configuration files such as tox.ini and requirements*.txt to extract build scripts and dependencies.
+
+[ACTION] FindFiles
+[INPUT] .,tox.ini,5
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:45:58,109 - planner_agent - INFO - Finding files matching 'tox.ini' in ./temp\requests (depth 5)
+2025-11-18 00:45:58,116 - planner_agent - INFO - Found 1 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read tox.ini to extract test environments and build-related configuration details.
+
+[ACTION] ReadFile
+[INPUT] tox.ini
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:46:07,676 - planner_agent - INFO - Reading local file: ./temp\requests\tox.ini
+2025-11-18 00:46:07,677 - planner_agent - INFO - Successfully read ./temp\requests\tox.ini (288 chars)
+
+[RESULT]
+Build-related configuration files found and their key information
+
+1) setup.py
+- Purpose: Packaging metadata and build configuration for the Python package.
+- Core dependencies (install_requires):
+  - charset_normalizer>=2,<4
+  - idna>=2.5,<4
+  - urllib3>=1.21.1,<3
+  - certifi>=2017.4.17
+- Python version requirement:
+  - python_requires=">=3.9"
+- Version and metadata:
+  - Version and other metadata are loaded from src/requests/__version__.py via a dynamic exec into about dict.
+  - long_description sourced from README.md
+  - name/description/author/url pulled from about dict
+- Packaging layout:
+  - packages=["requests"]
+  - package_dir={"": "src"} (src/requests is the package)
+  - include_package_data=True
+- Extras and tests:
+  - extras_require:
+    - socks: ["PySocks>=1.5.6, !=1.5.7"]
+    - use_chardet_on_py3: ["chardet>=3.0.2,<6"]
+    - security: []
+  - tests_require:
+    - pytest-httpbin==2.1.0
+    - pytest-cov
+    - pytest-mock
+    - pytest-xdist
+    - PySocks>=1.5.6, !=1.5.7
+    - pytest>=3
+- Project URLs:
+  - Documentation: https://requests.readthedocs.io
+  - Source: https://github.com/psf/requests
+- Special action:
+  - A publish shortcut: if sys.argv[-1] == "publish", builds and uploads via twine.
+
+2) setup.cfg
+- metadata section:
+  - license_file = LICENSE
+- requires-dist:
+  - certifi>=2017.4.17
+  - charset_normalizer>=2,<4
+  - idna>=2.5,<4
+  - urllib3>=1.21.1,<3
+- extras:
+  - socks
+  - use_chardet_on_py3
+- flake8 configuration:
+  - ignore E203, E501, W503
+  - per-file-ignores for some src/requests/*.py and tests
+
+3) pyproject.toml
+- Tools configuration (not build system, but supports tooling)
+  - [tool.isort] profile = "black"; src_paths includes "src/requests" and "test"
+  - [tool.pytest.ini_options] test configuration (doctest modules, etc.)
+  - testpaths = ["tests"]
+
+4) Makefile (top-level)
+- init: pip install -r requirements-dev.txt
+- test: pytest tests
+- ci: pytest tests --junitxml=report.xml
+- test-readme: check README/HISTORY markup
+- coverage: pytest with coverage reporting
+- publishenv: create a virtualenv and install build tooling (twine, build)
+- publish: uses the publishenv to build and upload to PyPI
+- docs: builds docs (cd docs && make html)
+
+5) Makefile (docs/Makefile)
+- Not inspected in full here, but present for documentation build targets
+
+6) tox.ini
+- tox configuration for testing environments
+- envlist: py{39,310,311,312,313,314}-{default, use_chardet_on_py3}
+- testenv:
+  - deps = -rrequirements-dev.txt
+  - extras = security, socks, use_chardet_on_py3
+  - commands = pytest {posargs:tests}
+
+7) requirements-dev.txt
+- Development and test dependencies
+  - -e .[socks] (editable install with socks extra)
+  - pytest>=2.8.0,<9
+  - pytest-cov
+  - pytest-httpbin==2.1.0
+  - httpbin~=0.10.0
+  - trustme
+  - wheel
+
+8) docs/Makefile
+- Part of docs build targets (docs build via Sphinx)
+
+9) Other config references (already opened)
+- pyproject.toml includes isort and pytest tooling, reinforcing development tooling
+- README.md contains high-level installation/build guidance (not detailed here)
+
+How this aligns with official documentation
+
+- Official docs located at:
+  - https://docs.python-requests.org/en/latest/
+  - Documentation source: https://requests.readthedocs.io
+  - Source repository: https://github.com/psf/requests
+- Cross-reference points:
+  - Packaging and dependencies shown in setup.py/setup.cfg align with standard Python packaging practices described by the Requests project in its official docs (i.e., the library declares its install_requires and optional extras, uses a src layout, and relies on setuptools for packaging).
+  - The official docs emphasize installing via pip and explaining the library’s usage; the repo’s packaging (setup.py, extras, and Python version requirement) reflects a typical packaging approach recommended by the project.
+  - The dev workflow (Makefile targets for test, docs, and publish; tox.ini for multi-Python environments; requirements-dev.txt for development dependencies) is consistent with standard build/test workflows described in typical Requests project documentation and community packaging guides.
+
+Notes
+- The repository enforces Python 3.9+ (python_requires >= 3.9) as seen in setup.py, which should be cross-checked with the official docs for supported Python versions (the docs historically cover supported Python versions; current packaging here is explicit).
+- Core runtime dependencies (charset_normalizer, idna, urllib3, certifi) are declared in setup.py and setup.cfg, which matches the general requirements described by the official documentation for Requests’ dependency management.
+- For building and publishing locally, use:
+  - make init (to install dev requirements)
+  - make test (to run tests)
+  - make publish (to build and upload to PyPI, via a virtualenv wrapper)
+  - make docs (to build docs)
+- The pyproject.toml primarily configures developer tooling (isort, pytest) rather than a modern PEP 517/518 build backend; the actual build uses setup.py via setuptools as shown in Makefile and packaging metadata.
+
+Cross-referenced official docs URLs:
+- Official documentation: https://docs.python-requests.org/en/latest/
+- Readthedocs page: https://requests.readthedocs.io
+- Source repository: https://github.com/psf/requests
+
+
+----------------------------------------------------------------------
+Analysis Step 3/4
+----------------------------------------------------------------------
+Query: Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install' or 'build' commands mentioned in configuration files or scripts. Compare with official documentation.
+
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will open the README to extract installation and build instructions.
+
+[ACTION] ReadFile
+[INPUT] README.md
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:46:36,824 - planner_agent - INFO - Reading local file: ./temp\requests\README.md
+2025-11-18 00:46:36,824 - planner_agent - INFO - Successfully read ./temp\requests\README.md (2927 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will search for explicit installation or build instructions and commands mentioned in config/scripts across the repository to complement the README.
+
+[ACTION] GrepFiles
+[INPUT] .,install,*,2
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:46:45,037 - planner_agent - INFO - Grepping for 'install' in ./temp\requests/*
+2025-11-18 00:46:45,242 - planner_agent - INFO - Found 44 matches in 110 files
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read the README to extract installation and build instructions.
+
+[ACTION] ReadFile
+[INPUT] README.md
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:46:52,798 - planner_agent - INFO - Reading local file: ./temp\requests\README.md
+2025-11-18 00:46:52,799 - planner_agent - INFO - Successfully read ./temp\requests\README.md (2927 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will start by inspecting the repository structure to locate build/config files and relevant scripts.
+
+[ACTION] DirectoryTree
+[INPUT] .,2,false,true
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:47:04,289 - planner_agent - INFO - Creating tree for ./temp\requests (depth=2, hidden=False, files=True)
+2025-11-18 00:47:04,294 - planner_agent - INFO - Tree created with 57 lines
+
+[RESULT]
+Installation and build instructions (from this repo)
+
+- From the README.md:
+  - Installation from PyPI:
+    - python -m pip install requests
+  - Python version support:
+    - Requests officially supports Python 3.9+
+  - Basic usage notes and Overview (informational, not installation steps)
+
+- From development/config files (supporting commands):
+  - Install development dependencies (for local development and testing):
+    - python -m pip install -r requirements-dev.txt
+    - This is reflected in the Makefile’s init target (init: python -m pip install -r requirements-dev.txt)
+  - Build/install from source (from the repository):
+    - After obtaining a copy of the source (e.g., cd into the repo and/or clone it), install locally with:
+      - python -m pip install .
+    - This is shown in the docs user install guidance:
+      - cd requests
+      - python -m pip install .
+  - Basic project layout/build tooling:
+    - Packaging metadata and build configuration live in setup.py (and pyproject.toml), indicating standard Python packaging (no separate custom build step required for installation).
+
+- From the Makefile (supporting dev/build tasks):
+  - init: install development requirements
+    - python -m pip install -r requirements-dev.txt
+  - test: run tests
+    - python -m pytest tests
+  - publish-related tasks exist (e.g., creating a build/publish environment), but for typical installation those are not required.
+
+- From the official documentation (cross-reference):
+  - Official docs show:
+    - Installing from PyPI: python -m pip install requests
+    - For source installation: get the source and then run:
+      - python -m pip install .
+  - Python version requirement in official docs matches the repository:
+    - Python 3.9+ is supported
+  - The docs also provide guidance on getting the source and ensuring you have the correct tooling for building docs, etc., but for regular installation the pip install path is the primary method and aligns with the repository’s README and docs.
+
+Summary:
+- Primary installation method: pip install requests (from PyPI)
+- From source: docker-less steps are cd into repo and python -m pip install .
+- Development tasks (optional): install dev requirements, run tests
+- Build step: No separate build process beyond standard Python packaging; wheel/build can be handled via standard Python packaging tools if needed, but the repository uses setup.py/pyproject.toml for packaging.
+
+
+----------------------------------------------------------------------
+Analysis Step 4/4
+----------------------------------------------------------------------
+Query: Now create a comprehensive step-by-step build instruction document that includes: 1) Project type and language, 2) Prerequisites, 3) Installation commands, 4) Build commands, 5) How to run/test. Use all the information you've gathered from web documentation and local files in previous steps.
+
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will locate key build/config files and read README to prepare the build instruction document.
+
+[ACTION] FindFiles
+[INPUT] .,setup.py,2
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:47:40,345 - planner_agent - INFO - Finding files matching 'setup.py' in ./temp\requests (depth 2)
+2025-11-18 00:47:40,349 - planner_agent - INFO - Found 1 files matching pattern
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read setup.py to extract packaging/build information and potential build commands.
+
+[ACTION] ReadFile
+[INPUT] setup.py
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:47:46,492 - planner_agent - INFO - Reading local file: ./temp\requests\setup.py
+2025-11-18 00:47:46,493 - planner_agent - INFO - Successfully read ./temp\requests\setup.py (3229 chars)
+
+──────────────────────────────────────────────────────────────────────
+[THOUGHT] Thought: I will read README.md to extract installation/build instructions and any build/test commands mentioned there.
+
+[ACTION] ReadFile
+[INPUT] README.md
+──────────────────────────────────────────────────────────────────────
+2025-11-18 00:47:52,023 - planner_agent - INFO - Reading local file: ./temp\requests\README.md
+2025-11-18 00:47:52,024 - planner_agent - INFO - Successfully read ./temp\requests\README.md (2927 chars)
+
+[RESULT]
+Comprehensive Build Instructions for the Python Requests Library
+
+1) Project type and language
+- Language: Python
+- Type: Open-source Python library for making HTTP requests
+- Packaging/build system: setuptools-based packaging (setup.py). The package source is under src/requests, with version metadata loaded from src/requests/__version__.py. Python requires at least 3.9. The project defines install-time dependencies (charset_normalizer, idna, urllib3, certifi) and supports optional extras (e.g., socks, use_chardet_on_py3).
+
+2) Prerequisites
+- Python: 3.9 or newer
+- pip and setuptools (latest recommended)
+- Build tools (optional but recommended for local builds): wheel, setuptools
+- Network access to fetch dependencies
+- Optional for development/testing:
+  - Virtual environment tool (virtualenv or venv)
+  - development/testing dependencies listed in requirements-dev.txt
+  - Tools like pytest, tox, and pytest-related plugins (as specified in requirements-dev.txt and tox.ini)
+
+3) Installation commands (from PyPI and from source)
+- From PyPI (standard installation)
+  - python -m pip install requests
+  - This installs the released package and its core dependencies (charset_normalizer>=2,<4, idna>=2.5,<4, urllib3>=1.21.1,<3, certifi>=2017.4.17)
+- From source (local development or testing)
+  - Ensure you are in the repository root (where setup.py resides)
+  - Optional: create and activate a virtual environment
+  - Install in editable/development mode (recommended for development)
+    - python -m pip install -e .
+  - Install core dependencies (if not installed via editable install)
+    - python -m pip install -r requirements-dev.txt
+- Extras and alternatives
+  - To install with SOCKS support (PySocks):
+    - python -m pip install .[socks]
+  - To enable chardet handling on Python 3 (for older encodings):
+    - python -m pip install .[use_chardet_on_py3]
+  - If you want to install without building from source, you can rely on PyPI (first bullet) or install from source with editable mode as shown above.
+
+4) Build commands (from source)
+- Build distributions (sdist and wheel)
+  - python setup.py sdist bdist_wheel
+  - This generates distribution archives under dist/ (e.g., dist/requests-<version>.tar.gz and dist/requests-<version>-py3-none-any.whl)
+- Optional publishing helper (provided in setup.py as a shortcut)
+  - python setup.py publish
+  - Note: This will trigger sdist, bdist_wheel, and then upload via twine if configured
+- Alternative modern approach (PEP 517/518). If you have a PEP 517-compatible build tool installed, you can also use:
+  - python -m build
+  - This approach relies on the project’s configured build backend; the repository’s setup.py approach is the canonical method here.
+
+5) How to run/test
+- Install test/development dependencies
+  - python -m pip install -r requirements-dev.txt
+  - This provides pytest and related plugins (pytest, pytest-cov, pytest-mock, pytest-xdist, etc.)
+- Run tests
+  - pytest
+  - Optional: run with parallel workers if supported (e.g., pytest -n auto) depending on requirements-dev.txt and available plugins
+- Run a quick local usage check (example)
+  - Open a Python interpreter or run a small script:
+    - import requests
+    - r = requests.get("https://httpbin.org/get")
+    - print(r.status_code, r.headers.get("content-type"), r.text[:100])
+- Inspect packaging metadata and dependencies (optional)
+  - Review setup.py for:
+    - install_requires: ["charset_normalizer>=2,<4", "idna>=2.5,<4", "urllib3>=1.21.1,<3", "certifi>=2017.4.17"]
+    - python_requires: ">=3.9"
+    - extras_require: {"socks": ["PySocks>=1.5.6, !=1.5.7"], "use_chardet_on_py3": ["chardet>=3.0.2,<6"]}
+  - Review README.md for installation notes and quickstart usage, which corroborate:
+    - Installation via pip from PyPI
+    - Python 3.9+ support
+    - Basic usage examples and some project context
+- Optional local testing variations
+  - If you want to exercise SOCKS support or other extras:
+    - python -m pip install .[socks]
+    - python -m pip install .[use_chardet_on_py3]
+- Documentation reference
+  - Official Requests documentation: https://docs.python-requests.org/en/latest/ (for API reference and usage patterns)
+  - Source repository: https://github.com/psf/requests (for source code and packaging details)
+
+Notes
+- The build system is setuptools-based (setup.py). The repository’s setup.py enforces Python 3.9+ and lists core install-time dependencies. The README confirms basic installation via PyPI and provides usage examples.
+- If you want to stay aligned with the official project workflow, prefer pip install requests for end users, and use python setup.py sdist bdist_wheel (or python -m build) for local distribution creation when developing or releasing.
+
