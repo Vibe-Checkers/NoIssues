@@ -1,0 +1,55 @@
+Web Search Result #2
+======================================================================
+Title: Installation of Requests — Requests 2.32.5 Documentation
+URL: https://requests.readthedocs.io/en/latest/user/install/
+Search Query: requests Python documentation installation instructions
+Project Name: requests
+Fetched: 2025-11-29T18:07:44.034718
+Status: SUCCESS (HTTP 200)
+======================================================================
+
+FULL PAGE CONTENT:
+======================================================================
+
+Installation of Requests — Requests 2.32.5 documentation
+Installation of Requests¶
+This part of the documentation covers the installation of Requests.
+The first step to using any software package is getting it properly installed.
+$ python -m pip install requests¶
+To install Requests, simply run this simple command in your terminal of choice:
+$ python -m pip install requests
+Get the Source Code¶
+Requests is actively developed on GitHub, where the code is
+always available.
+You can either clone the public repository:
+$ git clone https://github.com/psf/requests.git
+Or, download the tarball:
+$ curl -OL https://github.com/psf/requests/tarball/main
+# optionally, zipball is also available (for Windows users).
+Once you have a copy of the source, you can embed it in your own Python
+package, or install it into your site-packages easily:
+$ cd requests
+$ python -m pip install .
+Requests is an elegant and simple HTTP library for Python, built for
+human beings. You are currently looking at the documentation of the
+development release.
+Useful Links
+Quickstart
+Advanced Usage
+API Reference
+Release History
+Contributors Guide
+Recommended Packages and Extensions
+Requests @ GitHub
+Requests @ PyPI
+Issue Tracker
+Table of Contents
+Installation of Requests
+$ python -m pip install requests
+Get the Source Code
+Related Topics
+Documentation overview
+Previous: Requests: HTTP for Humans™
+Next: Quickstart
+Quick search
+©MMXVIX. A Kenneth Reitz Project.

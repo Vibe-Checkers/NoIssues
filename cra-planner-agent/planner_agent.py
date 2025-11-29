@@ -105,6 +105,9 @@ class GPT5NanoWrapper(BaseChatModel):
 # Global variable to track the current repository base path
 REPOSITORY_BASE_PATH = None
 
+# Global variable to track the report directory for saving web search content
+REPORT_DIRECTORY = None
+
 
 def _make_relative_path(absolute_path: str) -> str:
     """
@@ -162,53 +165,589 @@ def _resolve_path(user_path: str) -> str:
 # Tool Functions
 # ============================================================================
 
+def extract_relevant_sections(soup, max_chars_per_section=3000, max_total_chars=5000):
+    """
+    Extract relevant sections (installation, build, setup) from HTML.
+    Prioritizes build sections but includes installation if relevant.
+    
+    Args:
+        soup: BeautifulSoup parsed HTML
+        max_chars_per_section: Maximum characters per extracted section
+        max_total_chars: Maximum total characters to return
+        
+    Returns:
+        Extracted text content focusing on build/installation sections
+    """
+    import re
+    
+    # Keywords to look for in headings/text (prioritized)
+    build_keywords = ['build', 'compil', 'make', 'cmake', 'cargo build', 'npm run build', 'setup.py', 'dist']
+    install_keywords = ['install', 'installation', 'setup', 'getting started', 'quick start', 'prerequisites', 'requirements', 'dependencies']
+    
+    extracted_sections = []
+    found_sections = []
+    total_chars = 0
+    
+    # Find all headings (h1-h6) and their content
+    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    for heading in headings:
+        heading_text = heading.get_text().strip().lower()
+        
+        # Check if heading is relevant (prioritize build)
+        is_build = any(keyword in heading_text for keyword in build_keywords)
+        is_install = any(keyword in heading_text for keyword in install_keywords)
+        
+        if is_build or is_install:
+            # Get the section content
+            section_content = []
+            current = heading.next_sibling
+            
+            # Collect content until next heading of same or higher level
+            heading_level = int(heading.name[1]) if heading.name.startswith('h') else 6
+            chars_collected = 0
+            
+            while current and chars_collected < max_chars_per_section:
+                if isinstance(current, str):
+                    text = current.strip()
+                    if text:
+                        section_content.append(text)
+                        chars_collected += len(text)
+                elif hasattr(current, 'name'):
+                    if current.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                        # Stop at next heading
+                        next_level = int(current.name[1]) if current.name.startswith('h') else 6
+                        if next_level <= heading_level:
+                            break
+                    elif current.name in ['p', 'li', 'div', 'pre', 'code']:
+                        text = current.get_text().strip()
+                        if text:
+                            section_content.append(text)
+                            chars_collected += len(text)
+                
+                current = current.next_sibling
+                if chars_collected >= max_chars_per_section:
+                    break
+            
+            if section_content:
+                section_text = '\n'.join(section_content)
+                if len(section_text) > max_chars_per_section:
+                    section_text = section_text[:max_chars_per_section] + "..."
+                
+                priority = 1 if is_build else 2  # Build sections have higher priority
+                found_sections.append({
+                    'heading': heading.get_text().strip(),
+                    'content': section_text,
+                    'priority': priority,
+                    'is_build': is_build,
+                    'is_install': is_install,
+                    'order': len(found_sections)  # Track original order before sorting
+                })
+    
+    # Sort by priority (build first) and then by original order (ascending)
+    found_sections.sort(key=lambda x: (x['priority'], x['order']))
+    
+    # Combine sections up to max_total_chars
+    for section in found_sections:
+        section_output = f"\n{'='*70}\nSECTION: {section['heading']}\n{'='*70}\n{section['content']}\n"
+        if total_chars + len(section_output) <= max_total_chars:
+            extracted_sections.append(section_output)
+            total_chars += len(section_output)
+        else:
+            # Add partial section if there's room
+            remaining = max_total_chars - total_chars - 100  # Leave room for header
+            if remaining > 500:
+                partial = section['content'][:remaining] + "..."
+                extracted_sections.append(f"\n{'='*70}\nSECTION: {section['heading']} (partial)\n{'='*70}\n{partial}\n")
+            break
+    
+    if extracted_sections:
+        return '\n'.join(extracted_sections)
+    
+    # Fallback: get first part of body text if no sections found
+    body = soup.find('body')
+    if body:
+        text = body.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        if len(text) > max_total_chars:
+            return text[:max_total_chars] + "\n\n[Content truncated - no specific build/installation sections found, showing beginning of page]"
+        return text
+    
+    return "[No relevant content found]"
+
+
 def search_web(query: str) -> str:
     """
-    Search the web using DuckDuckGo for official product documentation.
-    This tool searches for real product documentation, not general web pages.
-
+    Search the web for official product documentation and build guides.
+    Performs multiple searches (documentation + build guide), fetches top 3 unique pages,
+    extracts relevant build/installation sections, and saves full content to files.
+    
     Args:
-        query: Search query string (should include "documentation" for best results)
-
+        query: Base search query (e.g., "requests Python")
+        
     Returns:
-        Search results as a formatted string with relevant documentation links
+        Shortened summary (max 5000 chars) with key build/installation sections from top 3 pages
     """
     try:
         logger.info(f"Searching the web for: {query}")
         
-        # Use duckduckgo_search directly for better reliability
         try:
             from ddgs import DDGS
+            import requests
+            from bs4 import BeautifulSoup
+            from datetime import datetime
+            from pathlib import Path
+            import re
             
-            formatted_results = f"Documentation Search Results for: {query}\n"
-            formatted_results += "=" * 70 + "\n\n"
+            # Check for cached web search files first
+            cached_pages = []
+            if REPORT_DIRECTORY:
+                report_path = Path(REPORT_DIRECTORY)
+                for idx in range(1, 4):
+                    cache_file = report_path / f"web_search_{idx}.txt"
+                    if cache_file.exists():
+                        try:
+                            with open(cache_file, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            
+                            # Parse cached file to extract metadata and content
+                            title_match = re.search(r'Title: (.+)', content)
+                            url_match = re.search(r'URL: (.+)', content)
+                            
+                            if title_match and url_match:
+                                # Extract content after the header (after "FULL PAGE CONTENT:")
+                                content_start = content.find("FULL PAGE CONTENT:")
+                                if content_start != -1:
+                                    full_content = content[content_start + len("FULL PAGE CONTENT:"):].strip()
+                                    # Remove the separator line
+                                    if full_content.startswith("="*70):
+                                        parts = full_content.split("="*70, 2)
+                                        if len(parts) > 2:
+                                            full_content = parts[2].strip()
+                                    
+                                    cached_pages.append({
+                                        'title': title_match.group(1).strip(),
+                                        'url': url_match.group(1).strip(),
+                                        'full_content': full_content,
+                                        'cached': True
+                                    })
+                                    logger.info(f"Found cached web search result {idx}: {url_match.group(1).strip()}")
+                        except Exception as cache_error:
+                            logger.warning(f"Error reading cached file {cache_file}: {cache_error}")
+                            continue
+            
+            # If we have cached pages, use them instead of searching
+            if cached_pages:
+                logger.info(f"Using {len(cached_pages)} cached web search results")
+                fetched_pages = []
+                total_output_chars = 0
+                max_output_chars = 5000
+                
+                for idx, cached_page in enumerate(cached_pages, 1):
+                    # Parse the cached content to extract relevant sections
+                    try:
+                        # Create a simple HTML-like structure from text for section extraction
+                        # We'll search for headings in the text content
+                        full_text = cached_page['full_content']
+                        
+                        # Extract relevant sections using text patterns
+                        build_keywords = ['build', 'compil', 'make', 'cmake', 'cargo build', 'npm run build', 'setup.py', 'dist']
+                        install_keywords = ['install', 'installation', 'setup', 'getting started', 'quick start', 'prerequisites', 'requirements', 'dependencies']
+                        
+                        # Find sections by looking for lines that look like headings (all caps, or followed by colons)
+                        lines = full_text.split('\n')
+                        relevant_sections = []
+                        current_section = []
+                        in_relevant_section = False
+                        
+                        for i, line in enumerate(lines):
+                            line_lower = line.lower().strip()
+                            # Check if line looks like a heading
+                            is_heading = (line.isupper() and len(line) < 100) or \
+                                        (line.endswith(':') and len(line) < 100) or \
+                                        (line.startswith('#') and len(line) < 100) or \
+                                        (len(line) > 0 and len(line) < 80 and not line[0].islower())
+                            
+                            if is_heading:
+                                # Check if heading is relevant
+                                is_build = any(kw in line_lower for kw in build_keywords)
+                                is_install = any(kw in line_lower for kw in install_keywords)
+                                
+                                if is_build or is_install:
+                                    # Save previous section if it was relevant
+                                    if current_section and in_relevant_section:
+                                        relevant_sections.append('\n'.join(current_section))
+                                    # Start new section
+                                    current_section = [line]
+                                    in_relevant_section = True
+                                else:
+                                    # Save previous section
+                                    if current_section and in_relevant_section:
+                                        relevant_sections.append('\n'.join(current_section))
+                                    current_section = []
+                                    in_relevant_section = False
+                            elif in_relevant_section:
+                                current_section.append(line)
+                                # Limit section size
+                                if len('\n'.join(current_section)) > 2000:
+                                    relevant_sections.append('\n'.join(current_section))
+                                    current_section = []
+                                    in_relevant_section = False
+                        
+                        # Add final section if relevant
+                        if current_section and in_relevant_section:
+                            relevant_sections.append('\n'.join(current_section))
+                        
+                        # Combine relevant sections
+                        if relevant_sections:
+                            relevant_content = '\n\n'.join(relevant_sections)
+                            if len(relevant_content) > 2000:
+                                relevant_content = relevant_content[:2000] + "..."
+                        else:
+                            # Fallback: use first part of content
+                            relevant_content = full_text[:2000] + ("..." if len(full_text) > 2000 else "")
+                        
+                        # Prepare summary for agent
+                        page_summary = f"\n{'='*70}\nPAGE {idx}: {cached_page['title']}\nURL: {cached_page['url']}\n[FROM CACHE]\n{'='*70}\n"
+                        page_summary += relevant_content
+                        
+                        # Check if we have room in output
+                        if total_output_chars + len(page_summary) <= max_output_chars:
+                            fetched_pages.append(page_summary)
+                            total_output_chars += len(page_summary)
+                        elif total_output_chars < max_output_chars - 500:
+                            remaining = max_output_chars - total_output_chars - 200
+                            if remaining > 500:
+                                page_summary_short = page_summary[:remaining] + "\n[Content truncated...]"
+                                fetched_pages.append(page_summary_short)
+                                total_output_chars = max_output_chars
+                        
+                    except Exception as parse_error:
+                        logger.warning(f"Error parsing cached content: {parse_error}")
+                        # Fallback: use first part of content
+                        page_summary = f"\n{'='*70}\nPAGE {idx}: {cached_page['title']}\nURL: {cached_page['url']}\n[FROM CACHE]\n{'='*70}\n"
+                        page_summary += cached_page['full_content'][:1500] + ("..." if len(cached_page['full_content']) > 1500 else "")
+                        if total_output_chars + len(page_summary) <= max_output_chars:
+                            fetched_pages.append(page_summary)
+                            total_output_chars += len(page_summary)
+                
+                # Build final output from cache
+                output = f"WEB SEARCH RESULTS - Build/Installation Guides (FROM CACHE)\n"
+                output += f"{'='*70}\n"
+                output += f"Using {len(cached_pages)} cached results from previous search\n"
+                output += f"Focus: Build and installation sections extracted\n"
+                output += f"{'='*70}\n\n"
+                
+                if fetched_pages:
+                    output += '\n'.join(fetched_pages)
+                else:
+                    output += "No relevant content found in cache."
+                
+                if len(output) > max_output_chars:
+                    output = output[:max_output_chars] + "\n\n[Output truncated - see web_search_X.txt files for full content]"
+                
+                logger.info(f"Returned cached search results, {len(output)} chars")
+                return output
+            
+            # No cache found, perform new search
+            logger.info("No cached results found, performing new web search")
+            
+            # Extract project name from query (first word, before language)
+            # e.g., "requests Python" -> "requests", "react JavaScript" -> "react"
+            base_query = query.strip()
+            query_parts = base_query.split()
+            project_name = query_parts[0].lower() if query_parts else base_query.lower()
+            logger.info(f"Extracted project name: {project_name}")
+            
+            # Generate multiple search queries - focus on actionable installation/build guides
+            # Skip general documentation, target specific guides that contain step-by-step instructions
+            queries = [
+                f"{base_query} how to install",
+                f"{base_query} installation instructions",
+                f"{base_query} build from source",
+                f"{base_query} building guide",
+                f"{base_query} setup guide",
+                f"{base_query} getting started install"
+            ]
+            
+            # Collect unique results from all searches
+            all_results = []
+            seen_urls = set()
             
             with DDGS() as ddgs:
-                results_list = []
-                # Search for documentation, prioritizing official sources
-                for r in ddgs.text(query, max_results=8):
-                    title = r.get('title', 'No title')
-                    body = r.get('body', 'No description')
-                    href = r.get('href', 'No URL')
-                    
-                    # Format each result
-                    result_entry = f"Title: {title}\n"
-                    result_entry += f"Description: {body[:200]}...\n" if len(body) > 200 else f"Description: {body}\n"
-                    result_entry += f"URL: {href}\n"
-                    result_entry += "-" * 70 + "\n"
-                    results_list.append(result_entry)
-                
-                if results_list:
-                    formatted_results += "\n".join(results_list)
-                    formatted_results += f"\n[Found {len(results_list)} results. Focus on official documentation sources (official websites, GitHub, documentation sites).]"
-                else:
-                    formatted_results += "No results found. Try a more specific query."
+                for search_query in queries:
+                    try:
+                        for r in ddgs.text(search_query, max_results=5):
+                            href = r.get('href', '')
+                            if href and href.startswith('http') and href not in seen_urls:
+                                # Filter out unwanted sources
+                                skip_indicators = ['wikipedia.org', 'stackoverflow.com', 'reddit.com', 'youtube.com']
+                                if not any(skip in href.lower() for skip in skip_indicators):
+                                    all_results.append({
+                                        'title': r.get('title', 'No title'),
+                                        'body': r.get('body', 'No description'),
+                                        'href': href,
+                                        'query': search_query
+                                    })
+                                    seen_urls.add(href)
+                    except Exception as e:
+                        logger.warning(f"Search query '{search_query}' failed: {e}")
+                        continue
             
-            logger.info(f"Search completed, {len(formatted_results)} chars returned")
-            return formatted_results
+            if not all_results:
+                return "No relevant documentation found. Try a more specific query."
+            
+            # Prioritize results: MUST contain project name in URL or title (not just body)
+            def prioritize_result(result):
+                href_lower = result['href'].lower()
+                title_lower = result.get('title', '').lower()
+                body_lower = result.get('body', '').lower()
+                combined_text = f"{href_lower} {title_lower} {body_lower}"
+                score = 0
+                
+                # CRITICAL: Must contain project name in URL or title (not just body text)
+                # This prevents false matches like "HTTP requests" in unrelated docs
+                project_in_url = project_name in href_lower
+                project_in_title = project_name in title_lower
+                
+                if project_in_url or project_in_title:
+                    score += 100  # Massive boost for project-specific pages (URL or title)
+                    if project_in_url and project_in_title:
+                        score += 20  # Extra boost if in both
+                else:
+                    # Heavily penalize - these are likely false matches
+                    score -= 100  # Very negative score to filter out
+                
+                # Highest priority: pages with installation/build in URL or title
+                if any(x in href_lower for x in ['/install', '/installation', '/build', '/building', '/setup', '/getting-started']):
+                    score += 15
+                if any(x in title_lower for x in ['install', 'installation', 'build', 'building', 'setup', 'getting started']):
+                    score += 12
+                
+                # Official documentation sites with install/build content
+                if any(x in href_lower for x in ['docs.', 'documentation', 'readthedocs.io']):
+                    if any(x in combined_text for x in ['install', 'build', 'setup']):
+                        score += 10
+                    else:
+                        score += 5  # Lower score if no install/build content
+                
+                # GitHub pages with install/build in path
+                if 'github.com' in href_lower:
+                    if any(x in href_lower for x in ['/install', '/build', '/setup', 'readme']):
+                        score += 10
+                    elif any(x in title_lower for x in ['install', 'build', 'setup']):
+                        score += 8
+                
+                # General indicators
+                if any(x in combined_text for x in ['build from source', 'how to install', 'installation guide', 'build guide']):
+                    score += 8
+                if any(x in href_lower for x in ['build', 'install', 'setup', 'guide']):
+                    score += 5
+                if 'official' in combined_text:
+                    score += 3
+                
+                return score
+            
+            # Sort and filter: prioritize project-specific results
+            all_results.sort(key=prioritize_result, reverse=True)
+            
+            # STRICT FILTER: Only include results with project name in URL or title (not just body)
+            project_specific_results = [
+                r for r in all_results 
+                if project_name in r['href'].lower() or project_name in r.get('title', '').lower()
+            ]
+            
+            if project_specific_results:
+                logger.info(f"Found {len(project_specific_results)} project-specific results (project name in URL/title), filtering out {len(all_results) - len(project_specific_results)} irrelevant results")
+                all_results = project_specific_results[:10]  # Keep top 10 project-specific results
+            else:
+                logger.warning(f"No project-specific results found for '{project_name}' (in URL or title). This might indicate:")
+                logger.warning(f"  1. The project name '{project_name}' might be incorrect")
+                logger.warning(f"  2. Search results don't contain the project name in URLs/titles")
+                logger.warning(f"  3. Using top results anyway, but they may not be relevant")
+                # Still use top results, but warn that they might not be relevant
+                all_results = all_results[:10]
+            
+            # Fetch top 3 unique pages
+            pages_to_fetch = all_results[:3]
+            fetched_pages = []
+            total_output_chars = 0
+            max_output_chars = 5000
+            successful_fetches = 0
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            for idx, result in enumerate(pages_to_fetch, 1):
+                url = result['href']
+                title = result['title']
+                
+                try:
+                    logger.info(f"Fetching page {idx}/3: {url}")
+                    
+                    # Try fetching with retries and better error handling
+                    response = None
+                    fetch_success = False
+                    error_details = None
+                    
+                    try:
+                        # Increase timeout and add SSL verification options
+                        response = requests.get(
+                            url, 
+                            headers=headers, 
+                            timeout=30,  # Increased from 10 to 30 seconds
+                            verify=True,  # SSL verification
+                            allow_redirects=True,
+                            stream=False
+                        )
+                        response.raise_for_status()
+                        fetch_success = True
+                        logger.info(f"Successfully fetched {url} (status: {response.status_code})")
+                    except requests.exceptions.Timeout as e:
+                        error_details = f"Timeout after 30 seconds: {str(e)}"
+                        logger.error(f"Timeout fetching {url}: {e}")
+                    except requests.exceptions.HTTPError as e:
+                        error_details = f"HTTP Error {response.status_code if response else 'unknown'}: {str(e)}"
+                        logger.error(f"HTTP error fetching {url}: {e}")
+                    except requests.exceptions.ConnectionError as e:
+                        error_details = f"Connection error: {str(e)}"
+                        logger.error(f"Connection error fetching {url}: {e}")
+                    except requests.exceptions.RequestException as e:
+                        error_details = f"Request error: {str(e)}"
+                        logger.error(f"Request error fetching {url}: {e}")
+                    except Exception as e:
+                        error_details = f"Unexpected error: {type(e).__name__}: {str(e)}"
+                        logger.error(f"Unexpected error fetching {url}: {e}")
+                    
+                    if not fetch_success or response is None:
+                        # Save error details
+                        if REPORT_DIRECTORY:
+                            try:
+                                save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                                with open(save_path, 'w', encoding='utf-8') as f:
+                                    f.write(f"Web Search Result #{idx}\n")
+                                    f.write(f"{'='*70}\n")
+                                    f.write(f"Title: {title}\n")
+                                    f.write(f"URL: {url}\n")
+                                    f.write(f"Search Query: {result['query']}\n")
+                                    f.write(f"Project Name: {project_name}\n")
+                                    f.write(f"Fetched: {datetime.now().isoformat()}\n")
+                                    f.write(f"Status: FAILED\n")
+                                    f.write(f"Error: {error_details}\n")
+                                    f.write(f"{'='*70}\n\n")
+                                    f.write("ERROR: Could not fetch page content.\n")
+                                    f.write(f"\nError Details:\n{error_details}\n")
+                                logger.info(f"Saved failed fetch info to {save_path}")
+                            except Exception as save_error:
+                                logger.error(f"Could not save failed fetch info: {save_error}")
+                        continue
+                    
+                    # Parse HTML
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Remove unwanted elements
+                    for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                        script.decompose()
+                    
+                    # Extract relevant sections (build/installation focused)
+                    relevant_content = extract_relevant_sections(soup, max_chars_per_section=2000, max_total_chars=2000)
+                    
+                    # Get full text for saving to file
+                    full_text = soup.get_text()
+                    lines = (line.strip() for line in full_text.splitlines())
+                    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                    full_text_clean = '\n'.join(chunk for chunk in chunks if chunk)
+                    
+                    # Save to file if report directory is set
+                    if REPORT_DIRECTORY:
+                        try:
+                            save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                            with open(save_path, 'w', encoding='utf-8') as f:
+                                f.write(f"Web Search Result #{idx}\n")
+                                f.write(f"{'='*70}\n")
+                                f.write(f"Title: {title}\n")
+                                f.write(f"URL: {url}\n")
+                                f.write(f"Search Query: {result['query']}\n")
+                                f.write(f"Project Name: {project_name}\n")
+                                f.write(f"Fetched: {datetime.now().isoformat()}\n")
+                                f.write(f"Status: SUCCESS (HTTP {response.status_code})\n")
+                                f.write(f"{'='*70}\n\n")
+                                f.write("FULL PAGE CONTENT:\n")
+                                f.write(f"{'='*70}\n\n")
+                                f.write(full_text_clean)
+                            logger.info(f"Saved web search content to {save_path} ({len(full_text_clean)} chars)")
+                            successful_fetches += 1
+                        except Exception as save_error:
+                            logger.error(f"Could not save web search file {idx}: {save_error}")
+                            # Continue anyway - don't break the loop
+                    
+                    # Prepare summary for agent (limited chars)
+                    page_summary = f"\n{'='*70}\nPAGE {idx}: {title}\nURL: {url}\n{'='*70}\n"
+                    page_summary += relevant_content
+                    
+                    # Check if we have room in output
+                    if total_output_chars + len(page_summary) <= max_output_chars:
+                        fetched_pages.append(page_summary)
+                        total_output_chars += len(page_summary)
+                    elif total_output_chars < max_output_chars - 500:  # Add partial if there's significant room
+                        remaining = max_output_chars - total_output_chars - 200
+                        if remaining > 500:
+                            page_summary_short = page_summary[:remaining] + "\n[Content truncated...]"
+                            fetched_pages.append(page_summary_short)
+                            total_output_chars = max_output_chars
+                    
+                    logger.info(f"Successfully processed page {idx}: {title} ({len(relevant_content)} chars extracted)")
+                    
+                except Exception as unexpected_error:
+                    # Catch any other unexpected errors
+                    error_msg = f"Unexpected error: {type(unexpected_error).__name__}: {str(unexpected_error)}"
+                    logger.error(f"Unexpected error processing {url}: {error_msg}")
+                    if REPORT_DIRECTORY:
+                        try:
+                            save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                            with open(save_path, 'w', encoding='utf-8') as f:
+                                f.write(f"Web Search Result #{idx}\n")
+                                f.write(f"{'='*70}\n")
+                                f.write(f"Title: {title}\n")
+                                f.write(f"URL: {url}\n")
+                                f.write(f"Search Query: {result['query']}\n")
+                                f.write(f"Project Name: {project_name}\n")
+                                f.write(f"Fetched: {datetime.now().isoformat()}\n")
+                                f.write(f"Status: FAILED\n")
+                                f.write(f"Error: {error_msg}\n")
+                                f.write(f"{'='*70}\n\n")
+                                f.write("ERROR: Unexpected error occurred.\n")
+                            logger.info(f"Saved error info to {save_path}")
+                        except Exception as save_error:
+                            logger.error(f"Could not save error info: {save_error}")
+                    continue
+            
+            # Build final output
+            output = f"WEB SEARCH RESULTS - Build/Installation Guides\n"
+            output += f"{'='*70}\n"
+            output += f"Found {len(all_results)} total results, fetched top {len(fetched_pages)} pages\n"
+            output += f"Focus: Build and installation sections extracted\n"
+            if REPORT_DIRECTORY:
+                output += f"Full content saved to: web_search_1.txt, web_search_2.txt, web_search_3.txt\n"
+            output += f"{'='*70}\n\n"
+            
+            if fetched_pages:
+                output += '\n'.join(fetched_pages)
+            else:
+                output += "No pages could be fetched. Check logs for details."
+            
+            # Ensure we don't exceed limit
+            if len(output) > max_output_chars:
+                output = output[:max_output_chars] + "\n\n[Output truncated - see web_search_X.txt files for full content]"
+            
+            logger.info(f"Search completed, {len(output)} chars returned, {len(fetched_pages)} pages processed")
+            return output
             
         except ImportError as e:
-            error_msg = "Search dependencies not available. Please install: pip install -U ddgs"
+            error_msg = "Search dependencies not available. Please install: pip install -U ddgs beautifulsoup4 requests"
             logger.error(f"{error_msg}. Error: {e}")
             return f"Search error: {error_msg}"
         except Exception as e:
@@ -856,7 +1395,7 @@ def create_planner_agent(
         Tool(
             name="SearchWeb",
             func=search_web,
-            description="**MANDATORY FIRST STEP**: Search the web for official product documentation, API references, and build guides. You MUST use this tool at the beginning of your analysis. Search format: '<repo_name> <language> documentation' or '<library_name> official documentation'. This tool searches for real product documentation from official sources. Input: search query string (e.g., 'requests Python documentation' or 'requests official documentation'). Returns search results with URLs - use FetchWebPage to get actual content."
+            description="**MANDATORY FIRST STEP**: Search the web for installation instructions and build guides. You MUST use this tool at the beginning of your analysis. This tool performs targeted searches for 'how to install', 'installation instructions', 'build from source', 'building guide', 'setup guide', and 'getting started' pages. It fetches the top 3 unique pages with actual step-by-step instructions and extracts relevant build/installation sections. Input: base search query (e.g., 'requests Python' or 'react JavaScript'). Returns focused build/installation content (max 5000 chars). Full page content is saved to web_search_X.txt files in the report directory."
         ),
         Tool(
             name="FetchWebPage",
