@@ -1,0 +1,31 @@
+# Sample Repository List for Empirical Testing
+# Format: One GitHub URL per line
+# Lines starting with # are comments and will be ignored
+
+# Python Projects (Small to Medium)
+https://github.com/psf/requests
+https://github.com/pallets/flask
+https://github.com/kennethreitz/delegator.py
+https://github.com/nvie/rq
+
+# JavaScript/TypeScript Projects
+https://github.com/expressjs/express
+https://github.com/fastify/fastify
+https://github.com/koajs/koa
+
+# Go Projects
+https://github.com/gin-gonic/gin
+https://github.com/gorilla/mux
+
+# Rust Projects
+https://github.com/actix/actix-web
+https://github.com/tokio-rs/axum
+
+# Java Projects
+https://github.com/spring-projects/spring-petclinic
+
+# Mixed/Other
+https://github.com/php/php-src
+
+# Add more repositories here...
+# Total: 13 sample repositories

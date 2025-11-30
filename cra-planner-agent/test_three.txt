@@ -1,0 +1,11 @@
+# Three repositories test
+# Small, well-documented projects across different languages
+
+# Python - Small HTTP library wrapper
+https://github.com/kennethreitz/delegator.py
+
+# JavaScript - Minimalist web framework
+https://github.com/koajs/koa
+
+# Go - HTTP router
+https://github.com/gorilla/mux
