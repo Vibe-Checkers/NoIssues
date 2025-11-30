@@ -113,7 +113,7 @@ class DockerBuildTester:
             else:
                 # Parse error to determine stage
                 full_error = result.stderr or result.stdout
-                stage, error_type = self._parse_docker_error(full_error)
+                stage, failed_docker_command = self._parse_docker_error(full_error)
 
                 # Extract a concise error snippet (last error line)
                 error_lines = full_error.strip().split('\n')
@@ -128,7 +128,7 @@ class DockerBuildTester:
                 return {
                     "success": False,
                     "stage": stage,
-                    "error_type": error_type,
+                    "failed_command": failed_docker_command,  # The Docker step that failed
                     "error_message": full_error,  # Full error for detailed analysis
                     "error_snippet": error_snippet,  # Concise error line for quick review
                     "exit_code": result.returncode,
@@ -162,226 +162,96 @@ class DockerBuildTester:
 
     def _parse_docker_error(self, error_output: str) -> Tuple[str, str]:
         """
-        Parse Docker error output to determine failure stage and type.
+        Parse Docker error output to determine which Dockerfile step failed.
 
-        Comprehensive error categorization for research purposes.
+        Strategy:
+        1. Extract the failed Docker step/command from build output
+        2. Categorize into simple high-level stages
+        3. Save full error output for manual inspection
 
         Returns:
-            Tuple of (stage, error_type)
+            Tuple of (stage, failed_command_or_description)
         """
         error_lower = error_output.lower()
 
-        # ===================================================================
-        # STAGE 1: Base Image Issues
-        # ===================================================================
-        if "failed to resolve" in error_lower or "manifest unknown" in error_lower:
-            return "IMAGE_PULL", "BASE_IMAGE_NOT_FOUND"
-        if "pull access denied" in error_lower or "unauthorized" in error_lower:
-            return "IMAGE_PULL", "BASE_IMAGE_UNAUTHORIZED"
-        if "image" in error_lower and any(x in error_lower for x in ["not found", "does not exist", "no such"]):
-            return "IMAGE_PULL", "BASE_IMAGE_NOT_FOUND"
-        if "registry" in error_lower and any(x in error_lower for x in ["connection", "timeout", "unreachable"]):
-            return "IMAGE_PULL", "REGISTRY_CONNECTION_ERROR"
+        # Extract the failed Docker step from the build output
+        failed_step = self._extract_failed_docker_step(error_output)
 
         # ===================================================================
-        # STAGE 2: Dockerfile Syntax Errors
+        # Simple Stage Detection - High Level Only
         # ===================================================================
-        if "dockerfile parse error" in error_lower or "unknown instruction" in error_lower:
-            return "DOCKERFILE_SYNTAX", "SYNTAX_ERROR"
-        if "unexpected" in error_lower and "dockerfile" in error_lower:
-            return "DOCKERFILE_SYNTAX", "UNEXPECTED_TOKEN"
 
-        # ===================================================================
-        # STAGE 3: File Copy/ADD Errors
-        # ===================================================================
-        if "copy failed" in error_lower or ("copy" in error_lower and "no such file" in error_lower):
-            return "FILE_COPY", "SOURCE_FILE_NOT_FOUND"
-        if "add failed" in error_lower:
-            return "FILE_COPY", "ADD_FAILED"
-        if "stat" in error_lower and "no such file" in error_lower:
-            return "FILE_COPY", "FILE_STAT_ERROR"
+        # 1. Docker Daemon Issues
+        if any(x in error_lower for x in ["cannot connect to the docker daemon", "is the docker daemon running", "docker: not found", "docker: command not found"]):
+            return "DOCKER_DAEMON", failed_step or "Docker daemon not accessible"
 
-        # ===================================================================
-        # STAGE 4: Dependency Management - Python (pip)
-        # ===================================================================
-        if "pip install" in error_lower or "pip3 install" in error_lower:
-            if "could not find a version" in error_lower or "no matching distribution" in error_lower:
-                return "DEPENDENCY_INSTALL_PYTHON", "PIP_PACKAGE_NOT_FOUND"
-            if "requirement already satisfied" in error_lower and "error" in error_lower:
-                return "DEPENDENCY_INSTALL_PYTHON", "PIP_DEPENDENCY_CONFLICT"
-            if "requires python" in error_lower:
-                return "DEPENDENCY_INSTALL_PYTHON", "PIP_PYTHON_VERSION_MISMATCH"
-            if "error: externally-managed-environment" in error_lower:
-                return "DEPENDENCY_INSTALL_PYTHON", "PIP_EXTERNALLY_MANAGED_ENV"
-            if "permission denied" in error_lower:
-                return "DEPENDENCY_INSTALL_PYTHON", "PIP_PERMISSION_DENIED"
-            return "DEPENDENCY_INSTALL_PYTHON", "PIP_INSTALL_FAILED"
+        # 2. Base Image Pull Issues (FROM command)
+        if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
+            return "IMAGE_PULL", failed_step or "Failed to pull base image"
 
-        # ===================================================================
-        # STAGE 5: Dependency Management - Node.js (npm/yarn)
-        # ===================================================================
-        if "npm install" in error_lower or "npm i " in error_lower:
-            if "404" in error_lower or "not found" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "NPM_PACKAGE_NOT_FOUND"
-            if "enoent" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "NPM_FILE_NOT_FOUND"
-            if "peer dep" in error_lower or "peerinvalid" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "NPM_PEER_DEPENDENCY_ERROR"
-            if "engine" in error_lower and "unsupported" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "NPM_ENGINE_VERSION_MISMATCH"
-            return "DEPENDENCY_INSTALL_NODE", "NPM_INSTALL_FAILED"
+        # 3. Dockerfile Syntax
+        if any(x in error_lower for x in ["dockerfile parse error", "unknown instruction"]):
+            return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
 
-        if "yarn install" in error_lower or "yarn add" in error_lower:
-            if "couldn't find package" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "YARN_PACKAGE_NOT_FOUND"
-            if "network" in error_lower and "error" in error_lower:
-                return "DEPENDENCY_INSTALL_NODE", "YARN_NETWORK_ERROR"
-            return "DEPENDENCY_INSTALL_NODE", "YARN_INSTALL_FAILED"
+        # 4. File Copy/Add (COPY/ADD commands)
+        if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
+            return "FILE_COPY", failed_step or "File copy/add failed"
 
-        # ===================================================================
-        # STAGE 6: Dependency Management - Go
-        # ===================================================================
-        if "go mod download" in error_lower or "go get" in error_lower or "go build" in error_lower:
-            if "missing go.sum entry" in error_lower or "go.sum" in error_lower:
-                return "DEPENDENCY_INSTALL_GO", "GO_MISSING_SUM_ENTRY"
-            if "no required module" in error_lower or "module not found" in error_lower:
-                return "DEPENDENCY_INSTALL_GO", "GO_MODULE_NOT_FOUND"
-            if "invalid version" in error_lower:
-                return "DEPENDENCY_INSTALL_GO", "GO_INVALID_VERSION"
-            if "ambiguous import" in error_lower:
-                return "DEPENDENCY_INSTALL_GO", "GO_AMBIGUOUS_IMPORT"
-            return "DEPENDENCY_INSTALL_GO", "GO_DEPENDENCY_FAILED"
+        # 5. Dependency Installation (RUN pip/npm/go/cargo install commands)
+        if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
+            return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
 
-        # ===================================================================
-        # STAGE 7: Dependency Management - Rust (Cargo)
-        # ===================================================================
-        if "cargo build" in error_lower or "cargo install" in error_lower:
-            if "could not find" in error_lower and "crate" in error_lower:
-                return "DEPENDENCY_INSTALL_RUST", "CARGO_CRATE_NOT_FOUND"
-            if "failed to parse manifest" in error_lower:
-                return "DEPENDENCY_INSTALL_RUST", "CARGO_MANIFEST_ERROR"
-            return "DEPENDENCY_INSTALL_RUST", "CARGO_BUILD_FAILED"
+        # 6. Build/Compilation (RUN build commands)
+        if any(x in error_lower for x in ["compilation error", "build error", "webpack", "tsc"]):
+            return "BUILD_COMPILE", failed_step or "Build/compilation failed"
 
-        # ===================================================================
-        # STAGE 8: Dependency Management - Java (Maven/Gradle)
-        # ===================================================================
-        if "mvn" in error_lower or "maven" in error_lower:
-            if "could not resolve dependencies" in error_lower:
-                return "DEPENDENCY_INSTALL_JAVA", "MAVEN_DEPENDENCY_NOT_FOUND"
-            if "compilation failure" in error_lower:
-                return "BUILD_COMPILATION_JAVA", "MAVEN_COMPILATION_FAILED"
-            return "DEPENDENCY_INSTALL_JAVA", "MAVEN_BUILD_FAILED"
+        # 7. Runtime Execution (CMD/ENTRYPOINT)
+        if any(x in error_lower for x in ["command not found", "exec format error"]):
+            return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
 
-        if "gradle" in error_lower:
-            if "could not resolve all dependencies" in error_lower:
-                return "DEPENDENCY_INSTALL_JAVA", "GRADLE_DEPENDENCY_NOT_FOUND"
-            return "DEPENDENCY_INSTALL_JAVA", "GRADLE_BUILD_FAILED"
+        # 8. Permission/User Issues
+        if "permission denied" in error_lower or "useradd" in error_lower:
+            return "PERMISSION", failed_step or "Permission/user management error"
 
-        # ===================================================================
-        # STAGE 9: Build/Compilation Errors (Language-specific)
-        # ===================================================================
-        # Python
-        if "syntaxerror" in error_lower or "indentationerror" in error_lower:
-            return "BUILD_COMPILATION_PYTHON", "PYTHON_SYNTAX_ERROR"
-        if "modulenotfounderror" in error_lower or "importerror" in error_lower:
-            return "BUILD_COMPILATION_PYTHON", "PYTHON_IMPORT_ERROR"
-
-        # Node.js/JavaScript
-        if "syntaxerror" in error_lower and ("javascript" in error_lower or "typescript" in error_lower):
-            return "BUILD_COMPILATION_NODE", "JAVASCRIPT_SYNTAX_ERROR"
-        if "webpack" in error_lower and "error" in error_lower:
-            return "BUILD_COMPILATION_NODE", "WEBPACK_BUILD_ERROR"
-        if "tsc" in error_lower and "error" in error_lower:
-            return "BUILD_COMPILATION_NODE", "TYPESCRIPT_COMPILATION_ERROR"
-
-        # Go
-        if "go build" in error_lower and "error" in error_lower:
-            if "undefined:" in error_lower:
-                return "BUILD_COMPILATION_GO", "GO_UNDEFINED_REFERENCE"
-            if "cannot use" in error_lower:
-                return "BUILD_COMPILATION_GO", "GO_TYPE_ERROR"
-            return "BUILD_COMPILATION_GO", "GO_BUILD_ERROR"
-
-        # Rust
-        if "error[e" in error_lower and "cargo" in error_lower:
-            return "BUILD_COMPILATION_RUST", "RUST_COMPILER_ERROR"
-
-        # C/C++
-        if any(x in error_lower for x in ["gcc", "g++", "clang", "make:", "cmake"]):
-            if "undefined reference" in error_lower:
-                return "BUILD_COMPILATION_C", "C_UNDEFINED_REFERENCE"
-            if "fatal error:" in error_lower and ".h:" in error_lower:
-                return "BUILD_COMPILATION_C", "C_HEADER_NOT_FOUND"
-            return "BUILD_COMPILATION_C", "C_COMPILATION_FAILED"
-
-        # Generic compilation
-        if any(x in error_lower for x in ["compilation error", "compilation failed", "build error"]):
-            return "BUILD_COMPILATION", "GENERIC_COMPILATION_ERROR"
-
-        # ===================================================================
-        # STAGE 10: Runtime/Execution Errors
-        # ===================================================================
-        if "command not found" in error_lower or "no such file or directory" in error_lower:
-            return "RUNTIME_EXECUTION", "COMMAND_NOT_FOUND"
-        if "permission denied" in error_lower and "exec" in error_lower:
-            return "RUNTIME_EXECUTION", "EXEC_PERMISSION_DENIED"
-
-        # ===================================================================
-        # STAGE 11: User/Permission Errors
-        # ===================================================================
-        if "useradd" in error_lower and "error" in error_lower:
-            return "USER_MANAGEMENT", "USER_CREATION_FAILED"
-        if "chown" in error_lower and "error" in error_lower:
-            return "USER_MANAGEMENT", "CHOWN_FAILED"
-        if "permission denied" in error_lower:
-            return "PERMISSION_ERROR", "PERMISSION_DENIED"
-
-        # ===================================================================
-        # STAGE 12: Network/Download Errors
-        # ===================================================================
+        # 9. Network Issues
         if any(x in error_lower for x in ["connection refused", "connection timeout", "network unreachable"]):
-            return "NETWORK_ERROR", "CONNECTION_FAILED"
-        if "certificate" in error_lower and "error" in error_lower:
-            return "NETWORK_ERROR", "SSL_CERTIFICATE_ERROR"
-        if "503" in error_lower or "service unavailable" in error_lower:
-            return "NETWORK_ERROR", "SERVICE_UNAVAILABLE"
+            return "NETWORK", failed_step or "Network connection error"
 
-        # ===================================================================
-        # STAGE 13: Disk/Storage Errors
-        # ===================================================================
-        if "no space left" in error_lower or "disk full" in error_lower:
-            return "STORAGE_ERROR", "DISK_FULL"
-        if "quota exceeded" in error_lower:
-            return "STORAGE_ERROR", "QUOTA_EXCEEDED"
+        # 10. Storage Issues
+        if any(x in error_lower for x in ["no space left", "disk full", "quota exceeded"]):
+            return "STORAGE", failed_step or "Disk space error"
 
-        # ===================================================================
-        # STAGE 14: Docker-specific Errors
-        # ===================================================================
-        if "executor failed running" in error_lower:
-            return "DOCKER_EXECUTOR", "RUN_COMMAND_FAILED"
-        if "returned a non-zero code" in error_lower:
-            # Try to extract which command failed
-            if "step" in error_lower:
-                return "DOCKER_EXECUTOR", "STEP_FAILED_NONZERO_EXIT"
-            return "DOCKER_EXECUTOR", "COMMAND_NONZERO_EXIT"
+        # Fallback: Return the extracted step or unknown
+        return "UNKNOWN", failed_step or "Unknown error - check full log"
 
-        # ===================================================================
-        # FALLBACK: Try to extract more specific info from error message
-        # ===================================================================
-        # Look for specific error patterns in the actual error text
-        if "error" in error_lower:
-            # Check for language-specific errors
-            if any(lang in error_lower for lang in ["python", "pip"]):
-                return "DEPENDENCY_INSTALL_PYTHON", "PYTHON_UNSPECIFIED_ERROR"
-            if any(lang in error_lower for lang in ["node", "npm", "yarn", "javascript"]):
-                return "DEPENDENCY_INSTALL_NODE", "NODE_UNSPECIFIED_ERROR"
-            if "go" in error_lower and any(x in error_lower for x in ["module", "package"]):
-                return "DEPENDENCY_INSTALL_GO", "GO_UNSPECIFIED_ERROR"
-            if "cargo" in error_lower or "rust" in error_lower:
-                return "DEPENDENCY_INSTALL_RUST", "RUST_UNSPECIFIED_ERROR"
+    def _extract_failed_docker_step(self, error_output: str) -> str:
+        """
+        Extract the specific Docker RUN/COPY/FROM command that failed.
 
-        # Absolute fallback
-        return "UNKNOWN_STAGE", "UNKNOWN_ERROR"
+        Docker output format examples:
+        - "ERROR [stage 3/8] RUN pip install -r requirements.txt"
+        - "executor failed running [/bin/sh -c go build]: exit code: 1"
+        - "#8 [stage 4/7] RUN npm install"
+        """
+        import re
+
+        # Pattern 1: ERROR [stage X/Y] COMMAND
+        match = re.search(r'ERROR \[.*?\] (RUN|COPY|ADD|FROM|WORKDIR).*', error_output, re.IGNORECASE)
+        if match:
+            return match.group(0).replace('ERROR ', '').strip()
+
+        # Pattern 2: executor failed running [/bin/sh -c COMMAND]
+        match = re.search(r'executor failed running \[/bin/sh -c ([^\]]+)\]', error_output, re.IGNORECASE)
+        if match:
+            return f"RUN {match.group(1).strip()}"
+
+        # Pattern 3: #N [stage X/Y] COMMAND
+        match = re.search(r'#\d+ \[.*?\] (RUN|COPY|ADD|FROM).*', error_output, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+
+        # Return None if we can't extract the step
+        return None
 
     def cleanup_image(self, image_name: str) -> bool:
         """Remove Docker image after testing."""
@@ -462,7 +332,7 @@ class EmpiricalTester:
             # Step 1: Clone repository
             print(f"\n[STEP 1/{4}] Cloning repository...")
             clone_start = time.time()
-            repo_path = clone_repository(repo_url, target_dir=str(self.repos_dir))
+            repo_path = clone_repository(repo_url, target_dir=str(self.repos_dir), auto_remove=True)
             clone_duration = time.time() - clone_start
 
             result["clone"] = {
@@ -567,28 +437,56 @@ class EmpiricalTester:
 
                 result["dockerfile_test"] = docker_result
 
-                # Save Docker error to file if build failed
+                # Save Docker error to files if build failed
                 if not docker_result["success"]:
-                    error_file = report_dir_result / "docker_build_error.txt"
+                    # Create docker_errors directory for raw error logs
+                    docker_errors_dir = self.results_dir / "docker_errors"
+                    docker_errors_dir.mkdir(exist_ok=True)
+
+                    # 1. Save summary error file in the report directory
+                    error_summary_file = report_dir_result / "docker_build_error_summary.txt"
                     try:
-                        with open(error_file, 'w', encoding='utf-8') as f:
+                        with open(error_summary_file, 'w', encoding='utf-8') as f:
                             f.write("="*80 + "\n")
-                            f.write("DOCKER BUILD ERROR DETAILS\n")
+                            f.write("DOCKER BUILD ERROR SUMMARY\n")
                             f.write("="*80 + "\n\n")
                             f.write(f"Repository: {repo_name}\n")
                             f.write(f"URL: {repo_url}\n")
                             f.write(f"Timestamp: {datetime.now().isoformat()}\n\n")
-                            f.write(f"Stage: {docker_result.get('stage', 'UNKNOWN')}\n")
-                            f.write(f"Error Type: {docker_result.get('error_type', 'UNKNOWN')}\n")
-                            f.write(f"Exit Code: {docker_result.get('exit_code', -1)}\n")
+                            f.write(f"Failure Stage: {docker_result.get('stage', 'UNKNOWN')}\n")
+                            f.write(f"Failed Docker Command: {docker_result.get('failed_command', 'Unknown')}\n")
+                            f.write(f"Exit Code: {docker_result.get('exit_code', -1)}\n\n")
+
                             if docker_result.get('error_snippet'):
-                                f.write(f"\nError Snippet:\n{'-'*80}\n{docker_result['error_snippet']}\n{'-'*80}\n")
-                            f.write(f"\nFull Error Output:\n{'-'*80}\n")
-                            f.write(docker_result.get('error_message', 'No error message available'))
-                            f.write(f"\n{'-'*80}\n")
-                        print(f"[ERROR FILE] Docker error saved to: {error_file.name}")
+                                f.write(f"Error Snippet (last error line):\n{'-'*80}\n")
+                                f.write(f"{docker_result['error_snippet']}\n")
+                                f.write(f"{'-'*80}\n\n")
+
+                            f.write(f"See full Docker output in: docker_errors/{repo_name}_docker_error.log\n")
+
+                        print(f"[ERROR SUMMARY] Saved to: {error_summary_file.name}")
                     except Exception as e:
-                        print(f"[WARNING] Could not save error file: {e}")
+                        print(f"[WARNING] Could not save error summary file: {e}")
+
+                    # 2. Save FULL raw Docker error output in dedicated directory
+                    raw_error_file = docker_errors_dir / f"{repo_name}_docker_error.log"
+                    try:
+                        with open(raw_error_file, 'w', encoding='utf-8') as f:
+                            f.write(f"# Docker Build Error Log\n")
+                            f.write(f"# Repository: {repo_name}\n")
+                            f.write(f"# URL: {repo_url}\n")
+                            f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
+                            f.write(f"# Stage: {docker_result.get('stage', 'UNKNOWN')}\n")
+                            f.write(f"# Failed Command: {docker_result.get('failed_command', 'Unknown')}\n")
+                            f.write(f"# Exit Code: {docker_result.get('exit_code', -1)}\n")
+                            f.write("#" + "="*78 + "\n\n")
+
+                            # Write the complete raw Docker output
+                            f.write(docker_result.get('error_message', 'No error message available'))
+
+                        print(f"[RAW ERROR LOG] Saved to: docker_errors/{raw_error_file.name}")
+                    except Exception as e:
+                        print(f"[WARNING] Could not save raw error log: {e}")
 
                 # Cleanup image if build succeeded
                 if docker_result["success"]:
@@ -648,18 +546,14 @@ class EmpiricalTester:
             print(f"Dockerfile Build: {'✓' if docker.get('success') else '✗'}")
             if not docker.get('success'):
                 print(f"  Failure Stage: {docker.get('stage', 'UNKNOWN')}")
-                print(f"  Error Type: {docker.get('error_type', 'UNKNOWN')}")
+                print(f"  Failed Command: {docker.get('failed_command', 'Unknown')}")
                 # Show error snippet if available, otherwise first 200 chars of full error
                 error_snippet = docker.get('error_snippet', '')
                 if error_snippet:
-                    print(f"  Error Snippet: {error_snippet}")
-                else:
-                    error_msg = docker.get('error_message', '')
-                    if error_msg:
-                        print(f"  Error: {error_msg[:200]}...")
+                    print(f"  Error Snippet: {error_snippet[:200]}")
                 # Mention error file
                 if "agent_analysis" in result and "report_directory" in result["agent_analysis"]:
-                    print(f"  Full error saved to: docker_build_error.txt")
+                    print(f"  Full error log: docker_build_error.txt")
 
         print(f"{'='*80}\n")
 

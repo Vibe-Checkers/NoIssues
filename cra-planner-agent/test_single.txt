@@ -1,3 +1,0 @@
-# Single repository test
-# Testing with a small, well-documented Python project
-https://github.com/kennethreitz/delegator.py
