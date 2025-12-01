@@ -316,6 +316,7 @@ class EmpiricalTester:
 
         repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
         test_start_time = time.time()
+        repo_path = None  # Track repo path for cleanup
 
         result = {
             "repo_url": repo_url,
@@ -492,6 +493,17 @@ class EmpiricalTester:
                 if docker_result["success"]:
                     print(f"[CLEANUP] Removing Docker image {image_name}...")
                     self.docker_tester.cleanup_image(image_name)
+
+            # Cleanup: Remove cloned repository after all processing is complete
+            # This saves disk space when testing many repositories (100+)
+            # All logs, Dockerfiles, and error reports have been saved before this point
+            if repo_path and os.path.exists(repo_path):
+                try:
+                    print(f"\n[CLEANUP] Removing cloned repository: {repo_path}")
+                    shutil.rmtree(repo_path)
+                    print(f"[OK] Repository removed successfully")
+                except Exception as e:
+                    print(f"[WARNING] Could not remove repository {repo_path}: {e}")
 
             # Determine overall success
             result["success"] = (
