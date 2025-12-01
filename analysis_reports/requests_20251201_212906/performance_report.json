@@ -1,0 +1,41 @@
+{
+  "repository": {
+    "name": "requests",
+    "url": "https://github.com/psf/requests",
+    "local_path": "./temp\\requests"
+  },
+  "analysis": {
+    "timestamp": "20251201_213313",
+    "date": "2025-12-01T21:33:13.385212",
+    "duration_seconds": 247.05337142944336,
+    "duration_minutes": 4.117556190490722,
+    "duration_formatted": "4 min 7 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "ReadFile": {
+        "calls": 7,
+        "percentage": 43.75
+      },
+      "FindFiles": {
+        "calls": 6,
+        "percentage": 37.5
+      },
+      "SearchWeb": {
+        "calls": 1,
+        "percentage": 6.25
+      },
+      "DirectoryTree": {
+        "calls": 1,
+        "percentage": 6.25
+      },
+      "GrepFiles": {
+        "calls": 1,
+        "percentage": 6.25
+      }
+    },
+    "total_calls": 16,
+    "unique_tools": 5
+  }
+}

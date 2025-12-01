@@ -415,53 +415,50 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
 
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install', 'build', 'run', or 'start' commands mentioned in configuration files or scripts. Identify: entry points, default ports, required environment variables, volume mounts, and any runtime configuration. Compare with official documentation.",
 
-            """Now create a comprehensive, production-ready Dockerfile that includes ALL of the following elements (DO NOT SKIP ANY):
+            """Create a Dockerfile using a simple 3-part framework. Focus on making it build successfully rather than including every possible best practice.
 
-1. **Base Image**: Choose the appropriate official base image (e.g., python:3.11-slim, node:18-alpine, etc.) based on the project's language and version requirements. Use specific version tags, not 'latest'.
+The Dockerfile should have these 3 main parts:
 
-2. **Metadata**: Add LABEL instructions for maintainer and description.
+**PART 1: BASE IMAGE**
+- Choose an appropriate official base image based on the project's language and version requirements discovered in the repository
+- **CRITICAL**: Check version requirements in configuration files and match the base image version exactly
+- Use specific version tags when possible, not 'latest'
+- Set WORKDIR to /app or /usr/src/app
 
-3. **Working Directory**: Set WORKDIR to an appropriate directory (typically /app or /usr/src/app).
+**PART 2: DEPENDENCIES**
+- Install system dependencies ONLY if clearly needed and use the correct package manager for the base image:
+  * Debian/Ubuntu base images: Use apt-get (apt-get update && apt-get install -y package-name)
+  * Alpine base images: Use apk (apk add --no-cache package-name)
+  * Only install packages that actually exist - avoid guessing package names
+  * Common safe packages: build-essential, gcc, g++, make, curl, wget, git
+- Copy dependency manifest files BEFORE copying source code to leverage Docker layer caching
+- Do NOT use shell operators (||, &&, etc.) with COPY command - COPY does not support them
+- For optional files, either: (1) copy only if they exist using separate COPY commands, or (2) use RUN with conditional logic
+- Install application dependencies using the appropriate package manager for the project type (discovered from config files)
 
-4. **System Dependencies**: Install ALL required system packages, build tools, and libraries needed for the project. Include packages for: compiling native extensions, SSL/certificates, database clients, image processing libraries, or any other system-level dependencies mentioned in documentation.
+**PART 3: BUILD INSTRUCTIONS**
+- Copy the application source code
+- Run build commands if needed (discovered from README, config files, or build scripts)
+- Set CMD or ENTRYPOINT to run the application (use the exact command from README or config files)
+- EXPOSE the port if it's a web service (check config files or use common defaults)
 
-5. **Environment Variables**: Set any required environment variables (e.g., PYTHONUNBUFFERED=1, NODE_ENV=production, etc.).
+CRITICAL ERROR PREVENTION:
+1. **Version Matching**: Always check configuration files for version requirements and match the base image version exactly
+2. **Package Manager**: Match the package manager to the base image (apt-get for Debian/Ubuntu, apk for Alpine)
+3. **COPY Syntax**: Never use shell operators with COPY (e.g., COPY file.txt || true is INVALID - use RUN with conditional instead)
+4. **Optional Files**: If a file might not exist, either skip it or use RUN with conditional check, not COPY with || operator
+5. **Package Names**: Only install system packages you're certain exist - prefer minimal installations
+6. **Editable Installs**: Only use editable install commands if the project structure clearly supports it
 
-6. **Dependency Files**: Copy dependency files (requirements.txt, package.json, Pipfile, Cargo.toml, go.mod, etc.) BEFORE copying source code to leverage Docker layer caching.
+GUIDELINES:
+- Keep it simple and focused on getting it to build
+- Use the information from the README, config files, and documentation you found earlier
+- If you're unsure about optional features (health checks, non-root users, multi-stage builds), skip them to keep it simple
+- Prioritize correctness over completeness - a working simple Dockerfile is better than a complex one that fails
+- Include environment variables only if they are clearly required by the project
+- When in doubt, use a more recent stable base image version rather than guessing
 
-7. **Install Dependencies**: Run the appropriate install commands (pip install, npm install, cargo build, go mod download, etc.) with production flags where applicable. For Python: use --no-cache-dir. For Node.js: use --production or --omit=dev if appropriate.
-
-8. **Source Code**: Copy the application source code to the container. Use .dockerignore patterns if needed, but copy all necessary files.
-
-9. **Build Steps**: If the project requires compilation or building, include ALL build commands (npm run build, python setup.py build, cargo build --release, etc.). Ensure build artifacts are properly placed.
-
-10. **User Permissions**: Create a non-root user and switch to it for security (if applicable). Set proper ownership of files.
-
-11. **Expose Ports**: EXPOSE the port(s) the application uses. Check documentation, configuration files, or default ports for the framework.
-
-12. **Health Check**: Add HEALTHCHECK instruction if applicable (especially for web services).
-
-13. **Entry Point**: Set CMD or ENTRYPOINT to run the application. Use the exact command from documentation or configuration files. Include all required arguments.
-
-14. **Multi-stage Build** (if beneficial): Consider using multi-stage builds to reduce final image size for compiled languages.
-
-15. **Security Best Practices**: 
-    - Use specific version tags for base images
-    - Run as non-root user when possible
-    - Minimize layers and clean up temporary files
-    - Use .dockerignore to exclude unnecessary files
-
-IMPORTANT: 
-- Include ALL dependencies mentioned in requirements files, package.json, or documentation
-- Include ALL build steps - do not skip any compilation or build processes
-- Include ALL environment variables that are required
-- Use the exact versions specified in the project's dependency files
-- If the project has multiple entry points or services, create a Dockerfile for the main service
-- If there are database migrations, include them in the appropriate step
-- If there are static files to collect or assets to build, include those steps
-- Reference the official documentation you found earlier to ensure best practices
-
-Output ONLY the Dockerfile content, starting with FROM and ending with CMD/ENTRYPOINT. Do not include markdown formatting, explanations, or additional text - just the raw Dockerfile content that can be saved directly to a file."""
+Output ONLY the raw Dockerfile content, starting with FROM and ending with CMD/ENTRYPOINT. No markdown formatting, no explanations - just the Dockerfile that can be saved directly to a file."""
         ]
 
         # Initialize conversation history to maintain context across queries

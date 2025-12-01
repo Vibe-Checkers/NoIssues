@@ -1,10 +1,10 @@
-Web Search Result #3
+Web Search Result #2
 ======================================================================
-Title: Installing and Using `requests` in Python - CodeRivers
+Title: Installing and Using ` requests ` in Python - CodeRivers
 URL: https://coderivers.org/blog/installing-requests-python/
-Search Query: requests Python documentation how to install
+Search Query: requests Python documentation installation instructions
 Project Name: requests
-Fetched: 2025-11-29T18:07:45.669640
+Fetched: 2025-12-01T21:29:29.118161
 Status: SUCCESS (HTTP 200)
 ======================================================================
 

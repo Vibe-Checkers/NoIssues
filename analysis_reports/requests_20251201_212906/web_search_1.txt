@@ -4,7 +4,7 @@ Title: Installation of Requests — Requests 2.32.5 documentation
 URL: https://docs.python-requests.org/en/master/user/install/
 Search Query: requests Python documentation how to install
 Project Name: requests
-Fetched: 2025-11-29T18:07:43.151631
+Fetched: 2025-12-01T21:29:24.090271
 Status: SUCCESS (HTTP 200)
 ======================================================================
 
