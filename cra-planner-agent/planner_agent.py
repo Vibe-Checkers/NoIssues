@@ -64,12 +64,65 @@ class FormattedOutputHandler(BaseCallbackHandler):
 
     def on_llm_end(self, response, **kwargs):
         """Called when LLM finishes - capture token usage."""
+        # DEBUG: Print response structure on first call
+        if self.token_usage["total"] == 0:
+            print(f"\n[DEBUG TOKEN] Response type: {type(response)}")
+            print(f"[DEBUG TOKEN] Response attributes: {[a for a in dir(response) if not a.startswith('_')]}")
+            if hasattr(response, 'llm_output'):
+                print(f"[DEBUG TOKEN] llm_output: {response.llm_output}")
+            if hasattr(response, 'generations'):
+                print(f"[DEBUG TOKEN] generations length: {len(response.generations) if response.generations else 0}")
+                if response.generations and len(response.generations) > 0 and len(response.generations[0]) > 0:
+                    gen = response.generations[0][0]
+                    print(f"[DEBUG TOKEN] Generation info: {gen.generation_info if hasattr(gen, 'generation_info') else 'No generation_info'}")
+            print(f"[DEBUG TOKEN] kwargs keys: {list(kwargs.keys())}")
+
+        # Try to get token usage from multiple possible locations
+        usage = None
+
+        # Method 1: response.llm_output
         if hasattr(response, 'llm_output') and response.llm_output:
             usage = response.llm_output.get('token_usage', {})
             if usage:
-                self.token_usage["input"] += usage.get('prompt_tokens', 0)
-                self.token_usage["output"] += usage.get('completion_tokens', 0)
-                self.token_usage["total"] += usage.get('total_tokens', 0)
+                print(f"[DEBUG TOKEN] Found usage in llm_output: {usage}")
+
+        # Method 2: response.generations (for Azure OpenAI)
+        if not usage and hasattr(response, 'generations') and response.generations:
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    if hasattr(gen, 'generation_info') and gen.generation_info:
+                        usage = gen.generation_info.get('token_usage', {})
+                        if usage:
+                            print(f"[DEBUG TOKEN] Found usage in generation_info: {usage}")
+                            break
+                if usage:
+                    break
+
+        # Method 3: kwargs (sometimes passed in callbacks)
+        if not usage and 'usage' in kwargs:
+            usage = kwargs['usage']
+            print(f"[DEBUG TOKEN] Found usage in kwargs: {usage}")
+
+        # Method 4: Check response_metadata (Azure specific)
+        if not usage and hasattr(response, 'response_metadata'):
+            usage = response.response_metadata.get('token_usage', {})
+            if usage:
+                print(f"[DEBUG TOKEN] Found usage in response_metadata: {usage}")
+
+        # Extract tokens
+        if usage and isinstance(usage, dict):
+            input_tokens = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
+            output_tokens = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
+            total_tokens = usage.get('total_tokens', 0) or (input_tokens + output_tokens)
+
+            if input_tokens or output_tokens:
+                self.token_usage["input"] += input_tokens
+                self.token_usage["output"] += output_tokens
+                self.token_usage["total"] += total_tokens
+                print(f"[TOKEN UPDATE] +{input_tokens} input, +{output_tokens} output (total so far: {self.token_usage['total']})")
+        else:
+            if self.token_usage["total"] == 0:
+                print(f"[DEBUG TOKEN] No usage found in response!")
 
 
 # ============================================================================

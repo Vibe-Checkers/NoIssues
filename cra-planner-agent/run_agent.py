@@ -20,13 +20,14 @@ from contextlib import redirect_stdout, redirect_stderr
 from planner_agent import create_planner_agent, REPORT_DIRECTORY
 
 
-def clone_repository(repo_url: str, target_dir: str = "./temp") -> str:
+def clone_repository(repo_url: str, target_dir: str = "./temp", auto_remove: bool = True) -> str:
     """
     Clone a GitHub repository to a local directory.
 
     Args:
         repo_url: GitHub repository URL
         target_dir: Directory to clone repositories into
+        auto_remove: If True, automatically remove existing repo and re-clone (default: True for automation)
 
     Returns:
         Path to the cloned repository
@@ -42,14 +43,19 @@ def clone_repository(repo_url: str, target_dir: str = "./temp") -> str:
 
     # Remove existing clone if it exists
     if os.path.exists(clone_path):
-        print(f"[WARNING] Repository already exists at {clone_path}")
-        response = input("Remove and re-clone? (y/N): ").strip().lower()
-        if response == 'y':
-            print(f"[DELETE] Removing existing repository...")
+        if auto_remove:
+            print(f"[AUTO-REMOVE] Repository already exists at {clone_path}, removing...")
             shutil.rmtree(clone_path)
+            print(f"[DELETED] Existing repository removed")
         else:
-            print(f"[OK] Using existing repository at {clone_path}")
-            return clone_path
+            print(f"[WARNING] Repository already exists at {clone_path}")
+            response = input("Remove and re-clone? (y/N): ").strip().lower()
+            if response == 'y':
+                print(f"[DELETE] Removing existing repository...")
+                shutil.rmtree(clone_path)
+            else:
+                print(f"[OK] Using existing repository at {clone_path}")
+                return clone_path
 
     # Clone the repository
     try:
@@ -518,11 +524,13 @@ Output ONLY the raw Dockerfile content, starting with FROM and ending with CMD/E
                                 total_tokens["output"] += output_tokens
                                 total_tokens["total"] += total
                                 usage_found = True
+                                print(f"[TOKEN USAGE] Step {i}: +{input_tokens} input, +{output_tokens} output, +{total} total")
                                 break
 
                 # Debug: print available keys on first iteration if no usage found
                 if i == 1 and not usage_found:
                     print(f"[DEBUG] Result keys available: {list(result.keys())}")
+                    print(f"[DEBUG] Will rely on callback handler for token tracking")
 
                 # Save the final step output (Dockerfile)
                 if i == len(queries):
