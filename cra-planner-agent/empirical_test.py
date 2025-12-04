@@ -4,6 +4,9 @@ Empirical Testing Script for Planner Agent
 Automates testing of Dockerfile generation and validation across multiple repositories.
 """
 
+print("[STARTUP] Empirical test script starting...")
+print("[STARTUP] Loading imports (this may take 30-60 seconds)...")
+
 import os
 import sys
 import json
@@ -15,8 +18,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
+print("[STARTUP] Loading agent modules...")
 from run_agent import clone_repository, analyze_repository, detect_project_language
 from planner_agent import create_planner_agent
+
+print("[STARTUP] All imports loaded successfully!")
 
 
 class DockerBuildTester:
