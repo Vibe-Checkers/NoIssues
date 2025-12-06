@@ -4,3 +4,4 @@
 **/temp
 **/.claude
 cra-planner-agent/parallel_empirical_results
+**/*.pem

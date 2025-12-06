@@ -1388,6 +1388,91 @@ def fetch_web_page(url: str) -> str:
         return f"Error fetching web page: {str(e)}"
 
 
+def docker_image_search(query: str) -> str:
+    """
+    Search for Docker images or verify a specific image tag using Docker Hub API.
+    
+    Args:
+        query: Search query (e.g., "python", "node") or specific image tag (e.g., "python:3.9")
+        
+    Returns:
+        Search results or verification details
+    """
+    try:
+        import requests
+        
+        logger.info(f"Searching Docker Hub for: {query}")
+        
+        # Check if query looks like a specific image tag
+        if ":" in query and " " not in query:
+            # Verify specific image tag
+            parts = query.split(":")
+            image_name = parts[0]
+            tag = parts[1]
+            
+            # Handle official images (e.g., python -> library/python)
+            if "/" not in image_name:
+                image_name = f"library/{image_name}"
+                
+            url = f"https://hub.docker.com/v2/repositories/{image_name}/tags/{tag}"
+            
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    last_updated = data.get("last_updated", "unknown")
+                    images = data.get("images", [])
+                    archs = [img.get("architecture", "unknown") for img in images]
+                    return f"✅ Image found: {query}\nLast Updated: {last_updated}\nArchitectures: {', '.join(archs)}"
+                elif response.status_code == 404:
+                    return f"❌ Image not found: {query}\nThe image or tag does not exist on Docker Hub."
+                else:
+                    return f"Error verifying image {query}: HTTP {response.status_code}"
+            except Exception as e:
+                return f"Error verifying image {query}: {str(e)}"
+                
+        else:
+            # General search
+            url = "https://hub.docker.com/v2/search/repositories"
+            params = {"query": query, "page_size": 5}
+            
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                results = data.get("results", [])
+                if not results:
+                    return f"No Docker images found for query: {query}"
+                
+                output = f"Docker Hub Search Results for '{query}':\n"
+                output += f"{'='*60}\n"
+                
+                for res in results:
+                    name = res.get("repo_name")
+                    star_count = res.get("star_count", 0)
+                    is_official = "✅ Official" if res.get("is_official") else ""
+                    desc = res.get("short_description", "")[:100]
+                    if len(res.get("short_description", "")) > 100:
+                        desc += "..."
+                        
+                    output += f"• {name} {is_official}\n"
+                    output += f"  Stars: {star_count}\n"
+                    output += f"  Description: {desc}\n"
+                    output += f"{'-'*60}\n"
+                    
+                return output
+                
+            except Exception as e:
+                return f"Error searching Docker Hub: {str(e)}"
+                
+    except ImportError:
+        return "Error: requests package required. Install with: pip install requests"
+    except Exception as e:
+        logger.error(f"Unexpected error in docker_image_search: {e}")
+        return f"Error: {str(e)}"
+
+
 # ============================================================================
 # Agent Creation
 # ============================================================================
@@ -1489,6 +1574,11 @@ def create_planner_agent(
             name="GetFileMetadata",
             func=get_file_metadata,
             description="Get file metadata: size, type, encoding, line count, if executable. Input: file path. Helps determine if file is readable or binary."
+        ),
+        Tool(
+            name="DockerImageSearch",
+            func=docker_image_search,
+            description="Search for Docker images or verify if a specific image tag exists. Input: search query (e.g., 'python') or image tag (e.g., 'python:3.9'). Use this to validate base images."
         )
     ]
 
@@ -1519,7 +1609,8 @@ ANALYSIS APPROACH - Discovery over Assumptions:
 3. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
 4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
 5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
-6. CROSS-REFERENCE: Verify findings from web documentation with local files{doc_search_context}
+6. CROSS-REFERENCE: Verify findings from web documentation with local files
+7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`. Do not assume images exist.{doc_search_context}
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 1. **NEVER write free text or explanations outside the format below**
