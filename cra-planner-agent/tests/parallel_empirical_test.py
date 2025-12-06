@@ -224,7 +224,7 @@ class ParallelEmpiricalTester:
             else:
                 self.log(repo_name, f"Analysis complete ({analysis_duration:.1f}s)", to_console=True)
 
-            # Step 4: Test Dockerfile
+            # Step 4: Test Dockerfile with iterative refinement (max 3 iterations)
             self.log(repo_name, "Testing generated Dockerfile...", to_console=True)
             dockerfile_path = report_dir_result / "Dockerfile"
 
@@ -238,71 +238,156 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, "ERROR: Dockerfile not generated", to_console=True)
 
             else:
-                # Read Dockerfile content
-                with open(dockerfile_path, 'r', encoding='utf-8') as f:
-                    dockerfile_content = f.read()
-                result["dockerfile_content"] = dockerfile_content
+                # Initialize iteration tracking
+                result["dockerfile_test"] = {
+                    "iterations": [],
+                    "final_iteration": 0,
+                    "success": False
+                }
+                max_refinement_iterations = 3
+                iteration_success = False
 
-                # Test Docker build
-                image_name = f"parallel-empirical-{repo_name.lower()}:latest"
-                docker_result = self.docker_tester.build_dockerfile(
-                    str(dockerfile_path),
-                    repo_path,
-                    image_name
-                )
+                # Iterative refinement loop
+                for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-3 = refinements
+                    iteration_start_time = time.time()
+                    
+                    # Read current Dockerfile content
+                    with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                        dockerfile_content = f.read()
+                    
+                    if iteration == 0:
+                        result["dockerfile_content"] = dockerfile_content
+                        self.log(repo_name, f"Testing initial Dockerfile (iteration {iteration})...", to_console=True)
+                    else:
+                        self.log(repo_name, f"Testing refined Dockerfile (iteration {iteration}/{max_refinement_iterations})...", to_console=True)
 
-                result["dockerfile_test"] = docker_result
-
-                if docker_result["success"]:
-                    self.log(
-                        repo_name,
-                        f"Docker build SUCCESS ({docker_result['duration_seconds']:.1f}s)",
-                        to_console=True
+                    # Test Docker build
+                    image_name = f"parallel-empirical-{repo_name.lower()}:latest"
+                    docker_result = self.docker_tester.build_dockerfile(
+                        str(dockerfile_path),
+                        repo_path,
+                        image_name
                     )
-                    # Cleanup image
-                    self.docker_tester.cleanup_image(image_name)
+
+                    iteration_duration = time.time() - iteration_start_time
+                    iteration_result = {
+                        "iteration": iteration,
+                        "duration_seconds": iteration_duration,
+                        "success": docker_result.get("success", False),
+                        "stage": docker_result.get("stage", "UNKNOWN"),
+                        "failed_command": docker_result.get("failed_command", "Unknown"),
+                        "exit_code": docker_result.get("exit_code", -1)
+                    }
+
+                    if docker_result["success"]:
+                        iteration_success = True
+                        result["dockerfile_test"]["success"] = True
+                        result["dockerfile_test"]["final_iteration"] = iteration
+                        iteration_result["message"] = "Build successful"
+                        
+                        self.log(
+                            repo_name,
+                            f"Docker build SUCCESS at iteration {iteration} ({docker_result['duration_seconds']:.1f}s)",
+                            to_console=True
+                        )
+                        # Cleanup image
+                        self.docker_tester.cleanup_image(image_name)
+                        break  # Exit refinement loop on success
+                        
+                    else:
+                        # Log failure
+                        stage = docker_result.get('stage', 'UNKNOWN')
+                        failed_cmd = docker_result.get('failed_command', 'Unknown')
+                        
+                        iteration_result["error_snippet"] = docker_result.get('error_snippet', '')
+                        
+                        self.log(
+                            repo_name,
+                            f"Docker build FAILED at iteration {iteration} - Stage: {stage}, Command: {failed_cmd}",
+                            to_console=True
+                        )
+
+                        # Save error log for this iteration
+                        error_iteration_suffix = f"_iter{iteration}" if iteration > 0 else ""
+                        raw_error_file = self.docker_errors_dir / f"{repo_name}_docker_error{error_iteration_suffix}.log"
+                        with open(raw_error_file, 'w', encoding='utf-8') as f:
+                            f.write(f"# Docker Build Error Log - Iteration {iteration}\n")
+                            f.write(f"# Repository: {repo_name}\n")
+                            f.write(f"# URL: {repo_url}\n")
+                            f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
+                            f.write(f"# Stage: {stage}\n")
+                            f.write(f"# Failed Command: {failed_cmd}\n")
+                            f.write(f"# Exit Code: {docker_result.get('exit_code', -1)}\n")
+                            f.write("#" + "="*78 + "\n\n")
+                            f.write(docker_result.get('error_message', 'No error message available'))
+
+                        # Check if we should attempt refinement
+                        if iteration < max_refinement_iterations:
+                            # Check for non-recoverable errors
+                            non_recoverable_stages = ["DOCKER_DAEMON", "BUILD_TIMEOUT", "BUILD_EXCEPTION"]
+                            if stage in non_recoverable_stages:
+                                self.log(
+                                    repo_name,
+                                    f"Error stage '{stage}' is non-recoverable, skipping refinement",
+                                    to_console=True
+                                )
+                                iteration_result["refinement_skipped"] = True
+                                iteration_result["reason"] = f"Non-recoverable error: {stage}"
+                                result["dockerfile_test"]["iterations"].append(iteration_result)
+                                break  # Don't attempt refinement for non-recoverable errors
+
+                            # Attempt refinement
+                            self.log(repo_name, f"Attempting Dockerfile refinement (iteration {iteration + 1}/{max_refinement_iterations})...", to_console=True)
+                            
+                            refinement_start = time.time()
+                            refinement_success = self._refine_dockerfile_with_error_feedback(
+                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, iteration + 1
+                            )
+                            refinement_duration = time.time() - refinement_start
+                            
+                            if refinement_success:
+                                self.log(repo_name, f"Dockerfile refined successfully ({refinement_duration:.1f}s)", to_console=True)
+                                iteration_result["refinement_success"] = True
+                                iteration_result["refinement_duration_seconds"] = refinement_duration
+                            else:
+                                self.log(repo_name, f"Dockerfile refinement failed or produced no changes", to_console=True)
+                                iteration_result["refinement_success"] = False
+                                iteration_result["refinement_duration_seconds"] = refinement_duration
+                                # Continue to next iteration anyway, agent might have made partial changes
+                        else:
+                            # Max iterations reached
+                            iteration_result["max_iterations_reached"] = True
+                            
+                            # Save final error summary
+                            error_summary_file = report_dir_result / "docker_build_error_summary.txt"
+                            with open(error_summary_file, 'w', encoding='utf-8') as f:
+                                f.write("="*80 + "\n")
+                                f.write("DOCKER BUILD ERROR SUMMARY (Final - Max Iterations Reached)\n")
+                                f.write("="*80 + "\n\n")
+                                f.write(f"Repository: {repo_name}\n")
+                                f.write(f"URL: {repo_url}\n")
+                                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                                f.write(f"Total Refinement Iterations: {max_refinement_iterations}\n\n")
+                                f.write(f"Final Failure Stage: {stage}\n")
+                                f.write(f"Failed Docker Command: {failed_cmd}\n")
+                                f.write(f"Exit Code: {docker_result.get('exit_code', -1)}\n\n")
+                                
+                                if docker_result.get('error_snippet'):
+                                    f.write(f"Error Snippet:\n{'-'*80}\n")
+                                    f.write(f"{docker_result['error_snippet']}\n")
+                                    f.write(f"{'-'*80}\n\n")
+                                
+                                f.write(f"See full error: docker_errors/{repo_name}_docker_error{error_iteration_suffix}.log\n")
+
+                    # Store iteration result
+                    result["dockerfile_test"]["iterations"].append(iteration_result)
+
+                # Store final docker result
+                if iteration_success:
+                    result["dockerfile_test"]["final_result"] = docker_result
                 else:
-                    # Log failure
-                    stage = docker_result.get('stage', 'UNKNOWN')
-                    failed_cmd = docker_result.get('failed_command', 'Unknown')
-                    self.log(
-                        repo_name,
-                        f"Docker build FAILED at {stage}: {failed_cmd}",
-                        to_console=True
-                    )
-
-                    # Save error summary in report directory
-                    error_summary_file = report_dir_result / "docker_build_error_summary.txt"
-                    with open(error_summary_file, 'w', encoding='utf-8') as f:
-                        f.write("="*80 + "\n")
-                        f.write("DOCKER BUILD ERROR SUMMARY\n")
-                        f.write("="*80 + "\n\n")
-                        f.write(f"Repository: {repo_name}\n")
-                        f.write(f"URL: {repo_url}\n")
-                        f.write(f"Timestamp: {datetime.now().isoformat()}\n\n")
-                        f.write(f"Failure Stage: {stage}\n")
-                        f.write(f"Failed Docker Command: {failed_cmd}\n")
-                        f.write(f"Exit Code: {docker_result.get('exit_code', -1)}\n\n")
-
-                        if docker_result.get('error_snippet'):
-                            f.write(f"Error Snippet:\n{'-'*80}\n")
-                            f.write(f"{docker_result['error_snippet']}\n")
-                            f.write(f"{'-'*80}\n\n")
-
-                        f.write(f"See full error: docker_errors/{repo_name}_docker_error.log\n")
-
-                    # Save full error log
-                    raw_error_file = self.docker_errors_dir / f"{repo_name}_docker_error.log"
-                    with open(raw_error_file, 'w', encoding='utf-8') as f:
-                        f.write(f"# Docker Build Error Log\n")
-                        f.write(f"# Repository: {repo_name}\n")
-                        f.write(f"# URL: {repo_url}\n")
-                        f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
-                        f.write(f"# Stage: {stage}\n")
-                        f.write(f"# Failed Command: {failed_cmd}\n")
-                        f.write(f"# Exit Code: {docker_result.get('exit_code', -1)}\n")
-                        f.write("#" + "="*78 + "\n\n")
-                        f.write(docker_result.get('error_message', 'No error message available'))
+                    result["dockerfile_test"]["final_result"] = docker_result
+                    result["dockerfile_test"]["success"] = False
 
             # Determine overall success
             result["success"] = (
@@ -358,6 +443,115 @@ class ParallelEmpiricalTester:
 
         return result
 
+    def _refine_dockerfile_with_error_feedback(
+        self, agent, dockerfile_path: Path, error_log_path: Path, 
+        repo_path: str, repo_name: str, iteration: int
+    ) -> bool:
+        """
+        Refine Dockerfile based on build error feedback.
+        
+        Args:
+            agent: The planner agent instance
+            dockerfile_path: Path to current Dockerfile
+            error_log_path: Path to error log file
+            repo_path: Path to repository
+            repo_name: Repository name
+            iteration: Current refinement iteration number
+            
+        Returns:
+            True if refinement appears successful (Dockerfile was modified), False otherwise
+        """
+        try:
+            # Read current Dockerfile
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                current_dockerfile = f.read()
+            
+            # Read error log
+            with open(error_log_path, 'r', encoding='utf-8') as f:
+                error_log = f.read()
+            
+            # Get absolute path for Dockerfile (agent can read from repo_path context)
+            dockerfile_absolute = str(dockerfile_path.absolute())
+            
+            # Construct refinement query with error log included directly
+            # Use @ syntax for file reference as requested
+            error_log_filename = error_log_path.name
+            refinement_query = f"""The Dockerfile I generated failed to build. I need you to MODIFY the existing Dockerfile to fix the error, not create a new one from scratch.
+
+IMPORTANT INSTRUCTIONS:
+1. Read the current Dockerfile at: {dockerfile_absolute}
+2. Review the build error log below (also available at @{error_log_filename} if you need to reference it)
+3. Analyze the error carefully - identify what went wrong
+4. MODIFY only the problematic parts of the Dockerfile while keeping all working parts unchanged
+5. Output the corrected Dockerfile content
+6. No markdown formatting, no explanations - just the raw Dockerfile content
+
+BUILD ERROR LOG:
+{error_log}
+
+Please read the Dockerfile at {dockerfile_absolute}, identify the issue from the error log above, and provide a fixed Dockerfile that addresses the specific error while preserving all working parts."""
+
+            self.log(repo_name, f"Requesting Dockerfile refinement from agent (iteration {iteration})...", to_console=False)
+            
+            # Invoke agent with refinement query
+            result = agent.invoke({
+                "input": refinement_query,
+                "chat_history": f"Previous context: Analyzing repository {repo_name} to generate and refine Dockerfile."
+            })
+            
+            refined_output = result.get('output', '').strip()
+            
+            if not refined_output:
+                self.log(repo_name, "Agent returned empty output for refinement", to_console=False)
+                return False
+            
+            # Extract Dockerfile content from output (may be wrapped in code blocks)
+            refined_dockerfile = refined_output
+            
+            # Remove markdown code blocks if present
+            if refined_dockerfile.startswith('```'):
+                lines = refined_dockerfile.split('\n')
+                # Find first and last line with ```
+                start_idx = 0
+                end_idx = len(lines)
+                for i, line in enumerate(lines):
+                    if line.strip().startswith('```'):
+                        if start_idx == 0:
+                            start_idx = i + 1
+                        else:
+                            end_idx = i
+                            break
+                refined_dockerfile = '\n'.join(lines[start_idx:end_idx])
+            
+            # Check if Dockerfile content looks valid
+            if 'FROM' not in refined_dockerfile:
+                self.log(repo_name, "Refined output does not contain FROM statement, refinement may have failed", to_console=False)
+                return False
+            
+            # Check if Dockerfile actually changed
+            if refined_dockerfile.strip() == current_dockerfile.strip():
+                self.log(repo_name, "Refined Dockerfile is identical to current one", to_console=False)
+                return False
+            
+            # Backup current Dockerfile
+            backup_path = dockerfile_path.parent / f"Dockerfile.backup_iter{iteration-1}"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                f.write(current_dockerfile)
+            
+            # Write refined Dockerfile
+            with open(dockerfile_path, 'w', encoding='utf-8') as f:
+                f.write(refined_dockerfile)
+            
+            self.log(repo_name, f"Dockerfile updated (backup saved to {backup_path.name})", to_console=False)
+            
+            return True
+            
+        except Exception as e:
+            self.log(repo_name, f"Exception during Dockerfile refinement: {e}", to_console=False)
+            import traceback
+            self.log(repo_name, f"Traceback: {traceback.format_exc()}", to_console=False)
+            return False
+
     def _aggressive_cleanup(self, repo_name: str, repo_path: Optional[str], result: Dict):
         """
         Aggressive cleanup to prevent memory issues during parallel execution.
@@ -384,13 +578,21 @@ class ParallelEmpiricalTester:
 
         # 3. Clear large result fields to reduce memory
         # Keep error messages but truncate if too large
-        if "dockerfile_test" in result and not result["dockerfile_test"].get("success", False):
-            if "error_message" in result["dockerfile_test"]:
-                # Keep only last 5000 chars of error message in memory
-                error_msg = result["dockerfile_test"]["error_message"]
-                if len(error_msg) > 5000:
-                    result["dockerfile_test"]["error_message"] = error_msg[-5000:]
-                    result["dockerfile_test"]["error_message_truncated"] = True
+        if "dockerfile_test" in result:
+            docker_test = result["dockerfile_test"]
+            # Handle new iteration-based structure
+            if "final_result" in docker_test and docker_test.get("final_result"):
+                final_result = docker_test["final_result"]
+                if "error_message" in final_result and not docker_test.get("success", False):
+                    error_msg = final_result["error_message"]
+                    if len(error_msg) > 5000:
+                        final_result["error_message"] = error_msg[-5000:]
+                        final_result["error_message_truncated"] = True
+            # Truncate iteration error messages
+            if "iterations" in docker_test:
+                for iter_result in docker_test["iterations"]:
+                    if "error_snippet" in iter_result and len(iter_result["error_snippet"]) > 500:
+                        iter_result["error_snippet"] = iter_result["error_snippet"][:500] + "..."
 
         # Don't store full Dockerfile content in results (already saved to file)
         if "dockerfile_content" in result:
@@ -513,12 +715,33 @@ class ParallelEmpiricalTester:
         successful = sum(1 for r in self.results if r["success"])
         failed = total - successful
 
-        # Categorize failures
+        # Categorize failures and track iteration statistics
         failure_stages = {}
+        iteration_stats = {"succeeded_at_iteration": {}, "refinement_attempts": []}
+        
         for result in self.results:
-            if not result["success"] and "dockerfile_test" in result:
-                stage = result["dockerfile_test"].get("stage", "UNKNOWN")
-                failure_stages[stage] = failure_stages.get(stage, 0) + 1
+            if "dockerfile_test" in result:
+                docker_test = result["dockerfile_test"]
+                
+                # Track success iterations
+                if docker_test.get("success") and "final_iteration" in docker_test:
+                    iter_num = docker_test["final_iteration"]
+                    iteration_stats["succeeded_at_iteration"][iter_num] = \
+                        iteration_stats["succeeded_at_iteration"].get(iter_num, 0) + 1
+                
+                # Track refinement attempts
+                if "iterations" in docker_test:
+                    refinement_count = len([i for i in docker_test["iterations"] if i.get("iteration", 0) > 0])
+                    if refinement_count > 0:
+                        iteration_stats["refinement_attempts"].append(refinement_count)
+                
+                # Categorize final failure stage
+                if not docker_test.get("success"):
+                    if "final_result" in docker_test and docker_test.get("final_result"):
+                        stage = docker_test["final_result"].get("stage", "UNKNOWN")
+                    else:
+                        stage = docker_test.get("stage", "UNKNOWN")
+                    failure_stages[stage] = failure_stages.get(stage, 0) + 1
 
         # Calculate statistics
         durations = [r["total_duration_seconds"] for r in self.results]
@@ -553,6 +776,11 @@ class ParallelEmpiricalTester:
             "avg_cost_per_repo_usd": avg_cost,
             "total_cost_usd": total_cost,
             "failure_stages": failure_stages,
+            "iteration_stats": {
+                "succeeded_at_iteration": iteration_stats["succeeded_at_iteration"],
+                "avg_refinement_attempts": sum(iteration_stats["refinement_attempts"]) / len(iteration_stats["refinement_attempts"]) if iteration_stats["refinement_attempts"] else 0,
+                "total_refinement_attempts": sum(iteration_stats["refinement_attempts"])
+            },
             "results_file": str(self.results_file),
             "master_log": str(self.master_log_file)
         }
@@ -589,6 +817,21 @@ class ParallelEmpiricalTester:
                 for stage, count in sorted(failure_stages.items(), key=lambda x: x[1], reverse=True):
                     f.write(f"{stage:40s}: {count:3d} ({count/failed*100:.1f}%)\n")
                 f.write("\n")
+            
+            if iteration_stats["succeeded_at_iteration"] or iteration_stats["refinement_attempts"]:
+                f.write("ITERATION REFINEMENT STATISTICS\n")
+                f.write("-"*80 + "\n")
+                if iteration_stats["succeeded_at_iteration"]:
+                    f.write("Success by iteration:\n")
+                    for iter_num in sorted(iteration_stats["succeeded_at_iteration"].keys()):
+                        count = iteration_stats["succeeded_at_iteration"][iter_num]
+                        iter_label = "Initial" if iter_num == 0 else f"Refinement {iter_num}"
+                        f.write(f"  {iter_label:20s}: {count:3d} repositories\n")
+                if iteration_stats["refinement_attempts"]:
+                    avg_refine = sum(iteration_stats["refinement_attempts"]) / len(iteration_stats["refinement_attempts"])
+                    f.write(f"\nAverage refinement attempts: {avg_refine:.1f}\n")
+                    f.write(f"Total refinement attempts: {sum(iteration_stats['refinement_attempts'])}\n")
+                f.write("\n")
 
             f.write("DETAILED RESULTS\n")
             f.write("-"*80 + "\n")
@@ -606,10 +849,26 @@ class ParallelEmpiricalTester:
                     cost = result["agent_analysis"]["cost_usd"]
                     f.write(f"   Cost: ${cost.get('total_cost_usd', 0):.4f}\n")
 
-                if not result["success"] and "dockerfile_test" in result:
+                if "dockerfile_test" in result:
                     docker = result["dockerfile_test"]
-                    f.write(f"   Failure Stage: {docker.get('stage', 'UNKNOWN')}\n")
-                    f.write(f"   Failed Command: {docker.get('failed_command', 'Unknown')}\n")
+                    if docker.get("success"):
+                        final_iter = docker.get("final_iteration", 0)
+                        iter_label = "Initial" if final_iter == 0 else f"After {final_iter} refinement(s)"
+                        f.write(f"   Succeeded at: {iter_label}\n")
+                        if "iterations" in docker:
+                            total_iters = len(docker["iterations"])
+                            f.write(f"   Total iterations tested: {total_iters}\n")
+                    else:
+                        if "final_result" in docker and docker.get("final_result"):
+                            final_res = docker["final_result"]
+                            f.write(f"   Failure Stage: {final_res.get('stage', 'UNKNOWN')}\n")
+                            f.write(f"   Failed Command: {final_res.get('failed_command', 'Unknown')}\n")
+                        else:
+                            f.write(f"   Failure Stage: {docker.get('stage', 'UNKNOWN')}\n")
+                            f.write(f"   Failed Command: {docker.get('failed_command', 'Unknown')}\n")
+                        if "iterations" in docker:
+                            total_iters = len(docker["iterations"])
+                            f.write(f"   Refinement attempts: {total_iters - 1}\n")
 
             f.write("\n" + "="*80 + "\n")
 
@@ -633,11 +892,32 @@ class ParallelEmpiricalTester:
         for result in self.results:
             status = "✓" if result["success"] else "✗"
             duration = f"{result['total_duration_seconds']:.1f}s"
-            print(f"{status} {result['repo_name']:30s} | {duration:10s}")
-            if not result["success"] and "dockerfile_test" in result:
-                stage = result["dockerfile_test"].get("stage", "UNKNOWN")
-                print(f"  └─ Failed at: {stage}")
+            iter_info = ""
+            
+            if "dockerfile_test" in result:
+                docker_test = result["dockerfile_test"]
+                if docker_test.get("success"):
+                    final_iter = docker_test.get("final_iteration", 0)
+                    iter_info = f" [iter {final_iter}]" if final_iter > 0 else ""
+                elif "final_result" in docker_test and docker_test.get("final_result"):
+                    stage = docker_test["final_result"].get("stage", "UNKNOWN")
+                    total_iters = len(docker_test.get("iterations", []))
+                    iter_info = f" [iter {total_iters-1}] {stage}" if total_iters > 1 else f" {stage}"
+                else:
+                    stage = docker_test.get("stage", "UNKNOWN")
+                    iter_info = f" {stage}"
+            
+            print(f"{status} {result['repo_name']:30s} | {duration:10s}{iter_info}")
         print("-"*80)
+        
+        # Print iteration statistics if available
+        if iteration_stats["succeeded_at_iteration"]:
+            print("\nIteration Success Breakdown:")
+            print("-"*80)
+            for iter_num in sorted(iteration_stats["succeeded_at_iteration"].keys()):
+                count = iteration_stats["succeeded_at_iteration"][iter_num]
+                iter_label = "Initial" if iter_num == 0 else f"Refinement {iter_num}"
+                print(f"  {iter_label:20s}: {count:3d} repositories")
 
         print(f"\nResults saved to: {self.results_dir.absolute()}")
         print(f"Summary: {self.summary_file}")
