@@ -16,6 +16,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
+import threading
 
 from planner_agent import create_planner_agent, REPORT_DIRECTORY
 
@@ -286,19 +287,72 @@ def save_analysis_reports(
     return report_dir
 
 
-class TeeOutput:
-    """Helper class to tee output to both terminal and log file"""
-    def __init__(self, *files):
-        self.files = files
+class ThreadAwareStdout:
+    """
+    Thread-safe stdout wrapper that writes to original stdout 
+    and a thread-local log file if registered.
+    """
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+        self.thread_files = {}
+        self.lock = threading.Lock()
+    
+    def register(self, f):
+        with self.lock:
+            self.thread_files[threading.get_ident()] = f
+    
+    def unregister(self):
+        with self.lock:
+            self.thread_files.pop(threading.get_ident(), None)
     
     def write(self, text):
-        for f in self.files:
-            f.write(text)
-            f.flush()
+        # Write to original stream
+        try:
+            self.original_stream.write(text)
+            self.original_stream.flush()
+        except Exception:
+            pass
+            
+        # Write to thread-local file
+        f = self.thread_files.get(threading.get_ident())
+        if f:
+            try:
+                f.write(text)
+                f.flush()
+            except Exception:
+                pass
     
     def flush(self):
-        for f in self.files:
-            f.flush()
+        try:
+            self.original_stream.flush()
+        except Exception:
+            pass
+        f = self.thread_files.get(threading.get_ident())
+        if f:
+            try:
+                f.flush()
+            except Exception:
+                pass
+                
+    def __getattr__(self, name):
+        return getattr(self.original_stream, name)
+
+
+_stdout_patched = False
+_stderr_patched = False
+_patch_lock = threading.Lock()
+
+def _ensure_patched():
+    global _stdout_patched, _stderr_patched
+    with _patch_lock:
+        if not _stdout_patched:
+            if not isinstance(sys.stdout, ThreadAwareStdout):
+                sys.stdout = ThreadAwareStdout(sys.stdout)
+            _stdout_patched = True
+        if not _stderr_patched:
+            if not isinstance(sys.stderr, ThreadAwareStdout):
+                sys.stderr = ThreadAwareStdout(sys.stderr)
+            _stderr_patched = True
 
 
 def detect_project_language(repo_path: str) -> str:
@@ -378,26 +432,32 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
     log_file_handle = open(log_file_path, 'w', encoding='utf-8')
     
     # Create a tee that writes to both stdout and log file
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
+    # Ensure stdout/stderr are patched
+    _ensure_patched()
+    
+    # Register log file for this thread
+    sys.stdout.register(log_file_handle)
+    sys.stderr.register(log_file_handle)
     
     try:
-        # Redirect stdout and stderr to both terminal and log file
-        sys.stdout = TeeOutput(original_stdout, log_file_handle)
-        sys.stderr = TeeOutput(original_stderr, log_file_handle)
-        
-        # Reconfigure logging to use redirected stderr so INFO logs are captured
+        # Configure logging to use sys.stderr (which is now patched)
         import logging
-        # Remove all existing handlers
-        for handler in logging.root.handlers[:]:
-            logging.root.removeHandler(handler)
-        # Create a new StreamHandler that writes to current stderr (which is now redirected)
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logging.root.addHandler(handler)
-        logging.root.setLevel(logging.INFO)
+        
+        # Check if we have a handler for sys.stderr already
+        has_stderr_handler = False
+        for h in logging.root.handlers:
+            if isinstance(h, logging.StreamHandler) and h.stream == sys.stderr:
+                has_stderr_handler = True
+                break
+        
+        if not has_stderr_handler:
+            # Create a new StreamHandler that writes to sys.stderr
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            logging.root.addHandler(handler)
+            logging.root.setLevel(logging.INFO)
         
         print(f"\n{'='*70}")
         print(f"Analyzing Repository: {repo_name}")
@@ -464,7 +524,7 @@ GUIDELINES:
 - Include environment variables only if they are clearly required by the project
 - When in doubt, use a more recent stable base image version rather than guessing
 
-Output ONLY the raw Dockerfile content, starting with FROM and ending with CMD/ENTRYPOINT. No markdown formatting, no explanations - just the Dockerfile that can be saved directly to a file."""
+Provide the Dockerfile content as your Final Answer. Do not include any other text or explanations in the Final Answer, just the Dockerfile content starting with FROM."""
         ]
 
         # Initialize conversation history to maintain context across queries
@@ -552,22 +612,13 @@ Output ONLY the raw Dockerfile content, starting with FROM and ending with CMD/E
         duration_seconds = end_time - start_time
 
     finally:
-        # Restore original stdout/stderr
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
+        # Unregister log file
+        if hasattr(sys.stdout, 'unregister'):
+            sys.stdout.unregister()
+        if hasattr(sys.stderr, 'unregister'):
+            sys.stderr.unregister()
         
-        # Restore logging handlers to original stderr
-        import logging
-        for handler in logging.root.handlers[:]:
-            logging.root.removeHandler(handler)
-        # Reconfigure with original stderr
-        handler = logging.StreamHandler(original_stderr)
-        handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logging.root.addHandler(handler)
-        logging.root.setLevel(logging.INFO)
-        
+        # Close log file
         log_file_handle.close()
     
     # Print summary to console (for immediate feedback)
