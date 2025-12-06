@@ -409,6 +409,13 @@ def detect_project_language(repo_path: str) -> str:
     return "Unknown"
 
 
+def _has_dockerfile(output: str) -> bool:
+    """Check if output contains a Dockerfile (has FROM statement)."""
+    if not output or not output.strip():
+        return False
+    return "FROM" in output.upper()
+
+
 def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, callback_handler, log_file_path=None, report_dir=None):
     """
     Run analysis queries on a cloned repository.
@@ -482,6 +489,8 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install', 'build', 'run', or 'start' commands mentioned in configuration files or scripts. Identify: entry points, default ports, required environment variables, volume mounts, and any runtime configuration. Compare with official documentation.",
 
             """Create a Dockerfile using a simple 3-part framework. Focus on making it build successfully rather than including every possible best practice.
+
+**CRITICAL: Your Final Answer MUST be a complete Dockerfile starting with FROM. Do not provide empty output or just explanations.**
 
 The Dockerfile should have these 3 main parts:
 
@@ -557,7 +566,7 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
                     "chat_history": formatted_history or "No previous context."
                 })
 
-                output = result['output']
+                output = result.get('output', '')
                 print(f"\n[RESULT]\n{output}\n")
 
                 # Track tool usage if intermediate steps are available
@@ -565,6 +574,7 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
                     for action, _ in result['intermediate_steps']:
                         tool_name = action.tool
                         tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
+
 
                 # Track token usage if available in result - try multiple possible keys
                 usage_found = False
@@ -594,6 +604,25 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
 
                 # Save the final step output (Dockerfile)
                 if i == len(queries):
+                    # Check if output contains Dockerfile, retry up to 3 times if not
+                    max_retries = 3
+                    for retry_attempt in range(max_retries):
+                        if _has_dockerfile(output):
+                            break
+                        if retry_attempt == 0:
+                            print(f"\n[WARNING] Output doesn't contain Dockerfile (empty or no FROM statement). Retrying with full 3-part prompt...")
+                        else:
+                            print(f"\n[WARNING] Retry {retry_attempt + 1}/{max_retries} still didn't produce Dockerfile. Retrying again...")
+                        
+                        retry_result = agent.invoke({
+                            "input": queries[-1],  # Use the full 3-part Dockerfile query
+                            "chat_history": formatted_history or "No previous context."
+                        })
+                        output = retry_result.get('output', output)
+                    
+                    if not _has_dockerfile(output):
+                        print(f"\n[ERROR] Failed to generate Dockerfile after {max_retries + 1} attempts (initial + {max_retries} retries)")
+                    
                     final_instructions = output
 
                 # Add this interaction to chat history for next query

@@ -224,7 +224,7 @@ class ParallelEmpiricalTester:
             else:
                 self.log(repo_name, f"Analysis complete ({analysis_duration:.1f}s)", to_console=True)
 
-            # Step 4: Test Dockerfile with iterative refinement (max 3 iterations)
+            # Step 4: Test Dockerfile with iterative refinement (max 10 iterations)
             self.log(repo_name, "Testing generated Dockerfile...", to_console=True)
             dockerfile_path = report_dir_result / "Dockerfile"
 
@@ -244,11 +244,11 @@ class ParallelEmpiricalTester:
                     "final_iteration": 0,
                     "success": False
                 }
-                max_refinement_iterations = 3
+                max_refinement_iterations = 10
                 iteration_success = False
 
                 # Iterative refinement loop
-                for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-3 = refinements
+                for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-10 = refinements
                     iteration_start_time = time.time()
                     
                     # Read current Dockerfile content
