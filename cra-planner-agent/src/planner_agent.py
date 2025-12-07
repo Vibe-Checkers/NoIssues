@@ -1702,8 +1702,8 @@ Thought:{agent_scratchpad}"""
         error_str = str(error)
         logger.warning(f"Parsing error: {error_str}")
         if "Could not parse" in error_str or "Missing 'Action:'" in error_str or "Invalid Format" in error_str:
-            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text. Example:\nThought: I need to search for documentation.\nAction: SearchWeb\nAction Input: requests Python documentation"
-        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. I cannot write free text."
+            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text.\n\nIf I want to provide the final answer, I MUST write 'Final Answer:' followed by the answer.\n\nExample Tool Usage:\nThought: I need to search.\nAction: SearchWeb\nAction Input: query\n\nExample Final Answer:\nThought: I am done.\nFinal Answer: The result is..."
+        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. If I am done, I must write 'Final Answer:'."
 
     agent_executor = AgentExecutor(
         agent=agent,

@@ -85,7 +85,8 @@ def save_analysis_reports(
     duration_seconds: float,
     callback_handler,
     log_file_path: Path = None,
-    report_dir: Path = None
+    report_dir: Path = None,
+    final_dockerignore: str = None
 ):
     """
     Save all analysis reports, metrics, and performance data to a structured folder.
@@ -101,6 +102,7 @@ def save_analysis_reports(
         callback_handler: Callback handler with token usage
         log_file_path: Optional path to log file
         report_dir: Optional existing report directory (if None, creates new one)
+        final_dockerignore: Optional .dockerignore content
     """
     # Use provided report_dir or create new one
     if report_dir is None:
@@ -174,6 +176,34 @@ def save_analysis_reports(
             print(f"[OK] Dockerfile saved: {dockerfile_path.name}")
         except Exception as e:
             print(f"[ERROR] Failed to save Dockerfile: {e}")
+
+    # 1.5 Save .dockerignore
+    if final_dockerignore:
+        dockerignore_path = report_dir / ".dockerignore"
+        try:
+            # Clean up content
+            dockerignore_content = final_dockerignore.strip()
+            
+            # Remove markdown code blocks if present
+            if dockerignore_content.startswith("```"):
+                lines = dockerignore_content.split('\n')
+                start_idx = 0
+                end_idx = len(lines)
+                for i, line in enumerate(lines):
+                    if line.strip().startswith("```"):
+                        start_idx = i + 1
+                        break
+                for i in range(len(lines) - 1, -1, -1):
+                    if lines[i].strip() == "```":
+                        end_idx = i
+                        break
+                dockerignore_content = '\n'.join(lines[start_idx:end_idx]).strip()
+            
+            with open(dockerignore_path, 'w', encoding='utf-8') as f:
+                f.write(dockerignore_content)
+            print(f"[OK] .dockerignore saved: {dockerignore_path.name}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save .dockerignore: {e}")
     
     # 2. Collect all metrics
     metrics = {
@@ -488,57 +518,40 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
 
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install', 'build', 'run', or 'start' commands mentioned in configuration files or scripts. Identify: entry points, default ports, required environment variables, volume mounts, and any runtime configuration. Compare with official documentation.",
 
-            """Create a Dockerfile using a simple 3-part framework. Focus on making it build successfully rather than including every possible best practice.
+            """Create a Dockerfile AND a .dockerignore file.
+            
+**CRITICAL: You must verify the base image exists using the `DockerImageSearch` tool BEFORE generating the Final Answer.**
 
-**CRITICAL: Your Final Answer MUST be a complete Dockerfile starting with FROM. Do not provide empty output or just explanations.**
+**CRITICAL: Your Final Answer MUST be in the EXACT format below. Do not provide any other text in the Final Answer.**
 
-The Dockerfile should have these 3 main parts:
+FORMAT:
+DOCKERFILE_START
+<Dockerfile content>
+DOCKERFILE_END
 
-**PART 1: BASE IMAGE**
-- Choose an appropriate official base image based on the project's language and version requirements discovered in the repository
-- **CRITICAL**: Check version requirements in configuration files and match the base image version exactly
-- Use specific version tags when possible, not 'latest'
-- Set WORKDIR to /app or /usr/src/app
+DOCKERIGNORE_START
+<.dockerignore content>
+DOCKERIGNORE_END
 
-**PART 2: DEPENDENCIES**
-- Install system dependencies ONLY if clearly needed and use the correct package manager for the base image:
-  * Debian/Ubuntu base images: Use apt-get (apt-get update && apt-get install -y package-name)
-  * Alpine base images: Use apk (apk add --no-cache package-name)
-  * Only install packages that actually exist - avoid guessing package names
-  * Common safe packages: build-essential, gcc, g++, make, curl, wget, git
-- Copy dependency manifest files BEFORE copying source code to leverage Docker layer caching
-- Do NOT use shell operators (||, &&, etc.) with COPY command - COPY does not support them
-- For optional files, either: (1) copy only if they exist using separate COPY commands, or (2) use RUN with conditional logic
-- Install application dependencies using the appropriate package manager for the project type (discovered from config files)
+INSTRUCTIONS:
 
-**PART 3: BUILD INSTRUCTIONS**
-- Copy the application source code
-- Run build commands if needed (discovered from README, config files, or build scripts)
-- Set CMD or ENTRYPOINT to run the application (use the exact command from README or config files)
-- EXPOSE the port if it's a web service (check config files or use common defaults)
+1. **VERIFY FIRST**: Use `DockerImageSearch` to verify the base image tag exists. Do NOT guess. If the tag doesn't exist, find a valid one. Do this as a separate Action.
 
-CRITICAL ERROR PREVENTION:
-1. **Version Matching**: Always check configuration files for version requirements and match the base image version exactly
-2. **Package Manager**: Match the package manager to the base image (apt-get for Debian/Ubuntu, apk for Alpine)
-3. **COPY Syntax**: Never use shell operators with COPY (e.g., COPY file.txt || true is INVALID - use RUN with conditional instead)
-4. **Optional Files**: If a file might not exist, either skip it or use RUN with conditional check, not COPY with || operator
-5. **Package Names**: Only install system packages you're certain exist - prefer minimal installations
-6. **Editable Installs**: Only use editable install commands if the project structure clearly supports it
+2. **GENERATE FILES**: Once verified, create the Dockerfile and .dockerignore content.
+   - Dockerfile: 3-part framework, match versions, use correct package manager.
+   - .dockerignore: Exclude .git (CRITICAL), node_modules, tmp, build, dist, .env.
 
-GUIDELINES:
-- Keep it simple and focused on getting it to build
-- Use the information from the README, config files, and documentation you found earlier
-- If you're unsure about optional features (health checks, non-root users, multi-stage builds), skip them to keep it simple
-- Prioritize correctness over completeness - a working simple Dockerfile is better than a complex one that fails
-- Include environment variables only if they are clearly required by the project
-- When in doubt, use a more recent stable base image version rather than guessing
+3. **PROVIDE FINAL ANSWER**: Use the "Final Answer" action with the content in the specified format.
 
-Provide the Dockerfile content as your Final Answer. Do not include any other text or explanations in the Final Answer, just the Dockerfile content starting with FROM."""
+Provide the Final Answer in the specified format.
+"""
         ]
 
         # Initialize conversation history to maintain context across queries
+        # Initialize conversation history to maintain context across queries
         chat_history = []
         final_instructions = None
+        dockerignore_content = None
         total_tokens = {"input": 0, "output": 0, "total": 0}
         tool_usage = {}  # Track how many times each tool is used
         start_time = time.time()  # Track analysis duration
@@ -602,28 +615,76 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
                     print(f"[DEBUG] Result keys available: {list(result.keys())}")
                     print(f"[DEBUG] Will rely on callback handler for token tracking")
 
-                # Save the final step output (Dockerfile)
+                # Save the final step output (Dockerfile and .dockerignore)
                 if i == len(queries):
-                    # Check if output contains Dockerfile, retry up to 3 times if not
+                    # Parse the output for Dockerfile and .dockerignore
+                    dockerfile_content = None
+                    # dockerignore_content is already initialized outside loop
+                    
+                    # Try to parse with new format
+                    if "DOCKERFILE_START" in output and "DOCKERFILE_END" in output:
+                        try:
+                            dockerfile_content = output.split("DOCKERFILE_START")[1].split("DOCKERFILE_END")[0].strip()
+                        except IndexError:
+                            pass
+                    
+                    if "DOCKERIGNORE_START" in output and "DOCKERIGNORE_END" in output:
+                        try:
+                            dockerignore_content = output.split("DOCKERIGNORE_START")[1].split("DOCKERIGNORE_END")[0].strip()
+                        except IndexError:
+                            pass
+                    
+                    # Fallback: Check if output contains Dockerfile directly (old behavior)
+                    if not dockerfile_content and _has_dockerfile(output):
+                        dockerfile_content = output
+                    
+                    # Retry logic if Dockerfile is missing
                     max_retries = 3
                     for retry_attempt in range(max_retries):
-                        if _has_dockerfile(output):
+                        if dockerfile_content and _has_dockerfile(dockerfile_content):
                             break
+                            
                         if retry_attempt == 0:
-                            print(f"\n[WARNING] Output doesn't contain Dockerfile (empty or no FROM statement). Retrying with full 3-part prompt...")
+                            print(f"\n[WARNING] Output doesn't contain valid Dockerfile. Retrying with strict format prompt...")
                         else:
-                            print(f"\n[WARNING] Retry {retry_attempt + 1}/{max_retries} still didn't produce Dockerfile. Retrying again...")
+                            print(f"\n[WARNING] Retry {retry_attempt + 1}/{max_retries} still didn't produce valid Dockerfile. Retrying again...")
                         
                         retry_result = agent.invoke({
-                            "input": queries[-1],  # Use the full 3-part Dockerfile query
+                            "input": queries[-1] + "\n\nREMINDER: You MUST use the exact format with DOCKERFILE_START and DOCKERIGNORE_START tags.",
                             "chat_history": formatted_history or "No previous context."
                         })
                         output = retry_result.get('output', output)
+                        
+                        # Re-parse after retry
+                        if "DOCKERFILE_START" in output and "DOCKERFILE_END" in output:
+                            try:
+                                dockerfile_content = output.split("DOCKERFILE_START")[1].split("DOCKERFILE_END")[0].strip()
+                            except IndexError:
+                                pass
+                        
+                        if "DOCKERIGNORE_START" in output and "DOCKERIGNORE_END" in output:
+                            try:
+                                dockerignore_content = output.split("DOCKERIGNORE_START")[1].split("DOCKERIGNORE_END")[0].strip()
+                            except IndexError:
+                                pass
+                                
+                        if not dockerfile_content and _has_dockerfile(output):
+                            dockerfile_content = output
                     
-                    if not _has_dockerfile(output):
-                        print(f"\n[ERROR] Failed to generate Dockerfile after {max_retries + 1} attempts (initial + {max_retries} retries)")
+                    if not dockerfile_content or not _has_dockerfile(dockerfile_content):
+                        print(f"\n[ERROR] Failed to generate Dockerfile after {max_retries + 1} attempts")
                     
-                    final_instructions = output
+                    final_instructions = dockerfile_content
+                    
+                    # Save .dockerignore to repo immediately if found
+                    if dockerignore_content:
+                        try:
+                            dockerignore_path = Path(repo_path) / ".dockerignore"
+                            with open(dockerignore_path, 'w', encoding='utf-8') as f:
+                                f.write(dockerignore_content)
+                            print(f"[OK] .dockerignore written to repository: {dockerignore_path}")
+                        except Exception as e:
+                            print(f"[ERROR] Failed to write .dockerignore to repo: {e}")
 
                 # Add this interaction to chat history for next query
                 chat_history.extend([
@@ -685,7 +746,8 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
             total_tokens=total_tokens,
             duration_seconds=duration_seconds,
             callback_handler=callback_handler,
-            log_file_path=log_file_path
+            log_file_path=log_file_path,
+            final_dockerignore=dockerignore_content
         )
     else:
         # Use existing report directory
@@ -699,7 +761,8 @@ Provide the Dockerfile content as your Final Answer. Do not include any other te
             duration_seconds=duration_seconds,
             callback_handler=callback_handler,
             log_file_path=log_file_path,
-            report_dir=report_dir
+            report_dir=report_dir,
+            final_dockerignore=dockerignore_content
         )
     
     # Clean up temporary log file
