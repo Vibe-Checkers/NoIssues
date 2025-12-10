@@ -610,33 +610,33 @@ class ParallelEmpiricalTester:
                 # Sanitize error for Azure safety
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
                 
-                # General-purpose prompt - NO hardcoded suggestions, agent must search
+                # Extract base image name (without tag) for searching
                 base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
                 
+                # NEW APPROACH: Web search first to understand what tags exist, then verify
                 refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST on Docker Hub!
 
-🚨 YOU MUST USE DockerImageSearch TOOL TO FIX THIS:
+🔍 **STEP 1 - WEB SEARCH FIRST**: Use SearchDockerError with "docker hub {base_image_name} available tags versions"
+   This will show you what tags are commonly used and recommended.
 
-**STEP 1 - REQUIRED:** Use DockerImageSearch with "{base_image_name}" to find ACTUAL available tags
-**STEP 2 - REQUIRED:** Pick a tag that EXISTS from the search results (with a specific version number)
-**STEP 3:** Read the current Dockerfile at: {dockerfile_absolute}
-**STEP 4:** Replace the failing image with a VERIFIED working image from Step 1
+📦 **STEP 2 - LIST AVAILABLE TAGS**: Use DockerImageSearch with "tags:{base_image_name}"
+   This queries Docker Hub API and shows ALL available tags categorized by:
+   - Versioned tags (recommended for stability)
+   - JDK/OpenJDK tags (for Java projects)
+   - Slim/Alpine tags (smaller images)
+
+✅ **STEP 3 - VERIFY YOUR CHOICE**: Use DockerImageSearch with "{base_image_name}:<your-chosen-tag>"
+   Confirm the tag exists before using it.
+
+📝 **STEP 4 - UPDATE DOCKERFILE**: Read the current Dockerfile at: {dockerfile_absolute}
+   Replace the failing image with your VERIFIED tag.
 
 ⚠️ CRITICAL RULES:
-- You MUST use DockerImageSearch tool to verify images exist
-- DO NOT guess image tags - only use tags that DockerImageSearch confirms exist
-- DO NOT use ":latest" - use specific version tags from search results
-- Your Final Answer MUST start with FROM and contain ONLY the Dockerfile content
-- NO explanations or prose before/after the Dockerfile
-
-❌ WRONG OUTPUT FORMAT:
-"Below is a corrected Dockerfile..."
-"I will provide a Dockerfile that..."
-
-✅ CORRECT OUTPUT FORMAT:
-FROM verified-image:tag
-WORKDIR /app
-...
+- You MUST use DockerImageSearch with "tags:{base_image_name}" to see available tags
+- Pick a SPECIFIC VERSION tag (e.g., "3.9.6" not "latest")
+- VERIFY the tag exists before using it
+- Your Final Answer MUST start with FROM and contain ONLY Dockerfile content
+- NO explanations or prose - ONLY the Dockerfile
 
 Error: {safe_error}"""
 

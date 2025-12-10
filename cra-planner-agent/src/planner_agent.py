@@ -343,8 +343,13 @@ def search_docker_error(error_keywords: str) -> str:
     Search web for Docker error solutions and debugging guidance.
     Focuses on Stack Overflow, Docker docs, and troubleshooting guides.
     
+    BEST USAGE:
+    - For image errors: "docker hub maven available tags" or "what java docker images exist"
+    - For build errors: "npm install failed docker alpine" or "pip install gcc docker"
+    - For syntax errors: "dockerfile syntax error unknown instruction"
+    
     Args:
-        error_keywords: Key error terms (e.g., "dockerfile manifest unknown", "pip install failed docker")
+        error_keywords: Key error terms - be DESCRIPTIVE (e.g., "docker hub maven available tags", "pip install failed docker")
         
     Returns:
         Summary of solutions from top results (max 4000 chars)
@@ -357,9 +362,10 @@ def search_docker_error(error_keywords: str) -> str:
             import requests
             from bs4 import BeautifulSoup
             
+            # Build search queries - use the input directly plus variations
             search_queries = [
+                error_keywords,  # Use exact input first
                 f"docker {error_keywords} solution",
-                f"dockerfile {error_keywords} fix"
             ]
             
             results = []
@@ -368,7 +374,7 @@ def search_docker_error(error_keywords: str) -> str:
             with DDGS() as ddgs:
                 for query in search_queries:
                     try:
-                        search_results = list(ddgs.text(query, max_results=3))
+                        search_results = list(ddgs.text(query, max_results=4))
                         for result in search_results:
                             url = result.get('href', '')
                             if url and url not in seen_urls:
@@ -378,26 +384,29 @@ def search_docker_error(error_keywords: str) -> str:
                                     'url': url,
                                     'snippet': result.get('body', '')
                                 })
-                                if len(results) >= 4:
+                                if len(results) >= 6:
                                     break
                     except Exception as e:
                         logger.warning(f"Search query failed: {query} - {e}")
                         continue
                     
-                    if len(results) >= 4:
+                    if len(results) >= 6:
                         break
             
             if not results:
-                return f"No solutions found for: {error_keywords}. Try: 1) Check Docker image exists with DockerImageSearch 2) Verify Dockerfile syntax 3) Check dependency versions"
+                return f"No solutions found for: {error_keywords}. Try:\n1) Use DockerImageSearch with 'tags:<image>' to list available tags\n2) Check Dockerfile syntax\n3) Verify dependency versions"
             
-            summary_parts = [f"Docker Error Solutions for '{error_keywords}':\n"]
+            summary_parts = [f"🔍 Web Search Results for '{error_keywords}':\n{'='*60}\n"]
             
-            for idx, result in enumerate(results[:4], 1):
+            for idx, result in enumerate(results[:6], 1):
                 summary_parts.append(f"\n{idx}. {result['title']}")
-                summary_parts.append(f"   URL: {result['url']}")
+                summary_parts.append(f"   🔗 {result['url']}")
                 if result['snippet']:
-                    snippet = result['snippet'][:300]
-                    summary_parts.append(f"   {snippet}...")
+                    snippet = result['snippet'][:350]
+                    summary_parts.append(f"   📄 {snippet}...")
+                summary_parts.append("")
+            
+            summary_parts.append(f"\n💡 TIP: Use FetchWebPage tool to read full content from any URL above")
             
             summary = '\n'.join(summary_parts)
             
@@ -411,7 +420,7 @@ def search_docker_error(error_keywords: str) -> str:
         
     except Exception as e:
         logger.error(f"Docker error search failed: {e}")
-        return f"Search failed: {str(e)}. Manual debugging: 1) Verify base image with DockerImageSearch 2) Check Dockerfile syntax 3) Review error logs for missing dependencies"
+        return f"Search failed: {str(e)}. Manual debugging:\n1) Use DockerImageSearch with 'tags:<image>' to list available tags\n2) Check Dockerfile syntax\n3) Review error logs for missing dependencies"
 
 
 def search_web(query: str) -> str:
@@ -1473,49 +1482,144 @@ def fetch_web_page(url: str) -> str:
 
 def docker_image_search(query: str) -> str:
     """
-    Search for Docker images or verify a specific image tag using Docker Hub API.
+    Search Docker Hub for images, list available tags, or verify a specific tag exists.
+    
+    THREE MODES OF OPERATION:
+    1. "tags:<image>" - LIST all available tags (e.g., "tags:maven", "tags:python")
+    2. "<image>:<tag>" - VERIFY specific tag exists (e.g., "python:3.9", "maven:3.8.7-openjdk-11")
+    3. "<search term>" - SEARCH for images (e.g., "python", "nodejs")
     
     Args:
-        query: Search query (e.g., "python", "node") or specific image tag (e.g., "python:3.9")
+        query: 
+            - "tags:<image>" to list available tags for an image
+            - "<image>:<tag>" to verify a specific tag exists
+            - "<search term>" to search for images
         
     Returns:
-        Search results or verification details
+        List of tags, verification result, or search results
     """
     try:
         import requests
         
-        logger.info(f"Searching Docker Hub for: {query}")
+        logger.info(f"Docker Hub query: {query}")
         
-        # Check if query looks like a specific image tag
-        if ":" in query and " " not in query:
-            # Verify specific image tag
+        # MODE 1: List available tags for an image
+        if query.lower().startswith("tags:"):
+            image_name = query[5:].strip()  # Remove "tags:" prefix
+            
+            # Handle official images (e.g., python -> library/python)
+            api_image_name = image_name
+            if "/" not in image_name:
+                api_image_name = f"library/{image_name}"
+            
+            url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags"
+            params = {"page_size": 50, "ordering": "-last_updated"}  # Get most recent 50 tags
+            
+            try:
+                response = requests.get(url, params=params, timeout=15)
+                if response.status_code == 404:
+                    return f"❌ Image '{image_name}' not found on Docker Hub. Check the image name."
+                response.raise_for_status()
+                data = response.json()
+                
+                results = data.get("results", [])
+                if not results:
+                    return f"No tags found for image: {image_name}"
+                
+                # Categorize tags for better readability
+                versioned_tags = []  # Tags with version numbers (e.g., 3.9, 3.8.7)
+                slim_tags = []       # Slim/alpine/minimal variants
+                jdk_tags = []        # JDK-specific tags (for maven, gradle)
+                latest_tags = []     # Latest/stable tags
+                other_tags = []      # Everything else
+                
+                for tag_info in results:
+                    tag = tag_info.get("name", "")
+                    last_updated = tag_info.get("last_updated", "")[:10]  # Just date
+                    
+                    tag_entry = f"{tag} (updated: {last_updated})"
+                    
+                    # Categorize
+                    tag_lower = tag.lower()
+                    if tag_lower in ["latest", "stable"]:
+                        latest_tags.append(tag_entry)
+                    elif "slim" in tag_lower or "alpine" in tag_lower or "minimal" in tag_lower:
+                        slim_tags.append(tag_entry)
+                    elif "jdk" in tag_lower or "openjdk" in tag_lower:
+                        jdk_tags.append(tag_entry)
+                    elif any(c.isdigit() for c in tag):
+                        versioned_tags.append(tag_entry)
+                    else:
+                        other_tags.append(tag_entry)
+                
+                # Build output with categories
+                output = f"📦 Available tags for '{image_name}':\n"
+                output += f"{'='*60}\n\n"
+                
+                if versioned_tags:
+                    output += f"📌 VERSIONED TAGS (recommended for stability):\n"
+                    for tag in versioned_tags[:15]:  # Limit to top 15
+                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                    if len(versioned_tags) > 15:
+                        output += f"  ... and {len(versioned_tags) - 15} more\n"
+                    output += "\n"
+                
+                if jdk_tags:
+                    output += f"☕ JDK/OPENJDK TAGS:\n"
+                    for tag in jdk_tags[:10]:
+                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                    output += "\n"
+                
+                if slim_tags:
+                    output += f"🪶 SLIM/ALPINE TAGS (smaller images):\n"
+                    for tag in slim_tags[:10]:
+                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                    output += "\n"
+                
+                if latest_tags:
+                    output += f"⚠️ LATEST/STABLE (avoid - may change):\n"
+                    for tag in latest_tags:
+                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                    output += "\n"
+                
+                output += f"💡 TIP: Use a specific version tag like '{image_name}:{versioned_tags[0].split(' ')[0] if versioned_tags else 'X.Y'}' instead of 'latest'\n"
+                
+                return output
+                
+            except Exception as e:
+                return f"Error listing tags for {image_name}: {str(e)}"
+        
+        # MODE 2: Verify specific image tag exists
+        elif ":" in query and " " not in query:
             parts = query.split(":")
             image_name = parts[0]
             tag = parts[1]
             
             # Handle official images (e.g., python -> library/python)
+            api_image_name = image_name
             if "/" not in image_name:
-                image_name = f"library/{image_name}"
+                api_image_name = f"library/{image_name}"
                 
-            url = f"https://hub.docker.com/v2/repositories/{image_name}/tags/{tag}"
+            url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags/{tag}"
             
             try:
                 response = requests.get(url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-                    last_updated = data.get("last_updated", "unknown")
+                    last_updated = data.get("last_updated", "unknown")[:10]
                     images = data.get("images", [])
-                    archs = [img.get("architecture", "unknown") for img in images]
-                    return f"✅ Image found: {query}\nLast Updated: {last_updated}\nArchitectures: {', '.join(archs)}"
+                    archs = list(set([img.get("architecture", "unknown") for img in images]))
+                    return f"✅ VERIFIED: {query} EXISTS on Docker Hub\n   Last Updated: {last_updated}\n   Architectures: {', '.join(archs)}\n   Safe to use in Dockerfile: FROM {query}"
                 elif response.status_code == 404:
-                    return f"❌ Image not found: {query}\nThe image or tag does not exist on Docker Hub."
+                    # Image doesn't exist - suggest listing tags
+                    return f"❌ NOT FOUND: {query} does NOT exist on Docker Hub!\n\n💡 To find valid tags, use: tags:{image_name}\n   Example: DockerImageSearch with input 'tags:{image_name}'"
                 else:
                     return f"Error verifying image {query}: HTTP {response.status_code}"
             except Exception as e:
                 return f"Error verifying image {query}: {str(e)}"
-                
+        
+        # MODE 3: General search for images
         else:
-            # General search
             url = "https://hub.docker.com/v2/search/repositories"
             params = {"query": query, "page_size": 5}
             
@@ -1528,21 +1632,25 @@ def docker_image_search(query: str) -> str:
                 if not results:
                     return f"No Docker images found for query: {query}"
                 
-                output = f"Docker Hub Search Results for '{query}':\n"
+                output = f"🔍 Docker Hub Search Results for '{query}':\n"
                 output += f"{'='*60}\n"
                 
                 for res in results:
-                    name = res.get("repo_name")
+                    name = res.get("repo_name", "unknown")
                     star_count = res.get("star_count", 0)
-                    is_official = "✅ Official" if res.get("is_official") else ""
+                    is_official = "✅ OFFICIAL" if res.get("is_official") else ""
                     desc = res.get("short_description", "")[:100]
                     if len(res.get("short_description", "")) > 100:
                         desc += "..."
+                    
+                    # Extract just the image name for official images
+                    simple_name = name.split("/")[-1] if "/" in name else name
                         
-                    output += f"• {name} {is_official}\n"
+                    output += f"\n• {name} {is_official}\n"
                     output += f"  Stars: {star_count}\n"
                     output += f"  Description: {desc}\n"
-                    output += f"{'-'*60}\n"
+                    output += f"  💡 List tags: DockerImageSearch with 'tags:{simple_name}'\n"
+                    output += f"{'-'*60}"
                     
                 return output
                 
@@ -1661,12 +1769,24 @@ def create_planner_agent(
         Tool(
             name="DockerImageSearch",
             func=docker_image_search,
-            description="Search for Docker images or verify if a specific image tag exists. Input: search query (e.g., 'python') or image tag (e.g., 'python:3.9'). Use this to validate base images."
+            description="""Docker Hub tool with THREE modes:
+1. LIST TAGS: Input 'tags:<image>' (e.g., 'tags:maven', 'tags:python') - Shows ALL available tags categorized by version, JDK, slim/alpine
+2. VERIFY TAG: Input '<image>:<tag>' (e.g., 'python:3.9') - Checks if specific tag exists
+3. SEARCH: Input '<term>' (e.g., 'python') - Searches for images
+
+RECOMMENDED WORKFLOW for fixing image errors:
+1. First use 'tags:maven' to list ALL available tags
+2. Pick a specific versioned tag from the list
+3. Verify with 'maven:3.9.6' before using in Dockerfile"""
         ),
         Tool(
             name="SearchDockerError",
             func=search_docker_error,
-            description="Search web for Docker error solutions and fixes. Input: key error terms from build failure (e.g., 'manifest unknown', 'pip install failed', 'npm err'). Returns Stack Overflow solutions and Docker troubleshooting guides. Use when Dockerfile build fails."
+            description="""Search web for Docker solutions and available image tags. Input should be DESCRIPTIVE:
+- For image errors: "docker hub maven available tags versions" or "what tags exist for python docker image"
+- For build errors: "npm install failed docker alpine missing dependencies"
+- For syntax errors: "dockerfile syntax error unknown instruction"
+Returns top web results with snippets. Use FetchWebPage to read full content from URLs."""
         )
     ]
 
