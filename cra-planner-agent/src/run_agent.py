@@ -17,6 +17,12 @@ from pathlib import Path
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 import threading
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# Look for .env in the project root (parent of src/)
+dotenv_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=dotenv_path)
 
 from planner_agent import create_planner_agent, REPORT_DIRECTORY
 

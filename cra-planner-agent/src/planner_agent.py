@@ -6,10 +6,17 @@ Import this module to use the agent in other scripts.
 """
 
 import os
+import sys
 import json
 import logging
+import ssl
+import certifi
 from typing import Any, List, Optional, Dict
 from datetime import datetime
+
+# Fix SSL certificate issue on macOS with Anaconda Python
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
@@ -329,6 +336,82 @@ def extract_relevant_sections(soup, max_chars_per_section=3000, max_total_chars=
         return text
     
     return "[No relevant content found]"
+
+
+def search_docker_error(error_keywords: str) -> str:
+    """
+    Search web for Docker error solutions and debugging guidance.
+    Focuses on Stack Overflow, Docker docs, and troubleshooting guides.
+    
+    Args:
+        error_keywords: Key error terms (e.g., "dockerfile manifest unknown", "pip install failed docker")
+        
+    Returns:
+        Summary of solutions from top results (max 4000 chars)
+    """
+    try:
+        logger.info(f"Searching Docker error solutions for: {error_keywords}")
+        
+        try:
+            from ddgs import DDGS
+            import requests
+            from bs4 import BeautifulSoup
+            
+            search_queries = [
+                f"docker {error_keywords} solution",
+                f"dockerfile {error_keywords} fix"
+            ]
+            
+            results = []
+            seen_urls = set()
+            
+            with DDGS() as ddgs:
+                for query in search_queries:
+                    try:
+                        search_results = list(ddgs.text(query, max_results=3))
+                        for result in search_results:
+                            url = result.get('href', '')
+                            if url and url not in seen_urls:
+                                seen_urls.add(url)
+                                results.append({
+                                    'title': result.get('title', 'No title'),
+                                    'url': url,
+                                    'snippet': result.get('body', '')
+                                })
+                                if len(results) >= 4:
+                                    break
+                    except Exception as e:
+                        logger.warning(f"Search query failed: {query} - {e}")
+                        continue
+                    
+                    if len(results) >= 4:
+                        break
+            
+            if not results:
+                return f"No solutions found for: {error_keywords}. Try: 1) Check Docker image exists with DockerImageSearch 2) Verify Dockerfile syntax 3) Check dependency versions"
+            
+            summary_parts = [f"Docker Error Solutions for '{error_keywords}':\n"]
+            
+            for idx, result in enumerate(results[:4], 1):
+                summary_parts.append(f"\n{idx}. {result['title']}")
+                summary_parts.append(f"   URL: {result['url']}")
+                if result['snippet']:
+                    snippet = result['snippet'][:300]
+                    summary_parts.append(f"   {snippet}...")
+            
+            summary = '\n'.join(summary_parts)
+            
+            if len(summary) > 4000:
+                summary = summary[:4000] + "\n\n[Truncated - see URLs above for full solutions]"
+            
+            return summary
+            
+        except ImportError:
+            return "Error: duckduckgo_search (ddgs) not installed. Cannot search for Docker error solutions."
+        
+    except Exception as e:
+        logger.error(f"Docker error search failed: {e}")
+        return f"Search failed: {str(e)}. Manual debugging: 1) Verify base image with DockerImageSearch 2) Check Dockerfile syntax 3) Review error logs for missing dependencies"
 
 
 def search_web(query: str) -> str:
@@ -1579,6 +1662,11 @@ def create_planner_agent(
             name="DockerImageSearch",
             func=docker_image_search,
             description="Search for Docker images or verify if a specific image tag exists. Input: search query (e.g., 'python') or image tag (e.g., 'python:3.9'). Use this to validate base images."
+        ),
+        Tool(
+            name="SearchDockerError",
+            func=search_docker_error,
+            description="Search web for Docker error solutions and fixes. Input: key error terms from build failure (e.g., 'manifest unknown', 'pip install failed', 'npm err'). Returns Stack Overflow solutions and Docker troubleshooting guides. Use when Dockerfile build fails."
         )
     ]
 
@@ -1715,7 +1803,7 @@ Thought:{agent_scratchpad}"""
         handle_parsing_errors=handle_parsing_error,  # Use the function, not True
         max_iterations=max_iterations,
         max_execution_time=None,  # No time limit
-        early_stopping_method="generate",  # Generate final answer if max iterations reached
+        early_stopping_method="force",  # Force stop if max iterations reached (generate not supported)
         return_intermediate_steps=True  # Enable to track tool usage
     )
 

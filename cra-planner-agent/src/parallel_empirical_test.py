@@ -24,9 +24,31 @@ import traceback
 import concurrent.futures
 import gc
 import shutil
+import ssl
+import certifi
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables FIRST before any other imports
+print("[STARTUP] Loading environment variables...")
+# Look for .env in the project root (parent of src/ directory if running from src/)
+dotenv_path = Path(__file__).parent.parent / '.env'
+if dotenv_path.exists():
+    load_dotenv(dotenv_path=dotenv_path)
+    print(f"[STARTUP] Loaded .env from: {dotenv_path}")
+else:
+    # Fallback: try current directory
+    load_dotenv()
+    print("[STARTUP] Loaded .env from current directory")
+
+# Verify critical environment variables are loaded
+endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+if endpoint:
+    print(f"[STARTUP] Azure endpoint configured: {endpoint}")
+else:
+    print("[WARNING] AZURE_OPENAI_ENDPOINT not found in environment!")
 
 print("[STARTUP] Loading agent and testing modules...")
 from run_agent import clone_repository, detect_project_language, analyze_repository
@@ -34,7 +56,6 @@ from planner_agent import create_planner_agent
 from empirical_test import DockerBuildTester
 
 print("[STARTUP] All imports loaded successfully!")
-
 
 # Token pricing (USD per 1K tokens). Override via env to match your Azure SKU.
 PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_PROMPT_COST_PER_1K", "0"))
@@ -355,7 +376,7 @@ class ParallelEmpiricalTester:
                             
                             refinement_start = time.time()
                             refinement_success = self._refine_dockerfile_with_error_feedback(
-                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, iteration + 1
+                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, iteration + 1, docker_result
                             )
                             refinement_duration = time.time() - refinement_start
                             
@@ -457,9 +478,44 @@ class ParallelEmpiricalTester:
 
         return result
 
+    def _sanitize_error_for_azure(self, error_log: str, max_length: int = 400) -> str:
+        """Sanitize error log to avoid Azure content safety filters."""
+        # Remove potentially problematic content
+        sanitized = error_log
+        
+        # Remove URLs that might be flagged
+        import re
+        sanitized = re.sub(r'https?://[^\s]+', '[URL]', sanitized)
+        
+        # Remove file paths that might contain sensitive info
+        sanitized = re.sub(r'/[^\s:]+/', '[PATH]/', sanitized)
+        
+        # Remove hex addresses and hashes
+        sanitized = re.sub(r'0x[0-9a-fA-F]+', '[HEX]', sanitized)
+        sanitized = re.sub(r'[0-9a-f]{32,}', '[HASH]', sanitized)
+        
+        # Keep only error keywords and context
+        lines = sanitized.split('\n')
+        important_lines = []
+        for line in lines:
+            # Keep lines with error indicators
+            if any(keyword in line.lower() for keyword in [
+                'error', 'failed', 'cannot', 'not found', 'missing', 
+                'denied', 'manifest', 'exit code', 'returned'
+            ]):
+                important_lines.append(line.strip())
+            if len('\n'.join(important_lines)) > max_length:
+                break
+        
+        result = '\n'.join(important_lines[:10])  # Max 10 lines
+        if len(result) > max_length:
+            result = result[:max_length] + '...'
+        
+        return result if result else "Error details sanitized for safety"
+
     def _refine_dockerfile_with_error_feedback(
         self, agent, dockerfile_path: Path, error_log_path: Path, 
-        repo_path: str, repo_name: str, iteration: int
+        repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None
     ) -> bool:
         """
         Refine Dockerfile based on build error feedback with enhanced analysis.
@@ -474,6 +530,7 @@ class ParallelEmpiricalTester:
             repo_path: Path to repository
             repo_name: Repository name
             iteration: Current refinement iteration number
+            docker_result: Docker build result dict with stage and failed_command info
             
         Returns:
             True if refinement appears successful (Dockerfile was modified), False otherwise
@@ -510,10 +567,12 @@ class ParallelEmpiricalTester:
             if is_image_pull_error:
                 self.log(repo_name, f"IMAGE_PULL error detected - instructing agent to verify images", to_console=True)
                 
-                # Extract the problematic image from error log
+                # Extract the problematic image from error log - try multiple patterns
                 problematic_image = "unknown"
+                
+                # Pattern 1: Look for "FROM <image>" in error
                 for line in error_log.split('\n'):
-                    if 'from' in line.lower() and ('manifest' in line.lower() or 'pull' in line.lower()):
+                    if 'from' in line.lower() and ('manifest' in line.lower() or 'pull' in line.lower() or 'resolve' in line.lower()):
                         parts = line.split()
                         for i, part in enumerate(parts):
                             if part.lower() == 'from' and i + 1 < len(parts):
@@ -522,91 +581,214 @@ class ParallelEmpiricalTester:
                         if problematic_image != "unknown":
                             break
                 
-                refinement_query = f"""CRITICAL: The Dockerfile failed with an IMAGE PULL ERROR. The Docker image does not exist or the tag is wrong.
+                # Pattern 2: If still unknown, try to read from Dockerfile directly
+                if problematic_image == "unknown":
+                    try:
+                        with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                            dockerfile_content = f.read()
+                        # Find first FROM statement
+                        for line in dockerfile_content.split('\n'):
+                            line_stripped = line.strip()
+                            if line_stripped.startswith('FROM '):
+                                # Extract image after FROM
+                                image_part = line_stripped[5:].split()[0]  # Get first word after FROM
+                                # Remove AS alias if present
+                                if ' as ' in image_part.lower():
+                                    image_part = image_part.split()[0]
+                                problematic_image = image_part
+                                self.log(repo_name, f"Extracted image from Dockerfile: {problematic_image}", to_console=True)
+                                break
+                    except Exception as e:
+                        self.log(repo_name, f"Could not read Dockerfile to extract image: {e}", to_console=False)
+                
+                # Sanitize error for Azure safety
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+                
+                # Build prompt based on whether we found the image
+                if problematic_image != "unknown":
+                    # We know the problematic image
+                    base_image_name = problematic_image.split(':')[0]
+                    refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST!
 
-PROBLEMATIC IMAGE: {problematic_image}
+🚨 MANDATORY REQUIREMENTS - YOU MUST DO ALL OF THESE:
 
-**YOU MUST USE THE DockerImageSearch TOOL** to verify and find a valid image:
-1. First, use DockerImageSearch to check if the current image exists
-2. If it doesn't exist, search for valid alternatives (e.g., try different tags like 'latest', 'slim', 'alpine', specific versions)
-3. Read the current Dockerfile at: {dockerfile_absolute}
-4. Replace the problematic FROM statement with a VERIFIED image
+1. **READ Dockerfile FIRST** - Check current FROM statement at: {dockerfile_absolute}
+2. **USE DockerImageSearch** - Verify "{problematic_image}" (it will fail)
+3. **SEARCH ALTERNATIVES** - Use DockerImageSearch to find working tags:
+   - Try: {base_image_name}:latest
+   - Try: {base_image_name}:slim
+   - Try: {base_image_name}:alpine
+4. **USE SearchDockerError** - Search "dockerfile manifest unknown" to understand the issue
+5. **CHANGE THE IMAGE** - You MUST replace "{problematic_image}" with a VERIFIED working image
 
-CURRENT DOCKERFILE:
-{current_dockerfile}
+⚠️ CRITICAL: Your Final Answer MUST contain a complete Dockerfile with a DIFFERENT base image.
+DO NOT return the same image "{problematic_image}" - it does not exist!
 
-BUILD ERROR LOG:
-{error_log}
+Error context (sanitized):
+{safe_error}
 
-**STEP-BY-STEP PROCESS**:
-1. ACTION: Use DockerImageSearch with the problematic image to verify it
-2. If not found: Use DockerImageSearch to find valid alternatives
-3. ACTION: Read the current Dockerfile
-4. FINAL ANSWER: Provide the corrected Dockerfile with the VERIFIED image
+You have 10 iterations. Use them to:
+- Iteration 1-2: ReadFile + DockerImageSearch on current image
+- Iteration 3-5: DockerImageSearch on alternative tags
+- Iteration 6-7: SearchDockerError for research
+- Iteration 8-10: Provide corrected Dockerfile with WORKING image
 
-You have {15} tool calls available. Use them to thoroughly investigate and fix the image."""
+Final Answer MUST have: FROM <verified-working-image>"""
+                else:
+                    # We don't know the image - agent must find it
+                    refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image does not exist (IMAGE_PULL failed)!
+
+🚨 MANDATORY REQUIREMENTS - YOU MUST DO ALL OF THESE:
+
+1. **READ Dockerfile FIRST** - Find the FROM statement at: {dockerfile_absolute}
+2. **IDENTIFY IMAGE** - Extract the base image name from FROM line
+3. **USE DockerImageSearch** - Verify that image exists (it will likely fail)
+4. **SEARCH ALTERNATIVES** - Use DockerImageSearch to find working tags for that base image
+5. **USE SearchDockerError** - Search "dockerfile manifest unknown" to understand the issue
+6. **CHANGE THE IMAGE** - You MUST replace the failing image with a VERIFIED working one
+
+⚠️ CRITICAL: Your Final Answer MUST contain a complete Dockerfile with a WORKING base image.
+DO NOT return the same image - find a working alternative!
+
+Error context (sanitized):
+{safe_error}
+
+You have 10 iterations. Use them to:
+- Iteration 1-2: ReadFile to find current image
+- Iteration 3-5: DockerImageSearch to verify and find alternatives
+- Iteration 6-7: SearchDockerError for research
+- Iteration 8-10: Provide corrected Dockerfile with WORKING image
+
+Final Answer MUST have: FROM <verified-working-image>"""
 
             elif is_dependency_error:
                 self.log(repo_name, f"DEPENDENCY error detected - instructing agent to check dependencies", to_console=True)
-                refinement_query = f"""The Dockerfile failed during DEPENDENCY INSTALLATION. 
+                
+                error_keywords = "dependency install failed"
+                if "npm" in error_log_lower:
+                    error_keywords = "npm install failed docker"
+                elif "pip" in error_log_lower:
+                    error_keywords = "pip install failed docker"
+                elif "cargo" in error_log_lower:
+                    error_keywords = "cargo build failed docker"
+                elif "maven" in error_log_lower:
+                    error_keywords = "maven build failed docker"
+                
+                # Sanitize error for Azure
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+                
+                refinement_query = f"""CRITICAL DOCKERFILE ERROR: Dependency installation FAILED!
 
-**ANALYSIS REQUIRED**:
-1. Read the current Dockerfile at: {dockerfile_absolute}
-2. Read the project's dependency files (package.json, requirements.txt, Cargo.toml, etc.) using ReadFile
-3. Check if dependency versions/names are correct
-4. Verify the package manager commands are appropriate
-5. Check if system dependencies are missing (build tools, libraries, etc.)
+🚨 MANDATORY REQUIREMENTS - COMPLETE ALL STEPS:
 
-CURRENT DOCKERFILE:
-{current_dockerfile}
+1. **USE SearchDockerError** - Search "{error_keywords}" for solutions
+2. **READ Dockerfile** - Examine RUN commands at {dockerfile_absolute}
+3. **READ Dependencies** - Use ReadFile on package.json/requirements.txt/Cargo.toml/pom.xml
+4. **ANALYZE MISSING TOOLS** - Common missing packages:
+   - Python: python3-dev, gcc, build-essential, libssl-dev
+   - Node.js: node-gyp, make, g++, python3
+   - Rust: pkg-config, libssl-dev, cmake
+   - Java: maven, gradle, default-jdk
+5. **FIX Dockerfile** - Add missing system packages to Dockerfile
 
-BUILD ERROR LOG:
-{error_log}
+⚠️ CRITICAL: Your Final Answer MUST contain a Dockerfile with ADDED build dependencies.
+The current Dockerfile is missing system packages needed for compilation!
 
-**FIX THE ISSUE**:
-- If packages are missing: add them to RUN commands
-- If versions are incompatible: adjust versions
-- If build tools are needed: add them (e.g., build-essential, python3-dev, gcc)
-- Provide the corrected Dockerfile
+Error context (sanitized):
+{safe_error}
 
-You have {15} tool calls available to investigate files and fix the issue."""
+You have 10 iterations. Use them:
+- Iteration 1-2: SearchDockerError to find common solutions
+- Iteration 3-5: ReadFile on Dockerfile and dependency files
+- Iteration 6-8: Analyze what's missing
+- Iteration 9-10: Provide corrected Dockerfile with added RUN apt-get/apk/yum commands
+
+Final Answer MUST add build tools/libraries to Dockerfile!"""
 
             else:
-                # General build error
                 self.log(repo_name, f"BUILD error detected - instructing agent to analyze carefully", to_console=True)
-                refinement_query = f"""The Dockerfile build failed. Analyze the error carefully and fix it.
+                
+                # Get stage and failed command from docker_result if available
+                if docker_result:
+                    stage = docker_result.get('stage', 'BUILD')
+                    failed_cmd = docker_result.get('failed_command', 'unknown')
+                else:
+                    stage = 'BUILD'
+                    failed_cmd = 'unknown'
+                
+                # Extract keywords for search
+                error_keywords = f"docker {stage.lower()}"
+                if failed_cmd != 'unknown' and len(failed_cmd) > 3:
+                    # Take first meaningful word from failed command
+                    cmd_words = failed_cmd.split()[:2]
+                    error_keywords = f"docker {' '.join(cmd_words)} failed"
+                
+                # Sanitize error
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+                
+                refinement_query = f"""CRITICAL DOCKERFILE ERROR at stage: {stage}
 
-**ANALYSIS STEPS**:
-1. Read the current Dockerfile at: {dockerfile_absolute}
-2. Identify the failing command from the error log
-3. If needed, read project files to understand requirements
-4. Determine the root cause
-5. Modify ONLY the problematic parts
+🚨 MANDATORY REQUIREMENTS - DO ALL OF THESE:
 
-CURRENT DOCKERFILE:
-{current_dockerfile}
+1. **USE SearchDockerError** - Search for solutions to this error type
+2. **READ Dockerfile** - Examine failing commands at {dockerfile_absolute}
+3. **IDENTIFY ROOT CAUSE** - Failed command: {failed_cmd}
+   - What is this command doing?
+   - Why does it fail in Docker environment?
+4. **INVESTIGATE IF NEEDED** - Use ReadFile/GrepFiles for project context
+5. **FIX THE DOCKERFILE** - Provide corrected version
 
-BUILD ERROR LOG:
-{error_log}
+⚠️ CRITICAL: Your Final Answer MUST contain a Dockerfile that fixes the specific error.
+Do NOT return the same Dockerfile - it has a syntax or command error!
 
-**PROVIDE**: The corrected Dockerfile that fixes the specific error.
+Error context (sanitized):
+{safe_error}
 
-You have {15} tool calls available for thorough analysis."""
+You have 10 iterations. Use them:
+- Iteration 1-3: SearchDockerError + ReadFile to understand the error
+- Iteration 4-6: Investigate project files if needed
+- Iteration 7-10: Provide corrected Dockerfile with the fix
+
+Final Answer MUST fix the error - change the command, add dependencies, or fix syntax!"""
 
             self.log(repo_name, f"Requesting enhanced Dockerfile refinement (iteration {iteration})...", to_console=False)
             
-            # Invoke agent with INCREASED max_iterations for thorough analysis
-            # This allows the agent to use DockerImageSearch, ReadFile, and other tools
+            # Invoke agent with max_iterations=8 but simpler prompts to force tool usage
+            # Shorter prompts = agent focuses more on tool calls vs text generation
             from run_agent import _invoke_agent_with_iteration_limit
             
-            result = _invoke_agent_with_iteration_limit(
-                agent,
-                {
-                    "input": refinement_query,
-                    "chat_history": f"Previous context: Analyzing repository {repo_name}. The Dockerfile failed to build. Iteration {iteration} of refinement."
-                },
-                max_iterations=15  # Increased from default to allow thorough investigation
-            )
+            try:
+                result = _invoke_agent_with_iteration_limit(
+                    agent,
+                    {
+                        "input": refinement_query,
+                        "chat_history": f"Repository: {repo_name}. Dockerfile iteration {iteration}. Use tools to investigate."
+                    },
+                    max_iterations=10  # Enough iterations to use multiple tools and analyze
+                )
+            except (ValueError, Exception) as e:
+                # Fallback: if agent errors out (early_stopping or iteration limit), try direct LLM call
+                if "early_stopping_method" in str(e) or "iteration" in str(e).lower():
+                    self.log(repo_name, f"Agent hit iteration limit, using fallback LLM call", to_console=True)
+                    try:
+                        # Direct LLM call without agent framework
+                        from langchain_openai import AzureChatOpenAI
+                        import os
+                        fallback_llm = AzureChatOpenAI(
+                            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+                        )
+                        # Simplify query for direct LLM
+                        simple_query = f"Fix this Dockerfile. Current Dockerfile:\\n{current_dockerfile}\\n\\nError: {safe_error if 'safe_error' in locals() else 'Build failed'}\\n\\nProvide ONLY the corrected Dockerfile, no explanations."
+                        fallback_result = fallback_llm.invoke(simple_query)
+                        result = {"output": fallback_result.content, "intermediate_steps": []}
+                    except Exception as fallback_error:
+                        self.log(repo_name, f"Fallback LLM also failed: {fallback_error}", to_console=False)
+                        return False
+                else:
+                    raise  # Re-raise if not iteration limit error
             
             # Log tool usage during refinement for debugging
             if 'intermediate_steps' in result:
