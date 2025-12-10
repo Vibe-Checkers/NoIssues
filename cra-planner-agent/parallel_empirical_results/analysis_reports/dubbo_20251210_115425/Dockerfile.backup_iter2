@@ -1,0 +1,48 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build tools and common dependencies for Folly
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  build-essential \
+  cmake \
+  python3 \
+  python3-pip \
+  python3-dev \
+  git \
+  automake \
+  autoconf \
+  libtool \
+  pkg-config \
+  libevent-dev \
+  libdouble-conversion-dev \
+  liblz4-dev \
+  libsnappy-dev \
+  zlib1g-dev \
+  libboost-all-dev \
+  libssl-dev \
+  libzstd-dev \
+  ca-certificates \
+  libreadline-dev \
+  libedit-dev \
+  libffi-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# Set working directory for the application/source
+WORKDIR /app
+
+# Copy repository contents into the container
+COPY . /app
+
+# Build dependencies (folly uses fbcode_builder/getdeps.py)
+# This script will fetch/build dependencies; --allow-system-packages uses system packages if available
+RUN python3 ./build/fbcode_builder/getdeps.py --allow-system-packages build
+
+# Build Folly using CMake
+RUN mkdir -p build && cd build && \
+  cmake -DCMAKE_BUILD_TYPE=Release .. && \
+  cmake --build . -j$(nproc) && \
+  cmake --install .
+
+# Default to an interactive shell for exploration or manual builds
+CMD ["/bin/bash"]

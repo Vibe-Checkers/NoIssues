@@ -1,0 +1,32 @@
+======================================================================
+ANALYSIS PERFORMANCE REPORT
+======================================================================
+
+Repository Information
+----------------------------------------------------------------------
+Name: folly
+URL: https://github.com/facebook/folly
+Local Path: parallel_empirical_results/repositories/folly
+Analysis Date: 2025-12-10 12:00:11
+
+Analysis Duration
+----------------------------------------------------------------------
+Total time: 3 min 55 sec (235.14 seconds)
+
+Token Usage Summary
+----------------------------------------------------------------------
+Token usage information not available
+
+Tool Usage Report
+----------------------------------------------------------------------
+_Exception                     :   3 calls ( 33.3%)
+SearchWeb                      :   2 calls ( 22.2%)
+FindFiles                      :   1 calls ( 11.1%)
+DirectoryTree                  :   1 calls ( 11.1%)
+ReadFile                       :   1 calls ( 11.1%)
+GrepFiles                      :   1 calls ( 11.1%)
+----------------------------------------------------------------------
+Total tool calls               :   9
+Unique tools used              :   6
+
+======================================================================

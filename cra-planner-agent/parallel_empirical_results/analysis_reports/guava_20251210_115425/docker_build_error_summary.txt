@@ -1,0 +1,19 @@
+================================================================================
+DOCKER BUILD ERROR SUMMARY (Final - Max Iterations Reached)
+================================================================================
+
+Repository: guava
+URL: https://github.com/google/guava
+Timestamp: 2025-12-10T12:23:17.156705
+Total Refinement Iterations: 10
+
+Final Failure Stage: IMAGE_PULL
+Failed Docker Command: Failed to pull base image
+Exit Code: 1
+
+Error Snippet:
+--------------------------------------------------------------------------------
+ERROR: failed to solve: maven:3.8.7-openjdk-11: failed to resolve source metadata for docker.io/library/maven:3.8.7-openjdk-11: docker.io/library/maven:3.8.7-openjdk-11: not found
+--------------------------------------------------------------------------------
+
+See full error: docker_errors/guava_docker_error_iter10.log

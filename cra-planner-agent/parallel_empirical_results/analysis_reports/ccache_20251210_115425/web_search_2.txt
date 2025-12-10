@@ -1,0 +1,128 @@
+Web Search Result #2
+======================================================================
+Title: Installation and Usage | ccache/ccache | DeepWiki
+URL: https://deepwiki.com/ccache/ccache/8-installation-and-usage
+Search Query: ccache C++ documentation how to install
+Project Name: ccache
+Fetched: 2025-12-10T11:55:35.874423
+Status: SUCCESS (HTTP 200)
+======================================================================
+
+FULL PAGE CONTENT:
+======================================================================
+
+Installation and Usage | ccache/ccache | DeepWikiLoading...Index your code with DevinDeepWikiDeepWikiccache/ccache Index your code withDevinEdit WikiShareLoading...Last indexed: 7 May 2025 (5163f1)OverviewSystem ArchitectureCaching ModesStorage ArchitectureManifest and Result ManagementCore SubsystemsArgument ProcessingCompiler Detection and ExecutionHashing SystemInode CacheUtility LibrariesFile System UtilitiesPath ManipulationString UtilitiesBuilding ccacheCMake ConfigurationDependencies ManagementCross-Platform CompatibilityTesting FrameworkUnit TestsIntegration TestsDevelopment and ContributionContribution GuidelinesLicensingInstallation and UsageInstallation MethodsConfiguration OptionsCompiler IntegrationMenuInstallation and Usage
+Relevant source files
+.clang-format
+.mailmap
+cmake/Dependencies.cmake
+cmake/FindBlake3.cmake
+doc/AUTHORS.adoc
+doc/INSTALL.md
+doc/NEWS.adoc
+misc/update-authors
+src/ccache/CMakeLists.txt
+src/ccache/util/file.hpp
+src/ccache/util/zstd.hpp
+src/third_party/CMakeLists.txt
+src/third_party/blake3/blake3/blake3_avx2.c
+This page provides technical documentation on how to install ccache and use it effectively in various development environments. It covers installation methods, basic usage patterns, configuration options, and compiler integration techniques. For information about ccache's internal architecture, see System Architecture.
+1. Prerequisites
+Before installing ccache, ensure your system meets the following requirements:
+A C++17 compiler for building from source
+CMake 3.15 or newer (if building from source)
+Sufficient disk space for the cache (default max size is 5 GB)
+Various software library dependencies are also required if building from source:
+DependencyRequired/OptionalPurposeBLAKE3RequiredHashing algorithmfmtRequiredString formattingZstandardRequiredCompressioncpp-httplibOptionalHTTP remote storagehiredisOptionalRedis remote storagespan-liteRequiredSpan implementationtl-expectedRequiredExpected implementationxxhashRequiredHashing algorithm
+Sources: doc/INSTALL.md4-13 doc/INSTALL.md24-53
+2. Installation Methods
+There are several ways to install ccache, depending on your operating system and preferences.
+2.1 Package Managers
+The easiest way to install ccache is through your operating system's package manager:
+Linux:
+macOS:
+Windows:
+# Chocolatey
+choco install ccache
+# MSYS2
+pacman -S mingw-w64-x86_64-ccache
+2.2 Building from Source
+To build and install ccache from source:
+You can customize the installation directory by adding -D CMAKE_INSTALL_PREFIX=/usr to the CMake command. The system configuration file location can be set with -D CMAKE_INSTALL_SYSCONFDIR=/etc.
+Sources: doc/INSTALL.md66-81
+3. Basic Setup and Usage
+There are two main ways to use ccache:
+3.1 Direct Invocation
+The simplest way to use ccache is to prefix your compilation commands with ccache:
+This method is ideal for trying ccache or using it for specific projects.
+3.2 Masquerading as the Compiler
+For seamless integration, configure ccache to masquerade as your compiler by creating symbolic links (or copies on systems without symlink support):
+Ensure the directory containing these links or copies appears before the actual compiler in your PATH environment variable.
+Sources: doc/INSTALL.md83-109
+4. Configuration
+ccache can be configured through configuration files, environment variables, and command-line options.
+4.1 Configuration Files
+The default user configuration file is located at:
+Linux/Unix: ~/.config/ccache/ccache.conf or ~/.ccache/ccache.conf
+macOS: ~/Library/Preferences/ccache/ccache.conf
+Windows: %LOCALAPPDATA%\ccache\ccache.conf
+The system-wide configuration file is typically /etc/ccache.conf.
+4.2 Common Configuration Options
+Here are some important configuration options:
+OptionDescriptionDefaultmax_sizeMaximum cache size5Gbase_dirBase directory for relative pathsNonecache_dirLocation of the cache directoryAuto-detecteddirect_modeWhether to use direct modetruehash_dirWhether to include directory in hashtruecompressionWhether to compress filestruecompression_levelZstd compression level0 (auto)run_second_cppRun preprocessor twicefalsesloppinessAspects to be "sloppy" aboutNoneremote_storageRemote cache storage (URL)Noneremote_onlyDisable local storagefalse
+You can display all configuration options and their current values with:
+4.3 Setting Configuration Options
+You can configure ccache in several ways:
+Command line:
+Per compilation:
+Environment variables:
+Configuration file:
+max_size = 10G
+compression = true
+Sources: doc/NEWS.adoc680-695 doc/NEWS.adoc990-1032
+5. Caching Modes
+ccache has three main operation modes that affect its performance and reliability:
+5.1 Direct Mode (Default)
+Hashes source files and header files directly without preprocessing. This is the fastest mode but may miss some dependencies.
+5.2 Preprocessor Mode
+Runs the preprocessor and hashes its output. This is the most reliable mode but slower than the others.
+5.3 Depend Mode
+Uses compiler-generated dependency information to identify included files. This mode balances speed and reliability.
+Configure the mode via the direct_mode option:
+Sources: doc/NEWS.adoc1100-1102
+6. Compiler Integration
+6.1 GCC/Clang Integration
+Most GCC and Clang options are automatically supported. Some options that affect ccache behavior:
+OptionEffect on ccache-cRequired for ccache to work-oSpecifies output file-MD, -MMDUsed in depend mode-Wp,-MD, -Wp,-MMDUsed in depend mode-fpch-preprocessSupported for precompiled headers-Xclang, -XpreprocessorPassed to the appropriate compiler phase
+6.2 MSVC Integration
+ccache supports MSVC with special handling for these options:
+OptionEffect on ccache/cRequired for ccache to work/FoSpecifies output file/showIncludesUsed in depend mode/Zi, /Z7Debug information options/Yc, /YuPrecompiled header options
+6.3 Build System Integration
+CMake
+Or when calling CMake:
+Make
+Ninja
+Sources: doc/NEWS.adoc55-101 doc/NEWS.adoc248-296
+7. Cache Management
+7.1 Cache Statistics
+Monitor cache statistics with:
+For more detailed statistics:
+Machine-parsable statistics:
+7.2 Cache Cleanup
+Clean your cache:
+7.3 Caching Policy
+ccache uses a least recently used (LRU) eviction policy. You can control cleanup behavior:
+Sources: doc/NEWS.adoc675-736
+8. Advanced Features
+8.1 Remote Storage
+ccache supports storing cache objects remotely in addition to or instead of local storage:
+8.2 Sloppiness Options
+Control what aspects ccache should be "sloppy" about:
+8.3 Debugging Cache Issues
+If ccache isn't providing hits as expected:
+Sources: doc/NEWS.adoc1025-1037
+9. Practical Examples
+9.1 Basic Development Workflow
+9.2 CI Integration
+9.3 Shared Team Cache
+Sources: doc/NEWS.adoc973-1003DismissRefresh this wikiEnter email to refreshOn this pageInstallation and Usage1. Prerequisites2. Installation Methods2.1 Package Managers2.2 Building from Source3. Basic Setup and Usage3.1 Direct Invocation3.2 Masquerading as the Compiler4. Configuration4.1 Configuration Files4.2 Common Configuration Options4.3 Setting Configuration Options5. Caching Modes5.1 Direct Mode (Default)5.2 Preprocessor Mode5.3 Depend Mode6. Compiler Integration6.1 GCC/Clang Integration6.2 MSVC Integration6.3 Build System IntegrationCMakeMakeNinja7. Cache Management7.1 Cache Statistics7.2 Cache Cleanup7.3 Caching Policy8. Advanced Features8.1 Remote Storage8.2 Sloppiness Options8.3 Debugging Cache Issues9. Practical Examples9.1 Basic Development Workflow9.2 CI Integration9.3 Shared Team Cache

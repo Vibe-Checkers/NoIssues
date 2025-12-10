@@ -1,0 +1,70 @@
+Web Search Result #1
+======================================================================
+Title: guava Tutorial => Setup
+URL: https://riptutorial.com/guava/example/15331/setup
+Search Query: guava Java documentation installation instructions
+Project Name: guava
+Fetched: 2025-12-10T12:04:35.982616
+Status: SUCCESS (HTTP 200)
+======================================================================
+
+FULL PAGE CONTENT:
+======================================================================
+
+guava Tutorial => Setup
+Download guava (PDF)
+guava
+Getting started with guava
+I/O
+Strings
+guava
+Getting started with guava
+Setup
+Fastest Entity Framework Extensions
+Bulk Insert
+Bulk Delete
+Bulk Update
+Bulk Merge
+Example
+Dependency on Guava can be added in your Java project by using any build system.
+Maven:
+<dependency>
+<groupId>com.google.guava</groupId>
+<artifactId>guava</artifactId>
+<version>19.0</version>
+</dependency>
+Gradle:
+dependencies {
+compile 'com.google.guava:guava:19.0'
+}
+Ivy
+<dependency org="com.google.guava" name="guava" rev="19.0" />
+Buildr
+compile.with 'com.google.guava:guava:jar:19.0'
+Manual Dependency
+You can also just manually download JARs from Guava's release page for the classes, sources and javadocs.
+Note that JDK 1.6 or newer is required for Guava 12.0 through 20.0. See Version list for more info.
+Guava users who target Java 5 should use the Guava JDK5 backport. This includes users who target Android Froyo and earlier.
+Got any guava Question?
+Ask any guava Questions and Get Instant Answers from ChatGPT AI:
+ChatGPT answer me!
+PDF - Download guava for free
+Previous
+Next
+This modified text is an extract of the original Stack Overflow Documentation created by following contributors and released under CC BY-SA 3.0
+This website is not affiliated with Stack Overflow
+SUPPORT & PARTNERS
+Advertise with us
+Contact us
+Cookie Policy
+Privacy Policy
+STAY CONNECTED
+Get monthly updates about new articles, cheatsheets, and tricks.
+Subscribe
+Cookie
+This website stores cookies on your computer.
+We use cookies to enhance your experience on our website and deliver personalized content.
+For more details on our cookie usage, please review our
+Cookie Policy and Privacy Policy
+Accept all Cookies
+Leave this website

@@ -1,0 +1,41 @@
+{
+  "repository": {
+    "name": "guava",
+    "url": "https://github.com/google/guava",
+    "local_path": "parallel_empirical_results/repositories/guava"
+  },
+  "analysis": {
+    "timestamp": "20251210_120728",
+    "date": "2025-12-10T12:07:28.990205",
+    "duration_seconds": 182.7796368598938,
+    "duration_minutes": 3.04632728099823,
+    "duration_formatted": "3 min 2 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "SearchWeb": {
+        "calls": 1,
+        "percentage": 20.0
+      },
+      "DirectoryTree": {
+        "calls": 1,
+        "percentage": 20.0
+      },
+      "FindFiles": {
+        "calls": 1,
+        "percentage": 20.0
+      },
+      "ReadFile": {
+        "calls": 1,
+        "percentage": 20.0
+      },
+      "_Exception": {
+        "calls": 1,
+        "percentage": 20.0
+      }
+    },
+    "total_calls": 5,
+    "unique_tools": 5
+  }
+}

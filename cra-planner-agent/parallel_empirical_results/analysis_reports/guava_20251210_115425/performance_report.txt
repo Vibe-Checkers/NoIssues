@@ -1,0 +1,31 @@
+======================================================================
+ANALYSIS PERFORMANCE REPORT
+======================================================================
+
+Repository Information
+----------------------------------------------------------------------
+Name: guava
+URL: https://github.com/google/guava
+Local Path: parallel_empirical_results/repositories/guava
+Analysis Date: 2025-12-10 12:07:28
+
+Analysis Duration
+----------------------------------------------------------------------
+Total time: 3 min 2 sec (182.78 seconds)
+
+Token Usage Summary
+----------------------------------------------------------------------
+Token usage information not available
+
+Tool Usage Report
+----------------------------------------------------------------------
+SearchWeb                      :   1 calls ( 20.0%)
+DirectoryTree                  :   1 calls ( 20.0%)
+FindFiles                      :   1 calls ( 20.0%)
+ReadFile                       :   1 calls ( 20.0%)
+_Exception                     :   1 calls ( 20.0%)
+----------------------------------------------------------------------
+Total tool calls               :   5
+Unique tools used              :   5
+
+======================================================================

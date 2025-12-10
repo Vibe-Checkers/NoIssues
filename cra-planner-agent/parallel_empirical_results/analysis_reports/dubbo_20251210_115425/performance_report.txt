@@ -1,0 +1,32 @@
+======================================================================
+ANALYSIS PERFORMANCE REPORT
+======================================================================
+
+Repository Information
+----------------------------------------------------------------------
+Name: dubbo
+URL: https://github.com/apache/dubbo
+Local Path: parallel_empirical_results/repositories/dubbo
+Analysis Date: 2025-12-10 12:00:10
+
+Analysis Duration
+----------------------------------------------------------------------
+Total time: 3 min 54 sec (234.62 seconds)
+
+Token Usage Summary
+----------------------------------------------------------------------
+Token usage information not available
+
+Tool Usage Report
+----------------------------------------------------------------------
+ReadFile                       :   7 calls ( 41.2%)
+DirectoryTree                  :   4 calls ( 23.5%)
+SearchWeb                      :   3 calls ( 17.6%)
+FindFiles                      :   1 calls (  5.9%)
+GrepFiles                      :   1 calls (  5.9%)
+_Exception                     :   1 calls (  5.9%)
+----------------------------------------------------------------------
+Total tool calls               :  17
+Unique tools used              :   6
+
+======================================================================

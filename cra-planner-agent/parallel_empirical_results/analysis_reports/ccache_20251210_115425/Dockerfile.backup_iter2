@@ -1,0 +1,26 @@
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git python3 python3-pip python3-venv \
+      pkg-config libboost-all-dev zlib1g-dev libevent-dev libdouble-conversion-dev \
+      libgflags-dev libgoogle-glog-dev rapidjson-dev liblz4-dev libsnappy-dev libzstd-dev \
+      ca-certificates libdouble-conversion3 libedit2 libevent-2.1-7 libevent-core-2.1-7 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory for the build
+WORKDIR /app
+
+# Copy repository contents into the image
+COPY . /app
+
+# Ensure any git submodules are initialized (if present)
+RUN git submodule update --init --recursive || true
+
+# Build prerequisites and the project using fbcode_builder (best-effort)
+RUN python3 ./build/fbcode_builder/getdeps.py install-system-deps --recursive || true
+RUN python3 ./build/fbcode_builder/getdeps.py --allow-system-packages build
+
+# Provide an interactive shell by default (no production runtime server)
+CMD ["/bin/bash"]

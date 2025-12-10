@@ -1,0 +1,45 @@
+{
+  "repository": {
+    "name": "folly",
+    "url": "https://github.com/facebook/folly",
+    "local_path": "parallel_empirical_results/repositories/folly"
+  },
+  "analysis": {
+    "timestamp": "20251210_120011",
+    "date": "2025-12-10T12:00:11.762470",
+    "duration_seconds": 235.14012503623962,
+    "duration_minutes": 3.919002083937327,
+    "duration_formatted": "3 min 55 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "_Exception": {
+        "calls": 3,
+        "percentage": 33.33333333333333
+      },
+      "SearchWeb": {
+        "calls": 2,
+        "percentage": 22.22222222222222
+      },
+      "FindFiles": {
+        "calls": 1,
+        "percentage": 11.11111111111111
+      },
+      "DirectoryTree": {
+        "calls": 1,
+        "percentage": 11.11111111111111
+      },
+      "ReadFile": {
+        "calls": 1,
+        "percentage": 11.11111111111111
+      },
+      "GrepFiles": {
+        "calls": 1,
+        "percentage": 11.11111111111111
+      }
+    },
+    "total_calls": 9,
+    "unique_tools": 6
+  }
+}

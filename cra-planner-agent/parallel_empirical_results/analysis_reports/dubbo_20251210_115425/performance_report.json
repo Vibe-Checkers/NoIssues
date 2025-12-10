@@ -1,0 +1,45 @@
+{
+  "repository": {
+    "name": "dubbo",
+    "url": "https://github.com/apache/dubbo",
+    "local_path": "parallel_empirical_results/repositories/dubbo"
+  },
+  "analysis": {
+    "timestamp": "20251210_120010",
+    "date": "2025-12-10T12:00:10.828666",
+    "duration_seconds": 234.62278699874878,
+    "duration_minutes": 3.9103797833124796,
+    "duration_formatted": "3 min 54 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "ReadFile": {
+        "calls": 7,
+        "percentage": 41.17647058823529
+      },
+      "DirectoryTree": {
+        "calls": 4,
+        "percentage": 23.52941176470588
+      },
+      "SearchWeb": {
+        "calls": 3,
+        "percentage": 17.647058823529413
+      },
+      "FindFiles": {
+        "calls": 1,
+        "percentage": 5.88235294117647
+      },
+      "GrepFiles": {
+        "calls": 1,
+        "percentage": 5.88235294117647
+      },
+      "_Exception": {
+        "calls": 1,
+        "percentage": 5.88235294117647
+      }
+    },
+    "total_calls": 17,
+    "unique_tools": 6
+  }
+}

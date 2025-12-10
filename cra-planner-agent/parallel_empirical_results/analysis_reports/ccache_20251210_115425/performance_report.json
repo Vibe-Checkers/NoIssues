@@ -1,0 +1,45 @@
+{
+  "repository": {
+    "name": "ccache",
+    "url": "https://github.com/ccache/ccache",
+    "local_path": "parallel_empirical_results/repositories/ccache"
+  },
+  "analysis": {
+    "timestamp": "20251210_115805",
+    "date": "2025-12-10T11:58:05.859453",
+    "duration_seconds": 168.25237822532654,
+    "duration_minutes": 2.8042063037554423,
+    "duration_formatted": "2 min 48 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "DirectoryTree": {
+        "calls": 3,
+        "percentage": 30.0
+      },
+      "SearchWeb": {
+        "calls": 2,
+        "percentage": 20.0
+      },
+      "ReadFile": {
+        "calls": 2,
+        "percentage": 20.0
+      },
+      "FindFiles": {
+        "calls": 1,
+        "percentage": 10.0
+      },
+      "GrepFiles": {
+        "calls": 1,
+        "percentage": 10.0
+      },
+      "_Exception": {
+        "calls": 1,
+        "percentage": 10.0
+      }
+    },
+    "total_calls": 10,
+    "unique_tools": 6
+  }
+}

@@ -1,0 +1,31 @@
+======================================================================
+ANALYSIS PERFORMANCE REPORT
+======================================================================
+
+Repository Information
+----------------------------------------------------------------------
+Name: commons-csv
+URL: https://github.com/apache/commons-csv
+Local Path: parallel_empirical_results/repositories/commons-csv
+Analysis Date: 2025-12-10 12:00:46
+
+Analysis Duration
+----------------------------------------------------------------------
+Total time: 5 min 43 sec (343.67 seconds)
+
+Token Usage Summary
+----------------------------------------------------------------------
+Token usage information not available
+
+Tool Usage Report
+----------------------------------------------------------------------
+FindFiles                      :   9 calls ( 36.0%)
+ReadFile                       :   6 calls ( 24.0%)
+DirectoryTree                  :   5 calls ( 20.0%)
+SearchWeb                      :   4 calls ( 16.0%)
+_Exception                     :   1 calls (  4.0%)
+----------------------------------------------------------------------
+Total tool calls               :  25
+Unique tools used              :   5
+
+======================================================================

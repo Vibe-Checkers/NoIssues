@@ -563,6 +563,12 @@ class ParallelEmpiricalTester:
                 "returned a non-zero code", "exited with code", "build failed"
             ]) and not is_image_pull_error
             
+            # Detect syntax errors specifically
+            is_syntax_error = any(x in error_log_lower for x in [
+                "syntax error", "unexpected token", "parse error", "invalid syntax",
+                "unknown instruction", "dockerfile parse error", "failed to parse"
+            ])
+            
             # Build targeted refinement query based on error type
             if is_image_pull_error:
                 self.log(repo_name, f"IMAGE_PULL error detected - instructing agent to verify images", to_console=True)
@@ -604,106 +610,125 @@ class ParallelEmpiricalTester:
                 # Sanitize error for Azure safety
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
                 
-                # Build prompt based on whether we found the image
-                if problematic_image != "unknown":
-                    # We know the problematic image
-                    base_image_name = problematic_image.split(':')[0]
-                    refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST!
+                # General-purpose prompt - NO hardcoded suggestions, agent must search
+                base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
+                
+                refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST on Docker Hub!
 
-🚨 MANDATORY REQUIREMENTS - YOU MUST DO ALL OF THESE:
+🚨 YOU MUST USE DockerImageSearch TOOL TO FIX THIS:
 
-1. **READ Dockerfile FIRST** - Check current FROM statement at: {dockerfile_absolute}
-2. **USE DockerImageSearch** - Verify "{problematic_image}" (it will fail)
-3. **SEARCH ALTERNATIVES** - Use DockerImageSearch to find working tags:
-   - Try: {base_image_name}:latest
-   - Try: {base_image_name}:slim
-   - Try: {base_image_name}:alpine
-4. **USE SearchDockerError** - Search "dockerfile manifest unknown" to understand the issue
-5. **CHANGE THE IMAGE** - You MUST replace "{problematic_image}" with a VERIFIED working image
+**STEP 1 - REQUIRED:** Use DockerImageSearch with "{base_image_name}" to find ACTUAL available tags
+**STEP 2 - REQUIRED:** Pick a tag that EXISTS from the search results (with a specific version number)
+**STEP 3:** Read the current Dockerfile at: {dockerfile_absolute}
+**STEP 4:** Replace the failing image with a VERIFIED working image from Step 1
 
-⚠️ CRITICAL: Your Final Answer MUST contain a complete Dockerfile with a DIFFERENT base image.
-DO NOT return the same image "{problematic_image}" - it does not exist!
+⚠️ CRITICAL RULES:
+- You MUST use DockerImageSearch tool to verify images exist
+- DO NOT guess image tags - only use tags that DockerImageSearch confirms exist
+- DO NOT use ":latest" - use specific version tags from search results
+- Your Final Answer MUST start with FROM and contain ONLY the Dockerfile content
+- NO explanations or prose before/after the Dockerfile
 
-Error context (sanitized):
-{safe_error}
+❌ WRONG OUTPUT FORMAT:
+"Below is a corrected Dockerfile..."
+"I will provide a Dockerfile that..."
 
-You have 10 iterations. Use them to:
-- Iteration 1-2: ReadFile + DockerImageSearch on current image
-- Iteration 3-5: DockerImageSearch on alternative tags
-- Iteration 6-7: SearchDockerError for research
-- Iteration 8-10: Provide corrected Dockerfile with WORKING image
+✅ CORRECT OUTPUT FORMAT:
+FROM verified-image:tag
+WORKDIR /app
+...
 
-Final Answer MUST have: FROM <verified-working-image>"""
-                else:
-                    # We don't know the image - agent must find it
-                    refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image does not exist (IMAGE_PULL failed)!
-
-🚨 MANDATORY REQUIREMENTS - YOU MUST DO ALL OF THESE:
-
-1. **READ Dockerfile FIRST** - Find the FROM statement at: {dockerfile_absolute}
-2. **IDENTIFY IMAGE** - Extract the base image name from FROM line
-3. **USE DockerImageSearch** - Verify that image exists (it will likely fail)
-4. **SEARCH ALTERNATIVES** - Use DockerImageSearch to find working tags for that base image
-5. **USE SearchDockerError** - Search "dockerfile manifest unknown" to understand the issue
-6. **CHANGE THE IMAGE** - You MUST replace the failing image with a VERIFIED working one
-
-⚠️ CRITICAL: Your Final Answer MUST contain a complete Dockerfile with a WORKING base image.
-DO NOT return the same image - find a working alternative!
-
-Error context (sanitized):
-{safe_error}
-
-You have 10 iterations. Use them to:
-- Iteration 1-2: ReadFile to find current image
-- Iteration 3-5: DockerImageSearch to verify and find alternatives
-- Iteration 6-7: SearchDockerError for research
-- Iteration 8-10: Provide corrected Dockerfile with WORKING image
-
-Final Answer MUST have: FROM <verified-working-image>"""
+Error: {safe_error}"""
 
             elif is_dependency_error:
                 self.log(repo_name, f"DEPENDENCY error detected - instructing agent to check dependencies", to_console=True)
                 
-                error_keywords = "dependency install failed"
+                # Sanitize error for Azure
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+                
+                # Extract specific error keywords for search
+                error_keywords = "dependency install failed docker"
                 if "npm" in error_log_lower:
                     error_keywords = "npm install failed docker"
                 elif "pip" in error_log_lower:
                     error_keywords = "pip install failed docker"
                 elif "cargo" in error_log_lower:
                     error_keywords = "cargo build failed docker"
-                elif "maven" in error_log_lower:
+                elif "maven" in error_log_lower or "mvn" in error_log_lower:
                     error_keywords = "maven build failed docker"
+                elif "apt" in error_log_lower or "apt-get" in error_log_lower:
+                    error_keywords = "apt-get install failed docker"
                 
-                # Sanitize error for Azure
+                refinement_query = f"""DOCKERFILE DEPENDENCY ERROR - Package installation failed!
+
+IMPORTANT: This is NOT an image problem - DO NOT change the base image!
+
+**STEP 1:** Use SearchDockerError with "{error_keywords}" to find solutions
+**STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Read the project dependency files (package.json, requirements.txt, pom.xml, etc.)
+**STEP 4:** Fix the RUN commands to install missing system packages
+
+CRITICAL RULES:
+- DO NOT CHANGE THE BASE IMAGE (FROM line) - it is CORRECT!
+- ONLY fix RUN commands to add missing dependencies
+- Common fixes: add build-essential, python3-dev, gcc, make, etc.
+- Your Final Answer MUST start with the SAME FROM line as the current Dockerfile
+
+WRONG: Changing FROM maven:... to FROM node:... (DO NOT DO THIS!)
+CORRECT: Keep FROM maven:... and add RUN apt-get install build-essential
+
+Error: {safe_error}
+
+OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
+
+            elif is_syntax_error:
+                # SYNTAX ERROR: Use web search with sanitized error
+                self.log(repo_name, f"SYNTAX error detected - using web search with sanitized error", to_console=True)
+                
+                # Sanitize error for web search - extract key syntax error message
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
                 
-                refinement_query = f"""CRITICAL DOCKERFILE ERROR: Dependency installation FAILED!
+                # Extract the specific syntax error for search query
+                syntax_search_query = "dockerfile syntax error"
+                syntax_error_detail = ""
+                for line in error_log.split('\n'):
+                    line_lower = line.lower()
+                    if any(x in line_lower for x in ['syntax error', 'unexpected', 'unknown instruction', 'parse error']):
+                        # Sanitize this line for search
+                        syntax_error_detail = self._sanitize_error_for_azure(line, max_length=100)
+                        syntax_search_query = f"dockerfile {syntax_error_detail}"
+                        break
+                
+                refinement_query = f"""DOCKERFILE SYNTAX ERROR - Parse error in Dockerfile!
 
-🚨 MANDATORY REQUIREMENTS - COMPLETE ALL STEPS:
+IMPORTANT: This is a SYNTAX problem - DO NOT change the base image!
 
-1. **USE SearchDockerError** - Search "{error_keywords}" for solutions
-2. **READ Dockerfile** - Examine RUN commands at {dockerfile_absolute}
-3. **READ Dependencies** - Use ReadFile on package.json/requirements.txt/Cargo.toml/pom.xml
-4. **ANALYZE MISSING TOOLS** - Common missing packages:
-   - Python: python3-dev, gcc, build-essential, libssl-dev
-   - Node.js: node-gyp, make, g++, python3
-   - Rust: pkg-config, libssl-dev, cmake
-   - Java: maven, gradle, default-jdk
-5. **FIX Dockerfile** - Add missing system packages to Dockerfile
+**STEP 1:** Use SearchWeb with "dockerfile syntax error {syntax_error_detail}" to find solutions
+**STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}  
+**STEP 3:** Identify the exact syntax problem (line number shown in error)
+**STEP 4:** Fix ONLY the syntax error - common issues:
+   - "unknown instruction" = typo in instruction name or text before FROM
+   - "unexpected token" = missing quotes or escape characters
+   - Shell heredoc issues = use separate RUN commands instead
 
-⚠️ CRITICAL: Your Final Answer MUST contain a Dockerfile with ADDED build dependencies.
-The current Dockerfile is missing system packages needed for compilation!
+CRITICAL RULES:
+- DO NOT CHANGE THE BASE IMAGE (FROM line) - it is CORRECT!
+- ONLY fix the syntax error on the specific line mentioned
+- Your Final Answer MUST start with FROM and be ONLY Dockerfile content
+- NO explanatory text before or after the Dockerfile
 
-Error context (sanitized):
-{safe_error}
+WRONG OUTPUT:
+"Below is a corrected Dockerfile..."
+"Here is the fix..."
 
-You have 10 iterations. Use them:
-- Iteration 1-2: SearchDockerError to find common solutions
-- Iteration 3-5: ReadFile on Dockerfile and dependency files
-- Iteration 6-8: Analyze what's missing
-- Iteration 9-10: Provide corrected Dockerfile with added RUN apt-get/apk/yum commands
+CORRECT OUTPUT:
+FROM same-image:tag
+WORKDIR /app
+...
 
-Final Answer MUST add build tools/libraries to Dockerfile!"""
+Error: {safe_error}
+
+OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
 
             else:
                 self.log(repo_name, f"BUILD error detected - instructing agent to analyze carefully", to_console=True)
@@ -716,40 +741,27 @@ Final Answer MUST add build tools/libraries to Dockerfile!"""
                     stage = 'BUILD'
                     failed_cmd = 'unknown'
                 
-                # Extract keywords for search
-                error_keywords = f"docker {stage.lower()}"
-                if failed_cmd != 'unknown' and len(failed_cmd) > 3:
-                    # Take first meaningful word from failed command
-                    cmd_words = failed_cmd.split()[:2]
-                    error_keywords = f"docker {' '.join(cmd_words)} failed"
-                
                 # Sanitize error
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
                 
-                refinement_query = f"""CRITICAL DOCKERFILE ERROR at stage: {stage}
+                refinement_query = f"""DOCKERFILE BUILD ERROR at stage: {stage}
 
-🚨 MANDATORY REQUIREMENTS - DO ALL OF THESE:
+IMPORTANT: This is NOT an image problem - DO NOT change the base image!
 
-1. **USE SearchDockerError** - Search for solutions to this error type
-2. **READ Dockerfile** - Examine failing commands at {dockerfile_absolute}
-3. **IDENTIFY ROOT CAUSE** - Failed command: {failed_cmd}
-   - What is this command doing?
-   - Why does it fail in Docker environment?
-4. **INVESTIGATE IF NEEDED** - Use ReadFile/GrepFiles for project context
-5. **FIX THE DOCKERFILE** - Provide corrected version
+**STEP 1:** Use SearchDockerError to find solutions for this error type
+**STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Identify what command failed: {failed_cmd}
+**STEP 4:** Fix the specific failing command
 
-⚠️ CRITICAL: Your Final Answer MUST contain a Dockerfile that fixes the specific error.
-Do NOT return the same Dockerfile - it has a syntax or command error!
+CRITICAL RULES:
+- DO NOT CHANGE THE BASE IMAGE (FROM line) - it is CORRECT!
+- ONLY fix the RUN/COPY/WORKDIR commands that are failing
+- Your Final Answer MUST start with the SAME FROM line as current Dockerfile
+- NO explanatory text - ONLY Dockerfile content
 
-Error context (sanitized):
-{safe_error}
+Error: {safe_error}
 
-You have 10 iterations. Use them:
-- Iteration 1-3: SearchDockerError + ReadFile to understand the error
-- Iteration 4-6: Investigate project files if needed
-- Iteration 7-10: Provide corrected Dockerfile with the fix
-
-Final Answer MUST fix the error - change the command, add dependencies, or fix syntax!"""
+OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
 
             self.log(repo_name, f"Requesting enhanced Dockerfile refinement (iteration {iteration})...", to_console=False)
             
@@ -805,27 +817,61 @@ Final Answer MUST fix the error - change the command, add dependencies, or fix s
                 self.log(repo_name, "Agent returned empty output for refinement", to_console=False)
                 return False
             
-            # Extract Dockerfile content from output (may be wrapped in code blocks)
+            # Extract Dockerfile content from output (may be wrapped in code blocks or have prose)
             refined_dockerfile = refined_output
             
             # Remove markdown code blocks if present
-            if refined_dockerfile.startswith('```'):
+            if '```' in refined_dockerfile:
                 lines = refined_dockerfile.split('\n')
-                # Find first and last line with ```
-                start_idx = 0
-                end_idx = len(lines)
-                for i, line in enumerate(lines):
+                # Find content between ``` markers
+                in_code_block = False
+                code_lines = []
+                for line in lines:
                     if line.strip().startswith('```'):
-                        if start_idx == 0:
-                            start_idx = i + 1
-                        else:
-                            end_idx = i
-                            break
-                refined_dockerfile = '\n'.join(lines[start_idx:end_idx])
+                        in_code_block = not in_code_block
+                        continue
+                    if in_code_block:
+                        code_lines.append(line)
+                if code_lines:
+                    refined_dockerfile = '\n'.join(code_lines)
             
-            # Check if Dockerfile content looks valid
-            if 'FROM' not in refined_dockerfile:
-                self.log(repo_name, "Refined output does not contain FROM statement, refinement may have failed", to_console=False)
+            # If output starts with prose (not FROM), try to find FROM and extract from there
+            lines = refined_dockerfile.split('\n')
+            from_index = -1
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Look for FROM line (case insensitive check but preserve original)
+                if stripped.upper().startswith('FROM '):
+                    from_index = i
+                    break
+            
+            if from_index > 0:
+                # There's text before FROM - extract only from FROM onwards
+                self.log(repo_name, f"Extracting Dockerfile from line {from_index} (removing {from_index} lines of prose)", to_console=False)
+                refined_dockerfile = '\n'.join(lines[from_index:])
+            elif from_index == -1:
+                # No FROM found at all - this is a failed refinement
+                self.log(repo_name, "Refined output does not contain FROM statement, refinement may have failed", to_console=True)
+                return False
+            
+            # Final cleanup: remove any trailing prose after Dockerfile content
+            # Dockerfile ends when we see patterns like "This Dockerfile..." or explanation text
+            final_lines = []
+            for line in refined_dockerfile.split('\n'):
+                stripped = line.strip()
+                # Stop if we hit prose/explanation (but keep empty lines and comments)
+                if stripped and not stripped.startswith('#') and not any(stripped.upper().startswith(kw) for kw in 
+                    ['FROM', 'RUN', 'COPY', 'WORKDIR', 'ENV', 'EXPOSE', 'CMD', 'ENTRYPOINT', 'ARG', 'LABEL', 'ADD', 'VOLUME', 'USER', 'HEALTHCHECK', 'SHELL', 'ONBUILD', 'STOPSIGNAL']):
+                    # Check if this looks like prose
+                    if any(word in stripped.lower() for word in ['this dockerfile', 'the dockerfile', 'i have', 'note:', 'explanation', 'above', 'below', 'following']):
+                        break
+                final_lines.append(line)
+            
+            refined_dockerfile = '\n'.join(final_lines).strip()
+            
+            # Final validation: must have FROM
+            if 'FROM' not in refined_dockerfile.upper():
+                self.log(repo_name, "Refined output does not contain FROM statement after cleanup, refinement may have failed", to_console=True)
                 return False
             
             # Check if Dockerfile actually changed

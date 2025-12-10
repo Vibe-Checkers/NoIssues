@@ -1,0 +1,41 @@
+{
+  "repository": {
+    "name": "commons-csv",
+    "url": "https://github.com/apache/commons-csv",
+    "local_path": "parallel_empirical_results/repositories/commons-csv"
+  },
+  "analysis": {
+    "timestamp": "20251210_120046",
+    "date": "2025-12-10T12:00:46.255589",
+    "duration_seconds": 343.6673288345337,
+    "duration_minutes": 5.727788813908895,
+    "duration_formatted": "5 min 43 sec"
+  },
+  "token_usage": {},
+  "tool_usage": {
+    "tools": {
+      "FindFiles": {
+        "calls": 9,
+        "percentage": 36.0
+      },
+      "ReadFile": {
+        "calls": 6,
+        "percentage": 24.0
+      },
+      "DirectoryTree": {
+        "calls": 5,
+        "percentage": 20.0
+      },
+      "SearchWeb": {
+        "calls": 4,
+        "percentage": 16.0
+      },
+      "_Exception": {
+        "calls": 1,
+        "percentage": 4.0
+      }
+    },
+    "total_calls": 25,
+    "unique_tools": 5
+  }
+}
