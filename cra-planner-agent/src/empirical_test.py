@@ -191,39 +191,47 @@ class DockerBuildTester:
         if any(x in error_lower for x in ["cannot connect to the docker daemon", "is the docker daemon running", "docker: not found", "docker: command not found"]):
             return "DOCKER_DAEMON", failed_step or "Docker daemon not accessible"
 
-        # 2. Base Image Pull Issues (FROM command)
+        # 2. Platform/Architecture Incompatibility (ARM vs x86)
+        # This is a special case of image pull - the image exists but for wrong architecture
+        if any(x in error_lower for x in [
+            "invalidbaseimageplatform", "platform", "linux/amd64", "linux/arm64",
+            "was pulled with platform", "expected \"linux/", "does not match"
+        ]) and any(x in error_lower for x in ["amd64", "arm64", "architecture", "platform"]):
+            return "PLATFORM_INCOMPATIBLE", failed_step or "Base image platform mismatch (amd64 vs arm64)"
+
+        # 3. Base Image Pull Issues (FROM command)
         if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
             return "IMAGE_PULL", failed_step or "Failed to pull base image"
 
-        # 3. Dockerfile Syntax
+        # 4. Dockerfile Syntax
         if any(x in error_lower for x in ["dockerfile parse error", "unknown instruction"]):
             return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
 
-        # 4. File Copy/Add (COPY/ADD commands)
+        # 5. File Copy/Add (COPY/ADD commands)
         if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
             return "FILE_COPY", failed_step or "File copy/add failed"
 
-        # 5. Dependency Installation (RUN pip/npm/go/cargo install commands)
+        # 6. Dependency Installation (RUN pip/npm/go/cargo install commands)
         if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
             return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
 
-        # 6. Build/Compilation (RUN build commands)
+        # 7. Build/Compilation (RUN build commands)
         if any(x in error_lower for x in ["compilation error", "build error", "webpack", "tsc"]):
             return "BUILD_COMPILE", failed_step or "Build/compilation failed"
 
-        # 7. Runtime Execution (CMD/ENTRYPOINT)
+        # 8. Runtime Execution (CMD/ENTRYPOINT)
         if any(x in error_lower for x in ["command not found", "exec format error"]):
             return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
 
-        # 8. Permission/User Issues
+        # 9. Permission/User Issues
         if "permission denied" in error_lower or "useradd" in error_lower:
             return "PERMISSION", failed_step or "Permission/user management error"
 
-        # 9. Network Issues
+        # 10. Network Issues
         if any(x in error_lower for x in ["connection refused", "connection timeout", "network unreachable"]):
             return "NETWORK", failed_step or "Network connection error"
 
-        # 10. Storage Issues
+        # 11. Storage Issues
         if any(x in error_lower for x in ["no space left", "disk full", "quota exceeded"]):
             return "STORAGE", failed_step or "Disk space error"
 
@@ -378,8 +386,10 @@ class EmpiricalTester:
             report_dir = self.reports_dir / f"{repo_name}_{self.timestamp}"
             report_dir.mkdir(exist_ok=True)
 
-            # Set global report directory for web search caching
+            # Set thread-local report directory for web search caching (thread-safe)
             import planner_agent
+            planner_agent._set_report_directory(str(report_dir))
+            # Also set global for backwards compatibility
             planner_agent.REPORT_DIRECTORY = str(report_dir)
 
             # Run analysis

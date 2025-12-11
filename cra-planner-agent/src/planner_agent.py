@@ -11,6 +11,8 @@ import json
 import logging
 import ssl
 import certifi
+import httpx
+import threading
 from typing import Any, List, Optional, Dict
 from datetime import datetime
 
@@ -137,7 +139,7 @@ class FormattedOutputHandler(BaseCallbackHandler):
 # ============================================================================
 
 class GPT5NanoWrapper(BaseChatModel):
-    """Wrapper for gpt-5-nano that strips unsupported parameters."""
+    """Wrapper for gpt-5-nano that strips unsupported parameters and rate-limits API calls."""
 
     llm: AzureChatOpenAI
 
@@ -147,8 +149,9 @@ class GPT5NanoWrapper(BaseChatModel):
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
         # Remove unsupported parameters
         kwargs.pop('stop', None)
-        # Call the underlying LLM without stop parameter
-        return self.llm._generate(messages, **kwargs)
+        # Use semaphore to limit concurrent API calls under parallel load
+        with _api_semaphore:
+            return self.llm._generate(messages, **kwargs)
 
     @property
     def _llm_type(self) -> str:
@@ -159,14 +162,64 @@ class GPT5NanoWrapper(BaseChatModel):
 
 
 # ============================================================================
-# Path Resolution Infrastructure
+# Path Resolution Infrastructure (Thread-Safe)
 # ============================================================================
 
-# Global variable to track the current repository base path
-REPOSITORY_BASE_PATH = None
+# Thread-local storage for repository paths - each thread gets its own copy
+_thread_local = threading.local()
 
-# Global variable to track the report directory for saving web search content
+# Global semaphore to limit concurrent API calls
+# Serialize API calls to prevent DNS resolution failures under parallel load
+_api_semaphore = threading.Semaphore(1)
+
+# ============================================================================
+# Singleton HTTP Client (Thread-Safe)
+# ============================================================================
+# httpx.Client is thread-safe and supports connection pooling
+# Using a singleton ensures all threads share the same connection pool
+_http_client = None
+_http_client_lock = threading.Lock()
+
+
+def _get_http_client() -> httpx.Client:
+    """Get or create the singleton HTTP client (thread-safe)."""
+    global _http_client
+    if _http_client is None:
+        with _http_client_lock:
+            # Double-check locking pattern
+            if _http_client is None:
+                _http_client = httpx.Client(
+                    timeout=httpx.Timeout(120.0, connect=30.0),  # 120s total, 30s connect
+                    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                )
+    return _http_client
+
+# Legacy global variables (for backwards compatibility with single-threaded code)
+# These are ONLY used when thread-local is not set
+REPOSITORY_BASE_PATH = None
 REPORT_DIRECTORY = None
+
+
+def _get_repository_base_path() -> str:
+    """Get the repository base path for the current thread."""
+    # Try thread-local first, fall back to global
+    return getattr(_thread_local, 'repository_base_path', None) or REPOSITORY_BASE_PATH
+
+
+def _set_repository_base_path(path: str):
+    """Set the repository base path for the current thread."""
+    _thread_local.repository_base_path = path
+
+
+def _get_report_directory() -> str:
+    """Get the report directory for the current thread."""
+    # Try thread-local first, fall back to global
+    return getattr(_thread_local, 'report_directory', None) or REPORT_DIRECTORY
+
+
+def _set_report_directory(path: str):
+    """Set the report directory for the current thread."""
+    _thread_local.report_directory = path
 
 
 def _make_relative_path(absolute_path: str) -> str:
@@ -180,12 +233,13 @@ def _make_relative_path(absolute_path: str) -> str:
     Returns:
         Relative path from repository base, or original path if no base set
     """
-    if REPOSITORY_BASE_PATH is None:
+    repo_base = _get_repository_base_path()
+    if repo_base is None:
         return absolute_path
 
     try:
         # Get relative path from repository base
-        rel_path = os.path.relpath(absolute_path, REPOSITORY_BASE_PATH)
+        rel_path = os.path.relpath(absolute_path, repo_base)
         # If it doesn't go up directories, use it; otherwise return as-is
         if not rel_path.startswith('..'):
             return rel_path
@@ -204,7 +258,8 @@ def _resolve_path(user_path: str) -> str:
     Returns:
         Absolute path resolved against repository base if set
     """
-    if REPOSITORY_BASE_PATH is None:
+    repo_base = _get_repository_base_path()
+    if repo_base is None:
         # No repository context, use path as-is
         return user_path
 
@@ -214,11 +269,11 @@ def _resolve_path(user_path: str) -> str:
 
     # Special case: "." refers to the repository base itself
     if user_path == ".":
-        return REPOSITORY_BASE_PATH
+        return repo_base
 
     # Otherwise, resolve relative to repository base
     # Tools now return relative paths, so this works correctly
-    return os.path.join(REPOSITORY_BASE_PATH, user_path)
+    return os.path.join(repo_base, user_path)
 
 
 # ============================================================================
@@ -396,17 +451,17 @@ def search_docker_error(error_keywords: str) -> str:
             if not results:
                 return f"No solutions found for: {error_keywords}. Try:\n1) Use DockerImageSearch with 'tags:<image>' to list available tags\n2) Check Dockerfile syntax\n3) Verify dependency versions"
             
-            summary_parts = [f"🔍 Web Search Results for '{error_keywords}':\n{'='*60}\n"]
+            summary_parts = [f"Web Search Results for '{error_keywords}':\n{'='*60}\n"]
             
             for idx, result in enumerate(results[:6], 1):
                 summary_parts.append(f"\n{idx}. {result['title']}")
-                summary_parts.append(f"   🔗 {result['url']}")
+                summary_parts.append(f"   URL: {result['url']}")
                 if result['snippet']:
                     snippet = result['snippet'][:350]
-                    summary_parts.append(f"   📄 {snippet}...")
+                    summary_parts.append(f"   {snippet}...")
                 summary_parts.append("")
             
-            summary_parts.append(f"\n💡 TIP: Use FetchWebPage tool to read full content from any URL above")
+            summary_parts.append(f"\nTIP: Use FetchWebPage tool to read full content from any URL above")
             
             summary = '\n'.join(summary_parts)
             
@@ -448,8 +503,9 @@ def search_web(query: str) -> str:
             
             # Check for cached web search files first
             cached_pages = []
-            if REPORT_DIRECTORY:
-                report_path = Path(REPORT_DIRECTORY)
+            report_dir = _get_report_directory()
+            if report_dir:
+                report_path = Path(report_dir)
                 for idx in range(1, 4):
                     cache_file = report_path / f"web_search_{idx}.txt"
                     if cache_file.exists():
@@ -769,9 +825,10 @@ def search_web(query: str) -> str:
                     
                     if not fetch_success or response is None:
                         # Save error details
-                        if REPORT_DIRECTORY:
+                        report_dir = _get_report_directory()
+                        if report_dir:
                             try:
-                                save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                                save_path = Path(report_dir) / f"web_search_{idx}.txt"
                                 with open(save_path, 'w', encoding='utf-8') as f:
                                     f.write(f"Web Search Result #{idx}\n")
                                     f.write(f"{'='*70}\n")
@@ -807,9 +864,10 @@ def search_web(query: str) -> str:
                     full_text_clean = '\n'.join(chunk for chunk in chunks if chunk)
                     
                     # Save to file if report directory is set
-                    if REPORT_DIRECTORY:
+                    report_dir = _get_report_directory()
+                    if report_dir:
                         try:
-                            save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                            save_path = Path(report_dir) / f"web_search_{idx}.txt"
                             with open(save_path, 'w', encoding='utf-8') as f:
                                 f.write(f"Web Search Result #{idx}\n")
                                 f.write(f"{'='*70}\n")
@@ -850,9 +908,10 @@ def search_web(query: str) -> str:
                     # Catch any other unexpected errors
                     error_msg = f"Unexpected error: {type(unexpected_error).__name__}: {str(unexpected_error)}"
                     logger.error(f"Unexpected error processing {url}: {error_msg}")
-                    if REPORT_DIRECTORY:
+                    report_dir = _get_report_directory()
+                    if report_dir:
                         try:
-                            save_path = Path(REPORT_DIRECTORY) / f"web_search_{idx}.txt"
+                            save_path = Path(report_dir) / f"web_search_{idx}.txt"
                             with open(save_path, 'w', encoding='utf-8') as f:
                                 f.write(f"Web Search Result #{idx}\n")
                                 f.write(f"{'='*70}\n")
@@ -875,7 +934,8 @@ def search_web(query: str) -> str:
             output += f"{'='*70}\n"
             output += f"Found {len(all_results)} total results, fetched top {len(fetched_pages)} pages\n"
             output += f"Focus: Build and installation sections extracted\n"
-            if REPORT_DIRECTORY:
+            report_dir = _get_report_directory()
+            if report_dir:
                 output += f"Full content saved to: web_search_1.txt, web_search_2.txt, web_search_3.txt\n"
             output += f"{'='*70}\n\n"
             
@@ -1480,9 +1540,51 @@ def fetch_web_page(url: str) -> str:
         return f"Error fetching web page: {str(e)}"
 
 
+def _get_host_platform() -> tuple:
+    """
+    Detect the host platform for Docker compatibility checking.
+    Returns (platform_name, docker_arch) e.g., ('linux/arm64', 'arm64') or ('linux/amd64', 'amd64')
+    
+    Supported architectures:
+    - arm64/aarch64: Apple Silicon, AWS Graviton, modern ARM servers
+    - x86_64/amd64: Intel/AMD 64-bit processors
+    - i386/i686: 32-bit x86 processors
+    - armv7l/armv6l: 32-bit ARM (Raspberry Pi, embedded)
+    - ppc64le: IBM PowerPC 64-bit Little Endian
+    - s390x: IBM Z mainframes
+    - riscv64: RISC-V 64-bit
+    - mips64le: MIPS 64-bit Little Endian
+    """
+    import platform
+    machine = platform.machine().lower()
+    
+    # Map machine types to Docker architecture names
+    if machine in ['arm64', 'aarch64']:
+        return ('linux/arm64', 'arm64')
+    elif machine in ['x86_64', 'amd64']:
+        return ('linux/amd64', 'amd64')
+    elif machine in ['i386', 'i686', 'i586']:
+        return ('linux/386', '386')
+    elif machine in ['armv7l', 'armv7', 'armhf']:
+        return ('linux/arm/v7', 'arm')
+    elif machine in ['armv6l', 'armv6']:
+        return ('linux/arm/v6', 'arm')
+    elif machine == 'ppc64le':
+        return ('linux/ppc64le', 'ppc64le')
+    elif machine == 's390x':
+        return ('linux/s390x', 's390x')
+    elif machine == 'riscv64':
+        return ('linux/riscv64', 'riscv64')
+    elif machine in ['mips64le', 'mips64el']:
+        return ('linux/mips64le', 'mips64le')
+    else:
+        return (f'linux/{machine}', machine)
+
+
 def docker_image_search(query: str) -> str:
     """
     Search Docker Hub for images, list available tags, or verify a specific tag exists.
+    Automatically detects host platform and checks for compatibility.
     
     THREE MODES OF OPERATION:
     1. "tags:<image>" - LIST all available tags (e.g., "tags:maven", "tags:python")
@@ -1496,12 +1598,15 @@ def docker_image_search(query: str) -> str:
             - "<search term>" to search for images
         
     Returns:
-        List of tags, verification result, or search results
+        List of tags, verification result, or search results (with platform compatibility info)
     """
     try:
         import requests
         
-        logger.info(f"Docker Hub query: {query}")
+        # Detect host platform for compatibility checking
+        host_platform, host_arch = _get_host_platform()
+        
+        logger.info(f"Docker Hub query: {query} (host: {host_platform})")
         
         # MODE 1: List available tags for an image
         if query.lower().startswith("tags:"):
@@ -1518,7 +1623,7 @@ def docker_image_search(query: str) -> str:
             try:
                 response = requests.get(url, params=params, timeout=15)
                 if response.status_code == 404:
-                    return f"❌ Image '{image_name}' not found on Docker Hub. Check the image name."
+                    return f"ERROR: Image '{image_name}' not found on Docker Hub. Check the image name."
                 response.raise_for_status()
                 data = response.json()
                 
@@ -1526,18 +1631,42 @@ def docker_image_search(query: str) -> str:
                 if not results:
                     return f"No tags found for image: {image_name}"
                 
-                # Categorize tags for better readability
+                # Detect host platform dynamically for architecture compatibility
+                import platform
+                host_arch = platform.machine().lower()
+                if host_arch in ['arm64', 'aarch64']:
+                    host_docker_arch = 'arm64'
+                    arch_variants = ["arm64", "aarch64"]
+                elif host_arch in ['x86_64', 'amd64']:
+                    host_docker_arch = 'amd64'
+                    arch_variants = ["amd64", "x86_64"]
+                else:
+                    host_docker_arch = host_arch
+                    arch_variants = [host_arch]
+                
+                # Categorize tags for better readability with host platform info
                 versioned_tags = []  # Tags with version numbers (e.g., 3.9, 3.8.7)
                 slim_tags = []       # Slim/alpine/minimal variants
                 jdk_tags = []        # JDK-specific tags (for maven, gradle)
                 latest_tags = []     # Latest/stable tags
+                host_compatible = [] # Tags compatible with host platform
                 other_tags = []      # Everything else
                 
                 for tag_info in results:
                     tag = tag_info.get("name", "")
                     last_updated = tag_info.get("last_updated", "")[:10]  # Just date
                     
-                    tag_entry = f"{tag} (updated: {last_updated})"
+                    # Check architectures for host platform compatibility
+                    images = tag_info.get("images", [])
+                    archs = [img.get("architecture", "") for img in images]
+                    is_compatible = any(arch in arch_variants for arch in archs)
+                    
+                    compat_indicator = "[OK]" if is_compatible else "[!!]"
+                    tag_entry = f"{tag} {compat_indicator} (updated: {last_updated})"
+                    
+                    # Track host-compatible tags separately
+                    if is_compatible:
+                        host_compatible.append(tag)
                     
                     # Categorize
                     tag_lower = tag.lower()
@@ -1552,37 +1681,62 @@ def docker_image_search(query: str) -> str:
                     else:
                         other_tags.append(tag_entry)
                 
-                # Build output with categories
-                output = f"📦 Available tags for '{image_name}':\n"
-                output += f"{'='*60}\n\n"
+                # Build output with categories - detect host platform dynamically
+                import platform
+                host_arch = platform.machine().lower()
+                if host_arch in ['arm64', 'aarch64']:
+                    host_docker_arch = 'arm64'
+                    arch_name = 'ARM64'
+                    arch_devices = 'Apple Silicon M1/M2/M3/M4, Raspberry Pi'
+                elif host_arch in ['x86_64', 'amd64']:
+                    host_docker_arch = 'amd64'
+                    arch_name = 'AMD64'
+                    arch_devices = 'Intel/AMD x86_64 processors'
+                else:
+                    host_docker_arch = host_arch
+                    arch_name = host_arch.upper()
+                    arch_devices = f'{host_arch} processors'
+                
+                output = f"Available tags for '{image_name}':\n"
+                output += f"{'='*60}\n"
+                output += f"YOUR HOST PLATFORM: {arch_name} ({arch_devices})\n"
+                output += f"[OK] = {arch_name} compatible (will work on your system)\n"
+                output += f"[!!] = NO {arch_name} support (will fail on your system)\n\n"
                 
                 if versioned_tags:
-                    output += f"📌 VERSIONED TAGS (recommended for stability):\n"
+                    output += f"VERSIONED TAGS (recommended for stability):\n"
                     for tag in versioned_tags[:15]:  # Limit to top 15
-                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
                     if len(versioned_tags) > 15:
                         output += f"  ... and {len(versioned_tags) - 15} more\n"
                     output += "\n"
                 
                 if jdk_tags:
-                    output += f"☕ JDK/OPENJDK TAGS:\n"
+                    output += f"JDK/OPENJDK TAGS:\n"
                     for tag in jdk_tags[:10]:
-                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
                     output += "\n"
                 
                 if slim_tags:
-                    output += f"🪶 SLIM/ALPINE TAGS (smaller images):\n"
+                    output += f"SLIM/ALPINE TAGS (smaller images):\n"
                     for tag in slim_tags[:10]:
-                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
                     output += "\n"
                 
                 if latest_tags:
-                    output += f"⚠️ LATEST/STABLE (avoid - may change):\n"
+                    output += f"LATEST/STABLE (avoid - may change):\n"
                     for tag in latest_tags:
-                        output += f"  • {image_name}:{tag.split(' ')[0]}\n"
+                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
                     output += "\n"
                 
-                output += f"💡 TIP: Use a specific version tag like '{image_name}:{versioned_tags[0].split(' ')[0] if versioned_tags else 'X.Y'}' instead of 'latest'\n"
+                # Recommend host-compatible tag if available
+                if host_compatible:
+                    recommended = host_compatible[0]
+                    output += f"RECOMMENDED ({host_docker_arch.upper()} compatible): {image_name}:{recommended}\n"
+                else:
+                    output += f"WARNING: No {host_docker_arch.upper()} compatible tags found! Consider using a different base image.\n"
+                    output += f"   For Java: Use 'eclipse-temurin' instead of 'openjdk'\n"
+                    output += f"   For Maven: Use 'maven:3.9-eclipse-temurin-17'\n"
                 
                 return output
                 
@@ -1609,10 +1763,51 @@ def docker_image_search(query: str) -> str:
                     last_updated = data.get("last_updated", "unknown")[:10]
                     images = data.get("images", [])
                     archs = list(set([img.get("architecture", "unknown") for img in images]))
-                    return f"✅ VERIFIED: {query} EXISTS on Docker Hub\n   Last Updated: {last_updated}\n   Architectures: {', '.join(archs)}\n   Safe to use in Dockerfile: FROM {query}"
+                    
+                    # Detect host platform dynamically for compatibility check
+                    import platform
+                    host_arch = platform.machine().lower()
+                    if host_arch in ['arm64', 'aarch64']:
+                        host_docker_arch = 'arm64'
+                        arch_variants = ["arm64", "aarch64"]
+                        arch_name = 'ARM64'
+                        arch_devices = 'Apple Silicon M1/M2/M3/M4'
+                    elif host_arch in ['x86_64', 'amd64']:
+                        host_docker_arch = 'amd64'
+                        arch_variants = ["amd64", "x86_64"]
+                        arch_name = 'AMD64'
+                        arch_devices = 'Intel/AMD x86_64'
+                    else:
+                        host_docker_arch = host_arch
+                        arch_variants = [host_arch]
+                        arch_name = host_arch.upper()
+                        arch_devices = f'{host_arch} system'
+                    
+                    # Check for host platform compatibility
+                    is_host_compatible = any(arch in arch_variants for arch in archs)
+                    
+                    output = f"VERIFIED: {query} EXISTS on Docker Hub\n"
+                    output += f"   Last Updated: {last_updated}\n"
+                    output += f"   Architectures: {', '.join(archs)}\n"
+                    output += f"   Your Platform: {arch_name} ({arch_devices})\n"
+                    
+                    # Add host platform compatibility status
+                    if is_host_compatible:
+                        output += f"   {arch_name} ({arch_devices}): COMPATIBLE\n"
+                    else:
+                        output += f"   {arch_name} ({arch_devices}): NOT COMPATIBLE!\n"
+                        output += f"   WARNING: This image will FAIL on your system!\n"
+                        output += f"   TIP: Use a newer version or different base image with {arch_name} support.\n"
+                    
+                    if is_host_compatible:
+                        output += f"   Safe to use in Dockerfile: FROM {query}"
+                    else:
+                        output += f"   DO NOT USE - find a {arch_name}-compatible alternative!"
+                    
+                    return output
                 elif response.status_code == 404:
                     # Image doesn't exist - suggest listing tags
-                    return f"❌ NOT FOUND: {query} does NOT exist on Docker Hub!\n\n💡 To find valid tags, use: tags:{image_name}\n   Example: DockerImageSearch with input 'tags:{image_name}'"
+                    return f"NOT FOUND: {query} does NOT exist on Docker Hub!\n\nTIP: To find valid tags, use: tags:{image_name}\n   Example: DockerImageSearch with input 'tags:{image_name}'"
                 else:
                     return f"Error verifying image {query}: HTTP {response.status_code}"
             except Exception as e:
@@ -1632,13 +1827,13 @@ def docker_image_search(query: str) -> str:
                 if not results:
                     return f"No Docker images found for query: {query}"
                 
-                output = f"🔍 Docker Hub Search Results for '{query}':\n"
+                output = f"Docker Hub Search Results for '{query}':\n"
                 output += f"{'='*60}\n"
                 
                 for res in results:
                     name = res.get("repo_name", "unknown")
                     star_count = res.get("star_count", 0)
-                    is_official = "✅ OFFICIAL" if res.get("is_official") else ""
+                    is_official = "[OFFICIAL]" if res.get("is_official") else ""
                     desc = res.get("short_description", "")[:100]
                     if len(res.get("short_description", "")) > 100:
                         desc += "..."
@@ -1646,10 +1841,10 @@ def docker_image_search(query: str) -> str:
                     # Extract just the image name for official images
                     simple_name = name.split("/")[-1] if "/" in name else name
                         
-                    output += f"\n• {name} {is_official}\n"
+                    output += f"\n- {name} {is_official}\n"
                     output += f"  Stars: {star_count}\n"
                     output += f"  Description: {desc}\n"
-                    output += f"  💡 List tags: DockerImageSearch with 'tags:{simple_name}'\n"
+                    output += f"  List tags: DockerImageSearch with 'tags:{simple_name}'\n"
                     output += f"{'-'*60}"
                     
                 return output
@@ -1688,6 +1883,10 @@ def create_planner_agent(
     Returns:
         Tuple of (AgentExecutor instance, FormattedOutputHandler for accessing token usage)
     """
+    # Set thread-local repository path (thread-safe for parallel execution)
+    _set_repository_base_path(repository_path)
+    
+    # Also set global for backwards compatibility with single-threaded code
     global REPOSITORY_BASE_PATH
     REPOSITORY_BASE_PATH = repository_path
 
@@ -1708,12 +1907,16 @@ def create_planner_agent(
     if not all([api_key, endpoint, deployment]):
         raise ValueError("Missing required environment variables. Please check your .env file.")
 
-    # Initialize Azure OpenAI
+    # Initialize Azure OpenAI with robust retry and timeout settings
+    # Use singleton http_client for connection pooling across all threads
     base_llm = AzureChatOpenAI(
         azure_deployment=deployment,
         api_key=api_key,
         azure_endpoint=endpoint,
-        api_version=api_version
+        api_version=api_version,
+        max_retries=5,  # Retry up to 5 times on connection errors
+        timeout=120,  # 120 second timeout
+        http_client=_get_http_client(),
     )
 
     # Wrap the model to strip unsupported parameters

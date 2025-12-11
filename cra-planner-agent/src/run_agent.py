@@ -617,9 +617,11 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         detected_language = detect_project_language(repo_path)
         print(f"[INFO] Detected primary language: {detected_language}")
         
-        # Set global report directory for web search to save files (if provided)
+        # Set thread-local report directory for web search to save files (thread-safe)
         if report_dir:
             import planner_agent
+            planner_agent._set_report_directory(str(report_dir))
+            # Also set global for backwards compatibility
             planner_agent.REPORT_DIRECTORY = str(report_dir)
             print(f"[INFO] Report directory: {report_dir}")
 
@@ -1037,8 +1039,10 @@ def main():
         report_dir = reports_base_dir / f"{repo_name}_{timestamp}"
         report_dir.mkdir(exist_ok=True)
         
-        # Set global report directory for web search to save files
+        # Set thread-local report directory for web search to save files (thread-safe)
         import planner_agent
+        planner_agent._set_report_directory(str(report_dir))
+        # Also set global for backwards compatibility
         planner_agent.REPORT_DIRECTORY = str(report_dir)
         
         report_dir_result = analyze_repository(agent, repo_path, repo_name, repo_url, callback_handler, report_dir=report_dir)

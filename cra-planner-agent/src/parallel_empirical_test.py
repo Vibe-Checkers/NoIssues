@@ -225,8 +225,10 @@ class ParallelEmpiricalTester:
             report_dir = self.reports_dir / f"{repo_name}_{self.timestamp}"
             report_dir.mkdir(exist_ok=True)
 
-            # Set global report directory for web search caching
+            # Set thread-local report directory for web search caching (thread-safe)
             import planner_agent
+            planner_agent._set_report_directory(str(report_dir))
+            # Also set global for backwards compatibility
             planner_agent.REPORT_DIRECTORY = str(report_dir)
 
             # Run analysis with repo-specific log
@@ -549,10 +551,19 @@ class ParallelEmpiricalTester:
             
             # Detect error type for targeted guidance
             error_log_lower = error_log.lower()
+            
+            # NEW: Detect platform/architecture incompatibility FIRST (before image pull)
+            # This is when an image exists but was pulled for wrong architecture (amd64 vs arm64)
+            is_platform_error = any(x in error_log_lower for x in [
+                "invalidbaseimageplatform", "was pulled with platform", 
+                "expected \"linux/arm64\"", "expected \"linux/amd64\"",
+                "linux/amd64", "linux/arm64"
+            ]) and any(x in error_log_lower for x in ["platform", "architecture", "amd64", "arm64"])
+            
             is_image_pull_error = any(x in error_log_lower for x in [
                 "failed to resolve", "manifest unknown", "pull access denied", 
                 "image not found", "not found: manifest unknown", "no such image"
-            ])
+            ]) and not is_platform_error  # Don't double-count platform errors
             
             is_dependency_error = any(x in error_log_lower for x in [
                 "npm err!", "pip install failed", "error: failed to compile",
@@ -561,7 +572,7 @@ class ParallelEmpiricalTester:
             
             is_build_error = any(x in error_log_lower for x in [
                 "returned a non-zero code", "exited with code", "build failed"
-            ]) and not is_image_pull_error
+            ]) and not is_image_pull_error and not is_platform_error
             
             # Detect syntax errors specifically
             is_syntax_error = any(x in error_log_lower for x in [
@@ -569,8 +580,76 @@ class ParallelEmpiricalTester:
                 "unknown instruction", "dockerfile parse error", "failed to parse"
             ])
             
+            # NEW: Handle platform incompatibility error FIRST
+            if is_platform_error:
+                # Detect host platform dynamically
+                import platform
+                host_arch = platform.machine().lower()
+                if host_arch in ['arm64', 'aarch64']:
+                    host_docker_arch = 'arm64'
+                    expected_platform = 'linux/arm64'
+                    arch_name = 'ARM64'
+                    arch_devices = 'Apple Silicon M1/M2/M3/M4'
+                elif host_arch in ['x86_64', 'amd64']:
+                    host_docker_arch = 'amd64'
+                    expected_platform = 'linux/amd64'
+                    arch_name = 'AMD64'
+                    arch_devices = 'Intel/AMD x86_64'
+                else:
+                    host_docker_arch = host_arch
+                    expected_platform = f'linux/{host_arch}'
+                    arch_name = host_arch.upper()
+                    arch_devices = f'{host_arch} system'
+                
+                self.log(repo_name, f"PLATFORM_INCOMPATIBLE error detected - need {arch_name} compatible image", to_console=True)
+                
+                # Extract the problematic image from Dockerfile
+                problematic_image = "unknown"
+                try:
+                    for line in current_dockerfile.split('\n'):
+                        line_stripped = line.strip()
+                        if line_stripped.upper().startswith('FROM '):
+                            image_part = line_stripped[5:].split()[0]
+                            if ' as ' in image_part.lower():
+                                image_part = image_part.split()[0]
+                            problematic_image = image_part
+                            break
+                except Exception:
+                    pass
+                
+                base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+                
+                refinement_query = f"""CRITICAL: Platform/Architecture Mismatch Error!
+
+The base image "{problematic_image}" does NOT support {arch_name} ({arch_devices} / {expected_platform}).
+It was built for a different architecture which is incompatible with this system.
+
+**STEP 1 - FIND {arch_name} COMPATIBLE IMAGE**: Use DockerImageSearch with "tags:{base_image_name}"
+   Look for tags with multi-arch support, or recent version numbers (2022+)
+   
+**STEP 2 - VERIFY {arch_name} SUPPORT**: Use DockerImageSearch with "{base_image_name}:<tag>"
+   Check the "Architectures" field - must include "{host_docker_arch}" support
+
+COMMON FIXES FOR {arch_name} COMPATIBILITY:
+- OLD: maven:3.3.x-jdk-8 -> NEW: maven:3.9-eclipse-temurin-17 (multi-arch)
+- OLD: openjdk:8-jdk -> NEW: eclipse-temurin:17-jdk (multi-arch)
+- OLD: node:14 -> NEW: node:20-slim (multi-arch)
+- OLD: python:3.8-slim -> NEW: python:3.11-slim (multi-arch)
+
+**STEP 3 - UPDATE DOCKERFILE**: Read {dockerfile_absolute}
+   Replace the base image with a {arch_name}-compatible version
+
+CRITICAL RULES:
+- The image MUST support {expected_platform} architecture
+- Use recent versions (2022+) which typically have multi-arch support
+- Verify with DockerImageSearch before using
+- Final Answer: ONLY Dockerfile content starting with FROM
+
+Error: {safe_error}"""
+
             # Build targeted refinement query based on error type
-            if is_image_pull_error:
+            elif is_image_pull_error:
                 self.log(repo_name, f"IMAGE_PULL error detected - instructing agent to verify images", to_console=True)
                 
                 # Extract the problematic image from error log - try multiple patterns
@@ -616,22 +695,22 @@ class ParallelEmpiricalTester:
                 # NEW APPROACH: Web search first to understand what tags exist, then verify
                 refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST on Docker Hub!
 
-🔍 **STEP 1 - WEB SEARCH FIRST**: Use SearchDockerError with "docker hub {base_image_name} available tags versions"
+**STEP 1 - WEB SEARCH FIRST**: Use SearchDockerError with "docker hub {base_image_name} available tags versions"
    This will show you what tags are commonly used and recommended.
 
-📦 **STEP 2 - LIST AVAILABLE TAGS**: Use DockerImageSearch with "tags:{base_image_name}"
+**STEP 2 - LIST AVAILABLE TAGS**: Use DockerImageSearch with "tags:{base_image_name}"
    This queries Docker Hub API and shows ALL available tags categorized by:
    - Versioned tags (recommended for stability)
    - JDK/OpenJDK tags (for Java projects)
    - Slim/Alpine tags (smaller images)
 
-✅ **STEP 3 - VERIFY YOUR CHOICE**: Use DockerImageSearch with "{base_image_name}:<your-chosen-tag>"
+**STEP 3 - VERIFY YOUR CHOICE**: Use DockerImageSearch with "{base_image_name}:<your-chosen-tag>"
    Confirm the tag exists before using it.
 
-📝 **STEP 4 - UPDATE DOCKERFILE**: Read the current Dockerfile at: {dockerfile_absolute}
+**STEP 4 - UPDATE DOCKERFILE**: Read the current Dockerfile at: {dockerfile_absolute}
    Replace the failing image with your VERIFIED tag.
 
-⚠️ CRITICAL RULES:
+CRITICAL RULES:
 - You MUST use DockerImageSearch with "tags:{base_image_name}" to see available tags
 - Pick a SPECIFIC VERSION tag (e.g., "3.9.6" not "latest")
 - VERIFY the tag exists before using it
@@ -646,18 +725,74 @@ Error: {safe_error}"""
                 # Sanitize error for Azure
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
                 
-                # Extract specific error keywords for search
+                # Extract SPECIFIC error context for better search - not just generic keywords
                 error_keywords = "dependency install failed docker"
-                if "npm" in error_log_lower:
-                    error_keywords = "npm install failed docker"
-                elif "pip" in error_log_lower:
-                    error_keywords = "pip install failed docker"
-                elif "cargo" in error_log_lower:
-                    error_keywords = "cargo build failed docker"
-                elif "maven" in error_log_lower or "mvn" in error_log_lower:
-                    error_keywords = "maven build failed docker"
-                elif "apt" in error_log_lower or "apt-get" in error_log_lower:
-                    error_keywords = "apt-get install failed docker"
+                specific_error = ""
+                
+                # Extract the actual failing package or error message
+                for line in error_log.split('\n'):
+                    line_lower = line.lower()
+                    # npm specific errors
+                    if "npm err!" in line_lower or "npm error" in line_lower:
+                        # Extract package name if present
+                        if "enoent" in line_lower or "no such file" in line_lower:
+                            specific_error = "npm ENOENT file not found"
+                            error_keywords = f"docker npm ENOENT missing file {specific_error}"
+                        elif "gyp" in line_lower or "node-gyp" in line_lower:
+                            specific_error = "node-gyp build failed"
+                            error_keywords = "docker node-gyp build failed python make gcc"
+                        elif "permission" in line_lower:
+                            specific_error = "npm permission denied"
+                            error_keywords = "docker npm permission denied unsafe-perm"
+                        else:
+                            error_keywords = f"docker npm install error {line[:50]}"
+                        break
+                    # pip specific errors
+                    elif "pip" in line_lower and ("error" in line_lower or "failed" in line_lower):
+                        if "gcc" in line_lower or "compilation" in line_lower:
+                            specific_error = "pip compilation failed missing gcc"
+                            error_keywords = "docker pip install gcc compilation failed build-essential"
+                        elif "wheel" in line_lower:
+                            specific_error = "pip wheel build failed"
+                            error_keywords = "docker pip wheel build failed"
+                        else:
+                            error_keywords = f"docker pip install failed {line[:40]}"
+                        break
+                    # apt/apk specific errors
+                    elif "unable to locate package" in line_lower:
+                        # Extract package name
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p.lower() == "package" and i + 1 < len(parts):
+                                pkg = parts[i + 1]
+                                error_keywords = f"docker apt unable to locate package {pkg}"
+                                specific_error = f"package {pkg} not found"
+                                break
+                        break
+                    # pnpm specific
+                    elif "pnpm" in line_lower and ("err" in line_lower or "error" in line_lower):
+                        if "frozen lockfile" in line_lower:
+                            error_keywords = "docker pnpm frozen-lockfile mismatch"
+                        else:
+                            error_keywords = "docker pnpm install failed"
+                        break
+                
+                # If no specific error found, use generic but descriptive search
+                if not specific_error:
+                    if "npm" in error_log_lower:
+                        error_keywords = "docker npm install failed missing dependencies"
+                    elif "pip" in error_log_lower:
+                        error_keywords = "docker pip install failed build dependencies"
+                    elif "pnpm" in error_log_lower:
+                        error_keywords = "docker pnpm install failed"
+                    elif "yarn" in error_log_lower:
+                        error_keywords = "docker yarn install failed"
+                    elif "cargo" in error_log_lower:
+                        error_keywords = "docker cargo build failed rust dependencies"
+                    elif "maven" in error_log_lower or "mvn" in error_log_lower:
+                        error_keywords = "docker maven build failed"
+                    elif "apt" in error_log_lower or "apt-get" in error_log_lower:
+                        error_keywords = "docker apt-get install failed package not found"
                 
                 refinement_query = f"""DOCKERFILE DEPENDENCY ERROR - Package installation failed!
 
@@ -699,17 +834,38 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                         syntax_search_query = f"dockerfile {syntax_error_detail}"
                         break
                 
+                # Extract problematic lines from Dockerfile if line number is mentioned in error
+                problematic_context = ""
+                import re
+                line_match = re.search(r'(?:line|Dockerfile:)\s*(\d+)', error_log, re.IGNORECASE)
+                if line_match:
+                    error_line_num = int(line_match.group(1))
+                    dockerfile_lines = current_dockerfile.split('\n')
+                    # Show 3 lines before and after the error line
+                    start_line = max(0, error_line_num - 4)
+                    end_line = min(len(dockerfile_lines), error_line_num + 3)
+                    context_lines = []
+                    for i in range(start_line, end_line):
+                        prefix = ">>> " if i == error_line_num - 1 else "    "
+                        context_lines.append(f"{prefix}Line {i+1}: {dockerfile_lines[i]}")
+                    problematic_context = f"""
+PROBLEMATIC DOCKERFILE SECTION (line {error_line_num} marked with >>>):
+{chr(10).join(context_lines)}
+"""
+                
                 refinement_query = f"""DOCKERFILE SYNTAX ERROR - Parse error in Dockerfile!
 
 IMPORTANT: This is a SYNTAX problem - DO NOT change the base image!
+{problematic_context}
+**STEP 1:** Analyze the error message and the problematic line shown above
+**STEP 2:** Use SearchWeb with "{syntax_search_query}" to understand the issue
+**STEP 3:** Read the full Dockerfile at: {dockerfile_absolute}
+**STEP 4:** Fix ONLY the syntax error and related content - keep all other content exactly the same
 
-**STEP 1:** Use SearchWeb with "dockerfile syntax error {syntax_error_detail}" to find solutions
-**STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}  
-**STEP 3:** Identify the exact syntax problem (line number shown in error)
-**STEP 4:** Fix ONLY the syntax error - common issues:
-   - "unknown instruction" = typo in instruction name or text before FROM
-   - "unexpected token" = missing quotes or escape characters
-   - Shell heredoc issues = use separate RUN commands instead
+HINTS for common syntax errors:
+- "unknown instruction: <word>" often means multi-line content (heredoc/script) is being parsed as Dockerfile instructions
+- "unexpected token" usually means missing quotes, escapes, or line continuation issues
+- Each line in a Dockerfile must start with a valid instruction (FROM, RUN, COPY, etc.) or be a continuation
 
 CRITICAL RULES:
 - DO NOT CHANGE THE BASE IMAGE (FROM line) - it is CORRECT!
