@@ -47,9 +47,26 @@ def setup_llm():
         api_version=api_version
     )
 
+
+# Global log file path
+LOG_FILE_PATH = None
+
+def logger(message, title=None):
+    """Log to console and file."""
+    if title:
+        formatted_msg = f"\n{'='*20} {title} {'='*20}\n{message}\n{'='*50}"
+    else:
+        formatted_msg = message
+
+    print(formatted_msg)
+    
+    if LOG_FILE_PATH:
+        with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+            f.write(formatted_msg + "\n")
+
 def clone_repository(repo_url, target_dir="./temp_repo"):
     """Clone repository to a temporary directory."""
-    print(f"\n[CLONE] Cloning {repo_url}...")
+    logger(f"\n[CLONE] Cloning {repo_url}...")
     
     if os.path.exists(target_dir):
         def remove_readonly(func, path, excinfo):
@@ -67,30 +84,30 @@ def clone_repository(repo_url, target_dir="./temp_repo"):
             encoding='utf-8',
             errors='replace'
         )
-        print(f"[OK] Cloned to {target_dir}")
+        logger(f"[OK] Cloned to {target_dir}")
         return Path(target_dir)
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Failed to clone repository: {e.stderr}")
+        logger(f"[ERROR] Failed to clone repository: {e.stderr}")
         sys.exit(1)
 
 def get_readme_content(repo_path):
     """Find and read the README file."""
     for file in os.listdir(repo_path):
         if file.lower().startswith("readme"):
-            print(f"[READ] Found README: {file}")
+            logger(f"[READ] Found README: {file}")
             try:
                 with open(repo_path / file, 'r', encoding='utf-8', errors='ignore') as f:
                     return f.read()
             except Exception as e:
-                print(f"[ERROR] Could not read README: {e}")
+                logger(f"[ERROR] Could not read README: {e}")
                 sys.exit(1)
     
-    print("[WARNING] No README found in repository.")
+    logger("[WARNING] No README found in repository.")
     return "No README file found in this repository."
 
 def generate_dockerfile(llm, readme_content):
     """Generate Dockerfile using LLM."""
-    print("\n[GENERATE] Generating Dockerfile using Zero-Shot prompting...")
+    logger("\n[GENERATE] Generating Dockerfile using Zero-Shot prompting...")
     
     system_prompt = """You are an expert DevOps engineer. Your task is to create a production-ready Dockerfile for a project based ONLY on its README content.
 
@@ -103,6 +120,12 @@ RULES:
 
     user_message = f"Here is the README content of the project:\n\n{readme_content}\n\nGenerate the Dockerfile now."
     
+    if LOG_FILE_PATH:
+        # Log purely to file, no print for full prompts
+        with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+            f.write(f"\n{'='*20} SYSTEM PROMPT {'='*20}\n{system_prompt}\n{'='*50}\n")
+            f.write(f"\n{'='*20} USER MESSAGE (Prompt) {'='*20}\n{user_message}\n{'='*50}\n")
+
     try:
         response = llm.invoke([
             SystemMessage(content=system_prompt),
@@ -111,6 +134,10 @@ RULES:
         
         content = response.content.strip()
         
+        if LOG_FILE_PATH:
+             with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*20} LLM RESPONSE {'='*20}\n{content}\n{'='*50}\n")
+
         # Strip markdown code blocks if the LLM ignores the rule
         if content.startswith("```"):
             lines = content.splitlines()
@@ -120,15 +147,15 @@ RULES:
                 lines = lines[:-1]
             content = "\n".join(lines)
             
-        print(f"[OK] Dockerfile generated ({len(content)} chars)")
+        logger(f"[OK] Dockerfile generated ({len(content)} chars)")
         return content
     except Exception as e:
-        print(f"[ERROR] LLM generation failed: {e}")
+        logger(f"[ERROR] LLM generation failed: {e}")
         sys.exit(1)
 
 def build_docker_image(repo_path, dockerfile_content, image_tag="zero-shot-build:latest"):
     """Attempt to build the Docker image."""
-    print("\n[BUILD] Attempting to build Docker image...")
+    logger("\n[BUILD] Attempting to build Docker image...")
     
     dockerfile_path = repo_path / "Dockerfile"
     with open(dockerfile_path, 'w', encoding='utf-8') as f:
@@ -139,34 +166,45 @@ def build_docker_image(repo_path, dockerfile_content, image_tag="zero-shot-build
         subprocess.run(["docker", "--version"], check=True, capture_output=True, encoding='utf-8', errors='replace')
         
         start_time = time.time()
+        # Merge stdout and stderr
         result = subprocess.run(
             ["docker", "build", "-t", image_tag, "."],
             cwd=repo_path,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding='utf-8',
             errors='replace'
         )
         duration = time.time() - start_time
         
+        # Log the full build output to file
+        if LOG_FILE_PATH:
+             with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*20} DOCKER BUILD OUTPUT (Combined) {'='*20}\n")
+                f.write(result.stdout)
+                f.write(f"\n{'='*50}\n")
+
         if result.returncode == 0:
-            print(f"[SUCCESS] Docker build completed in {duration:.2f}s")
-            print(f"[INFO] Image tag: {image_tag}")
+            logger(f"[SUCCESS] Docker build completed in {duration:.2f}s")
+            logger(f"[INFO] Image tag: {image_tag}")
             return True, result.stdout
         else:
-            print(f"[FAILURE] Docker build failed (Exit Code: {result.returncode})")
-            print(f"[ERROR LOG] Last 10 lines of output:")
-            print("\n".join(result.stderr.splitlines()[-10:]))
-            return False, result.stderr
+            logger(f"[FAILURE] Docker build failed (Exit Code: {result.returncode})")
+            logger(f"[ERROR LOG] Last 20 lines of output:")
+            logger("\n".join(result.stdout.splitlines()[-20:]))
+            return False, result.stdout
             
     except FileNotFoundError:
-        print("[ERROR] Docker not found. Is it installed and in your PATH?")
+        logger("[ERROR] Docker not found. Is it installed and in your PATH?")
         return False, "Docker not found"
     except Exception as e:
-        print(f"[ERROR] Build exception: {e}")
+        logger(f"[ERROR] Build exception: {e}")
         return False, str(e)
 
 def main():
+    global LOG_FILE_PATH
+
     if len(sys.argv) < 2:
         print("Usage: python zero_shot_agent.py <repo_url>")
         sys.exit(1)
@@ -178,6 +216,15 @@ def main():
     script_dir = Path(__file__).parent
     work_dir = script_dir / "temp" / repo_name
     work_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Init log file
+    LOG_FILE_PATH = script_dir / f"{repo_name}_agent.log"
+    # Clear previous log
+    with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
+        f.write(f"Zero-Shot Build Agent Log - {repo_name}\n")
+        f.write(f"Date: {time.ctime()}\n")
+
+    logger(f"[INFO] Logging to {LOG_FILE_PATH}")
     
     # Execution Flow
     repo_path = clone_repository(repo_url, target_dir=work_dir)
@@ -192,12 +239,12 @@ def main():
     with open(script_dir / f"{repo_name}_Dockerfile", 'w', encoding='utf-8') as f:
         f.write(dockerfile_content)
         
-    print(f"\n[INFO] Saved Dockerfile to {repo_name}_Dockerfile")
+    logger(f"\n[INFO] Saved Dockerfile to {repo_name}_Dockerfile")
     
     if not success:
         with open(script_dir / f"{repo_name}_build_error.log", 'w', encoding='utf-8') as f:
             f.write(log)
-        print(f"[INFO] Saved error log to {repo_name}_build_error.log")
+        logger(f"[INFO] Saved error log to {repo_name}_build_error.log")
         
     # Cleanup
     if os.getenv("KEEP_TEMP", "false").lower() != "true":
@@ -206,9 +253,9 @@ def main():
                 os.chmod(path, stat.S_IWRITE)
                 func(path)
             shutil.rmtree(work_dir, onexc=remove_readonly)
-            print("[CLEANUP] Temporary directory removed")
+            logger("[CLEANUP] Temporary directory removed")
          except Exception as e:
-            print(f"[WARNING] Cleanup failed: {e}")
+            logger(f"[WARNING] Cleanup failed: {e}")
 
 if __name__ == "__main__":
     main()
