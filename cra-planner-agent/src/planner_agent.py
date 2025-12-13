@@ -282,8 +282,12 @@ def _resolve_path(user_path: str) -> str:
 
 def extract_relevant_sections(soup, max_chars_per_section=3000, max_total_chars=5000):
     """
-    Extract relevant sections (installation, build, setup) from HTML.
-    Prioritizes build sections but includes installation if relevant.
+    Extract relevant sections (installation, build, setup) from HTML using heuristics.
+    
+    Improvements:
+    - Link Density Filter: Ignores blocks where (>50%) text is links (menus/sidebars).
+    - Semantic Targeting: Prioritizes <main>, <article>, and specific IDs.
+    - Code Block Boost: Prioritizes sections with <pre>/<code> tags.
     
     Args:
         soup: BeautifulSoup parsed HTML
@@ -295,102 +299,181 @@ def extract_relevant_sections(soup, max_chars_per_section=3000, max_total_chars=
     """
     import re
     
-    # Keywords to look for in headings/text (prioritized)
+    # 1. Clean up obviously bad elements first
+    for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript', 'iframe', 'svg']):
+        tag.decompose()
+        
+    # Keywords
     build_keywords = ['build', 'compil', 'make', 'cmake', 'cargo build', 'npm run build', 'setup.py', 'dist']
     install_keywords = ['install', 'installation', 'setup', 'getting started', 'quick start', 'prerequisites', 'requirements', 'dependencies']
     
-    extracted_sections = []
     found_sections = []
-    total_chars = 0
     
-    # Find all headings (h1-h6) and their content
-    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    def get_link_density(element):
+        """Calculate ratio of link text to total text."""
+        total_text_len = len(element.get_text(strip=True))
+        if total_text_len == 0:
+            return 0
+        link_text_len = sum(len(a.get_text(strip=True)) for a in element.find_all('a'))
+        return link_text_len / total_text_len
+
+    def is_menu_or_garbage(element):
+        """Heuristic to detect menus/sidebars."""
+        # High link density = likely a menu
+        if get_link_density(element) > 0.5:
+            return True
+        return False
+
+    # 2. Identify potential content containers
+    # Prioritize semantic tags or divs with specific classes
+    content_roots = []
     
-    for heading in headings:
-        heading_text = heading.get_text().strip().lower()
-        
-        # Check if heading is relevant (prioritize build)
-        is_build = any(keyword in heading_text for keyword in build_keywords)
-        is_install = any(keyword in heading_text for keyword in install_keywords)
-        
-        if is_build or is_install:
-            # Get the section content
-            section_content = []
-            current = heading.next_sibling
+    # Strict semantic search first
+    main_tag = soup.find('main')
+    if main_tag: content_roots.append(main_tag)
+    
+    article_tags = soup.find_all('article')
+    if article_tags: content_roots.extend(article_tags)
+    
+    # Common content wrappers (if no semantic tags found or to supplement)
+    if not content_roots:
+        for class_name in ['content', 'main', 'documentation', 'wiki-content', 'markdown-body', 'guide']:
+            found = soup.find_all('div', class_=re.compile(class_name, re.I))
+            content_roots.extend(found)
             
-            # Collect content until next heading of same or higher level
-            heading_level = int(heading.name[1]) if heading.name.startswith('h') else 6
-            chars_collected = 0
+    # Fallback to body if nothing specific found
+    if not content_roots:
+        body = soup.find('body')
+        if body: content_roots.append(body)
+
+    # 3. Extract from identified roots
+    processed_headings = set()
+    
+    for root in content_roots:
+        # Check if root itself is garbage
+        if is_menu_or_garbage(root) and root.name != 'body': # Be clearer with body
+            continue
             
-            while current and chars_collected < max_chars_per_section:
-                if isinstance(current, str):
-                    text = current.strip()
-                    if text:
-                        section_content.append(text)
-                        chars_collected += len(text)
-                elif hasattr(current, 'name'):
-                    if current.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                        # Stop at next heading
-                        next_level = int(current.name[1]) if current.name.startswith('h') else 6
-                        if next_level <= heading_level:
-                            break
-                    elif current.name in ['p', 'li', 'div', 'pre', 'code']:
-                        text = current.get_text().strip()
+        headings = root.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        
+        for heading in headings:
+            if heading in processed_headings:
+                continue
+            processed_headings.add(heading)
+            
+            heading_text = heading.get_text().strip().lower()
+            
+            # Relevance check
+            is_build = any(k in heading_text for k in build_keywords)
+            is_install = any(k in heading_text for k in install_keywords)
+            
+            # Boost score if "code" or "pre" follows immediately
+            has_code = False
+            
+            if is_build or is_install:
+                section_content = []
+                current = heading.next_sibling
+                chars_collected = 0
+                
+                # Determine hierarchy level
+                try:
+                    heading_level = int(heading.name[1])
+                except:
+                    heading_level = 6
+                
+                while current and chars_collected < max_chars_per_section:
+                    if hasattr(current, 'name'):
+                        # Stop at same/higher level heading
+                        if current.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                            try:
+                                next_level = int(current.name[1])
+                                if next_level <= heading_level:
+                                    break
+                            except:
+                                pass
+                        
+                        # Filtering
+                        if current.name in ['div', 'section', 'ul', 'ol', 'p']:
+                            if is_menu_or_garbage(current):
+                                current = current.next_sibling
+                                continue
+                                
+                        # Check for code
+                        if current.name in ['pre', 'code'] or (hasattr(current, 'find_all') and current.find_all(['pre', 'code'])):
+                            has_code = True
+                            
+                        # Add text
+                        text = current.get_text(separator=' ', strip=True)
                         if text:
                             section_content.append(text)
                             chars_collected += len(text)
+                            
+                    elif isinstance(current, str):
+                        text = current.strip()
+                        if text:
+                            section_content.append(text)
+                            chars_collected += len(text)
+                            
+                    current = current.next_sibling
                 
-                current = current.next_sibling
-                if chars_collected >= max_chars_per_section:
-                    break
-            
-            if section_content:
-                section_text = '\n'.join(section_content)
-                if len(section_text) > max_chars_per_section:
-                    section_text = section_text[:max_chars_per_section] + "..."
+                if section_content:
+                    full_text = '\n'.join(section_content)
+                    
+                    # Heuristic Scoring for Priority
+                    # Base: 1 (Build), 2 (Install)
+                    # Modifiers: -5 if has_code (makes it effectively Top Priority 0 or -4)
+                    priority = 1 if is_build else 2
+                    if has_code:
+                        priority -= 5  # Boost significantly
+                        
+                    found_sections.append({
+                        'heading': heading.get_text().strip(),
+                        'content': full_text[:max_chars_per_section],
+                        'priority': priority,
+                        'order': len(found_sections)
+                    })
+
+    # 4. Fallback: If no relevant sections found, return Main Content text (cleaned)
+    if not found_sections:
+        # Try to find the single largest block of text that isn't a menu
+        best_block = None
+        max_text_len = 0
+        
+        candidates = soup.find_all(['div', 'section', 'article'])
+        for block in candidates:
+            # Skip if it contains other candidates (get leaf-ish nodes)
+            # Actually, getting largest distinct block is safer
+            if is_menu_or_garbage(block):
+                continue
                 
-                priority = 1 if is_build else 2  # Build sections have higher priority
-                found_sections.append({
-                    'heading': heading.get_text().strip(),
-                    'content': section_text,
-                    'priority': priority,
-                    'is_build': is_build,
-                    'is_install': is_install,
-                    'order': len(found_sections)  # Track original order before sorting
-                })
-    
-    # Sort by priority (build first) and then by original order (ascending)
+            text_len = len(block.get_text(strip=True))
+            if text_len > max_text_len:
+                max_text_len = text_len
+                best_block = block
+        
+        if best_block:
+             return f"[Auto-extracted Main Content]\n{best_block.get_text(separator=' ', strip=True)[:max_total_chars]}"
+        
+        # Absolute fallback
+        if soup.body:
+             return soup.body.get_text(separator=' ', strip=True)[:max_total_chars]
+        return "[No content found]"
+
+    # Sort and Format
     found_sections.sort(key=lambda x: (x['priority'], x['order']))
     
-    # Combine sections up to max_total_chars
-    for section in found_sections:
-        section_output = f"\n{'='*70}\nSECTION: {section['heading']}\n{'='*70}\n{section['content']}\n"
-        if total_chars + len(section_output) <= max_total_chars:
-            extracted_sections.append(section_output)
-            total_chars += len(section_output)
+    extracted_text = []
+    total_chars = 0
+    
+    for sec in found_sections:
+        text = f"\n{'='*40}\nSECTION: {sec['heading']}\n{'='*40}\n{sec['content']}\n"
+        if total_chars + len(text) <= max_total_chars:
+            extracted_text.append(text)
+            total_chars += len(text)
         else:
-            # Add partial section if there's room
-            remaining = max_total_chars - total_chars - 100  # Leave room for header
-            if remaining > 500:
-                partial = section['content'][:remaining] + "..."
-                extracted_sections.append(f"\n{'='*70}\nSECTION: {section['heading']} (partial)\n{'='*70}\n{partial}\n")
             break
-    
-    if extracted_sections:
-        return '\n'.join(extracted_sections)
-    
-    # Fallback: get first part of body text if no sections found
-    body = soup.find('body')
-    if body:
-        text = body.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        if len(text) > max_total_chars:
-            return text[:max_total_chars] + "\n\n[Content truncated - no specific build/installation sections found, showing beginning of page]"
-        return text
-    
-    return "[No relevant content found]"
+            
+    return '\n'.join(extracted_text)
 
 
 def search_docker_error(error_keywords: str) -> str:
@@ -453,20 +536,37 @@ def search_docker_error(error_keywords: str) -> str:
             
             summary_parts = [f"Web Search Results for '{error_keywords}':\n{'='*60}\n"]
             
-            for idx, result in enumerate(results[:6], 1):
+            for idx, result in enumerate(results[:5], 1):
                 summary_parts.append(f"\n{idx}. {result['title']}")
                 summary_parts.append(f"   URL: {result['url']}")
                 if result['snippet']:
-                    snippet = result['snippet'][:350]
+                    snippet = result['snippet'][:300]
                     summary_parts.append(f"   {snippet}...")
                 summary_parts.append("")
+                
+            # FETCH TOP RESULT CONTENT (Depth-1)
+            # This is critical for actually solving the error
+            if results:
+                top_url = results[0]['url']
+                try:
+                    logger.info(f"Fetching top error solution: {top_url}")
+                    # Use a short timeout to keep it fast
+                    resp = requests.get(top_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.content, 'html.parser')
+                        # Use our smart extraction
+                        content = extract_relevant_sections(soup, max_chars_per_section=2000, max_total_chars=3000)
+                        
+                        summary_parts.append(f"\n{'='*60}\nTOP SOLUTION DETAILED CONTENT ({top_url})\n{'='*60}\n{content}")
+                except Exception as e:
+                    logger.warning(f"Could not fetch top error solution {top_url}: {e}")
             
-            summary_parts.append(f"\nTIP: Use FetchWebPage tool to read full content from any URL above")
+            summary_parts.append(f"\nTIP: Use FetchWebPage tool to read full content from other URLs")
             
             summary = '\n'.join(summary_parts)
             
-            if len(summary) > 4000:
-                summary = summary[:4000] + "\n\n[Truncated - see URLs above for full solutions]"
+            if len(summary) > 6000: # Increased limit since we have real content
+                summary = summary[:6000] + "\n\n[Truncated]"
             
             return summary
             
@@ -908,28 +1008,82 @@ def search_web(query: str) -> str:
                     # Catch any other unexpected errors
                     error_msg = f"Unexpected error: {type(unexpected_error).__name__}: {str(unexpected_error)}"
                     logger.error(f"Unexpected error processing {url}: {error_msg}")
-                    report_dir = _get_report_directory()
-                    if report_dir:
-                        try:
-                            save_path = Path(report_dir) / f"web_search_{idx}.txt"
-                            with open(save_path, 'w', encoding='utf-8') as f:
-                                f.write(f"Web Search Result #{idx}\n")
-                                f.write(f"{'='*70}\n")
-                                f.write(f"Title: {title}\n")
-                                f.write(f"URL: {url}\n")
-                                f.write(f"Search Query: {result['query']}\n")
-                                f.write(f"Project Name: {project_name}\n")
-                                f.write(f"Fetched: {datetime.now().isoformat()}\n")
-                                f.write(f"Status: FAILED\n")
-                                f.write(f"Error: {error_msg}\n")
-                                f.write(f"{'='*70}\n\n")
-                                f.write("ERROR: Unexpected error occurred.\n")
-                            logger.info(f"Saved error info to {save_path}")
-                        except Exception as save_error:
-                            logger.error(f"Could not save error info: {save_error}")
                     continue
-            
-            # Build final output
+                    
+                # DEPTH-1 CRAWLING LOGIC
+                # If content seems generic (no strong "Build"/"Install" sections extracted), looks for links
+                is_generic = len(relevant_content) < 500 or "SECTION:" not in relevant_content
+                
+                if is_generic and idx <= 2: # Only for top 2 results to save time
+                    logger.info(f"Result {idx} seems generic. Scanning for guide links...")
+                    
+                    # Find best "guide" link
+                    best_link = None
+                    best_score = 0
+                    
+                    # Quick scan of links in the soup
+                    for a in soup.find_all('a', href=True):
+                        text = a.get_text().strip().lower()
+                        href = a['href']
+                        
+                        # skip anchors and same page
+                        if href.startswith('#') or href == url:
+                            continue
+                            
+                        score = 0
+                        if 'install' in text: score += 5
+                        if 'build' in text: score += 5
+                        if 'get started' in text: score += 4
+                        if 'guide' in text: score += 3
+                        if 'quick' in text: score += 2
+                        
+                        # Bias towards relative links or same domain
+                        if not href.startswith('http') or project_name in href.lower():
+                            score += 1
+                            
+                        if score > best_score:
+                            best_score = score
+                            best_link = href
+                            
+                    if best_link and best_score >= 4:
+                        # Resolve relative URL
+                        if not best_link.startswith('http'):
+                            from urllib.parse import urljoin
+                            best_link = urljoin(url, best_link)
+                            
+                        logger.info(f"Following depth-1 link: {best_link} (score: {best_score})")
+                        
+                        try:
+                            # Fetch the sub-page
+                            sub_resp = requests.get(best_link, headers=headers, timeout=20, verify=True)
+                            if sub_resp.status_code == 200:
+                                sub_soup = BeautifulSoup(sub_resp.content, 'html.parser')
+                                
+                                # Extract from sub-page
+                                sub_content = extract_relevant_sections(sub_soup, max_chars_per_section=2500, max_total_chars=4000)
+                                
+                                # Append to relevant content explicitly
+                                relevant_content += f"\n\n{'='*70}\n[AUTO-CRAWLED SUB-PAGE]: {best_link}\n{'='*70}\n{sub_content}"
+                                logger.info(f"Added content from sub-page {best_link}")
+                        except Exception as e:
+                            logger.warning(f"Failed to crawl sub-page {best_link}: {e}")
+
+                # Prepare summary for agent (limited chars)
+                page_summary = f"\n{'='*70}\nPAGE {idx}: {title}\nURL: {url}\n{'='*70}\n"
+                page_summary += relevant_content
+                
+                # Check if we have room in output
+                if total_output_chars + len(page_summary) <= max_output_chars:
+                    fetched_pages.append(page_summary)
+                    total_output_chars += len(page_summary)
+                elif total_output_chars < max_output_chars - 500:  # Add partial if there's significant room
+                    remaining = max_output_chars - total_output_chars - 200
+                    if remaining > 500:
+                        page_summary_short = page_summary[:remaining] + "\n[Content truncated...]"
+                        fetched_pages.append(page_summary_short)
+                        total_output_chars = max_output_chars
+                
+                logger.info(f"Successfully processed page {idx}: {title} ({len(relevant_content)} chars extracted)")
             output = f"WEB SEARCH RESULTS - Build/Installation Guides\n"
             output += f"{'='*70}\n"
             output += f"Found {len(all_results)} total results, fetched top {len(fetched_pages)} pages\n"
@@ -949,6 +1103,18 @@ def search_web(query: str) -> str:
                 output = output[:max_output_chars] + "\n\n[Output truncated - see web_search_X.txt files for full content]"
             
             logger.info(f"Search completed, {len(output)} chars returned, {len(fetched_pages)} pages processed")
+            
+            # Save the exact summary the agent sees to a file for user inspection
+            report_dir = _get_report_directory()
+            if report_dir:
+                try:
+                    summary_path = Path(report_dir) / "web_search_agent_summary.txt"
+                    with open(summary_path, 'w', encoding='utf-8') as f:
+                        f.write(output)
+                    logger.info(f"Saved agent search view to {summary_path}")
+                except Exception as save_err:
+                    logger.error(f"Could not save agent search view: {save_err}")
+
             return output
             
         except ImportError as e:
