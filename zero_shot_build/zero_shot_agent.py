@@ -48,6 +48,9 @@ def setup_llm():
     )
 
 
+import traceback
+from typing import Dict, Tuple, Optional
+
 # Global log file path
 LOG_FILE_PATH = None
 
@@ -63,6 +66,255 @@ def logger(message, title=None):
     if LOG_FILE_PATH:
         with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
             f.write(formatted_msg + "\n")
+
+class DockerBuildTester:
+    """Tests generated Dockerfiles by actually building them with Docker."""
+
+    def __init__(self, timeout: int = 600):
+        """
+        Initialize Docker build tester.
+
+        Args:
+            timeout: Maximum time in seconds to wait for Docker build (default: 10 minutes)
+        """
+        self.timeout = timeout
+        self.docker_available = self._check_docker()
+
+    def _check_docker(self) -> bool:
+        """Check if Docker is installed and accessible."""
+        try:
+            result = subprocess.run(
+                ["docker", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+
+    def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str) -> Dict:
+        """
+        Build a Dockerfile and return detailed results.
+
+        Args:
+            dockerfile_path: Path to Dockerfile
+            context_path: Path to build context (usually repository root)
+            image_name: Name to tag the built image
+
+        Returns:
+            Dictionary with build results including success status, stage, error details
+        """
+        if not self.docker_available:
+            return {
+                "success": False,
+                "stage": "DOCKER_CHECK",
+                "error_type": "DOCKER_NOT_AVAILABLE",
+                "error_message": "Docker is not installed or not accessible",
+                "exit_code": -1,
+                "duration_seconds": 0
+            }
+
+        if not os.path.exists(dockerfile_path):
+            return {
+                "success": False,
+                "stage": "DOCKERFILE_CHECK",
+                "error_type": "DOCKERFILE_NOT_FOUND",
+                "error_message": f"Dockerfile not found at {dockerfile_path}",
+                "exit_code": -1,
+                "duration_seconds": 0
+            }
+
+        start_time = time.time()
+
+        # Build Docker image
+        try:
+            cmd = [
+                "docker", "build",
+                "-f", dockerfile_path,
+                "-t", image_name,
+                context_path
+            ]
+
+            logger(f"[DOCKER BUILD] Running: {' '.join(cmd)}")
+
+            # Run without text=True to handle decoding manually
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=False,  # Capture raw bytes
+                timeout=self.timeout
+            )
+
+            # Manual decoding with error replacement
+            stdout_str = result.stdout.decode('utf-8', errors='replace') if result.stdout else ""
+            stderr_str = result.stderr.decode('utf-8', errors='replace') if result.stderr else None
+
+            duration = time.time() - start_time
+            
+            # Log the full build output to file
+            if LOG_FILE_PATH:
+                 with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*20} DOCKER BUILD OUTPUT (Combined) {'='*20}\n")
+                    f.write(stdout_str)
+                    if stderr_str:
+                         f.write("\n--- STDERR ---\n")
+                         f.write(stderr_str)
+                    f.write(f"\n{'='*50}\n")
+
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "stage": "BUILD_COMPLETE",
+                    "error_type": None,
+                    "error_message": None,
+                    "exit_code": 0,
+                    "duration_seconds": duration,
+                    "stdout": stdout_str[-2000:],  # Last 2000 chars
+                    "stderr": stderr_str[-2000:] if stderr_str else None
+                }
+            else:
+                # Parse error to determine stage
+                full_error = (stderr_str or "") + (stdout_str or "")
+                stage, failed_docker_command = self._parse_docker_error(full_error)
+
+                # Extract a concise error snippet (last error line)
+                error_lines = full_error.strip().split('\n')
+                error_snippet = None
+                for line in reversed(error_lines):
+                    if line.strip() and ('error' in line.lower() or 'failed' in line.lower() or 'fatal' in line.lower()):
+                        error_snippet = line.strip()
+                        break
+                if not error_snippet and error_lines:
+                    error_snippet = error_lines[-1].strip()
+
+                return {
+                    "success": False,
+                    "stage": stage,
+                    "failed_command": failed_docker_command,  # The Docker step that failed
+                    "error_message": full_error,  # Full error for detailed analysis
+                    "error_snippet": error_snippet,  # Concise error line for quick review
+                    "exit_code": result.returncode,
+                    "duration_seconds": duration,
+                    "stdout": stdout_str[-2000:] if stdout_str else "",
+                    "stderr": stderr_str[-2000:] if stderr_str else None
+                }
+
+        except subprocess.TimeoutExpired:
+            duration = time.time() - start_time
+            return {
+                "success": False,
+                "stage": "BUILD_TIMEOUT",
+                "error_type": "TIMEOUT",
+                "error_message": f"Docker build exceeded timeout of {self.timeout} seconds",
+                "exit_code": -1,
+                "duration_seconds": duration
+            }
+
+        except Exception as e:
+            duration = time.time() - start_time
+            return {
+                "success": False,
+                "stage": "BUILD_EXCEPTION",
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "exit_code": -1,
+                "duration_seconds": duration,
+                "traceback": traceback.format_exc()
+            }
+
+    def _parse_docker_error(self, error_output: str) -> Tuple[str, str]:
+        """
+        Parse Docker error output to determine which Dockerfile step failed.
+        """
+        error_lower = error_output.lower()
+
+        # Extract the failed Docker step from the build output
+        failed_step = self._extract_failed_docker_step(error_output)
+
+        # ===================================================================
+        # Simple Stage Detection - High Level Only
+        # ===================================================================
+
+        # 1. Docker Daemon Issues
+        if any(x in error_lower for x in ["cannot connect to the docker daemon", "is the docker daemon running", "docker: not found", "docker: command not found"]):
+            return "DOCKER_DAEMON", failed_step or "Docker daemon not accessible"
+
+        # 2. Base Image Pull Issues (FROM command)
+        if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
+            return "IMAGE_PULL", failed_step or "Failed to pull base image"
+
+        # 3. Dockerfile Syntax
+        if any(x in error_lower for x in ["dockerfile parse error", "unknown instruction"]):
+            return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
+
+        # 4. File Copy/Add (COPY/ADD commands)
+        if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
+            return "FILE_COPY", failed_step or "File copy/add failed"
+
+        # 5. Dependency Installation (RUN pip/npm/go/cargo install commands)
+        if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
+            return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
+
+        # 6. Build/Compilation (RUN build commands)
+        if any(x in error_lower for x in ["compilation error", "build error", "webpack", "tsc"]):
+            return "BUILD_COMPILE", failed_step or "Build/compilation failed"
+
+        # 7. Runtime Execution (CMD/ENTRYPOINT)
+        if any(x in error_lower for x in ["command not found", "exec format error"]):
+            return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
+
+        # 8. Permission/User Issues
+        if "permission denied" in error_lower or "useradd" in error_lower:
+            return "PERMISSION", failed_step or "Permission/user management error"
+
+        # 9. Network Issues
+        if any(x in error_lower for x in ["connection refused", "connection timeout", "network unreachable"]):
+            return "NETWORK", failed_step or "Network connection error"
+
+        # 10. Storage Issues
+        if any(x in error_lower for x in ["no space left", "disk full", "quota exceeded"]):
+            return "STORAGE", failed_step or "Disk space error"
+
+        # Fallback: Return the extracted step or unknown
+        return "UNKNOWN", failed_step or "Unknown error - check full log"
+
+    def _extract_failed_docker_step(self, error_output: str) -> str:
+        """
+        Extract the specific Docker RUN/COPY/FROM command that failed.
+        """
+        import re
+
+        # Pattern 1: ERROR [stage X/Y] COMMAND
+        match = re.search(r'ERROR \[.*?\] (RUN|COPY|ADD|FROM|WORKDIR).*', error_output, re.IGNORECASE)
+        if match:
+            return match.group(0).replace('ERROR ', '').strip()
+
+        # Pattern 2: executor failed running [/bin/sh -c COMMAND]
+        match = re.search(r'executor failed running \[/bin/sh -c ([^\]]+)\]', error_output, re.IGNORECASE)
+        if match:
+            return f"RUN {match.group(1).strip()}"
+
+        # Pattern 3: #N [stage X/Y] COMMAND
+        match = re.search(r'#\d+ \[.*?\] (RUN|COPY|ADD|FROM).*', error_output, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+
+        # Return None if we can't extract the step
+        return None
+
+    def cleanup_image(self, image_name: str) -> bool:
+        """Remove Docker image after testing."""
+        try:
+            print(f"[CLEANUP] Removing Docker image {image_name}...")
+            subprocess.run(
+                ["docker", "rmi", "-f", image_name],
+                capture_output=True,
+                timeout=30
+            )
+            return True
+        except Exception:
+            return False
 
 def clone_repository(repo_url, target_dir="./temp_repo"):
     """Clone repository to a temporary directory."""
@@ -96,7 +348,8 @@ def get_readme_content(repo_path):
         if file.lower().startswith("readme"):
             logger(f"[READ] Found README: {file}")
             try:
-                with open(repo_path / file, 'r', encoding='utf-8', errors='ignore') as f:
+                # Use errors='replace' to avoid crashing on special characters
+                with open(repo_path / file, 'r', encoding='utf-8', errors='replace') as f:
                     return f.read()
             except Exception as e:
                 logger(f"[ERROR] Could not read README: {e}")
@@ -153,55 +406,6 @@ RULES:
         logger(f"[ERROR] LLM generation failed: {e}")
         sys.exit(1)
 
-def build_docker_image(repo_path, dockerfile_content, image_tag="zero-shot-build:latest"):
-    """Attempt to build the Docker image."""
-    logger("\n[BUILD] Attempting to build Docker image...")
-    
-    dockerfile_path = repo_path / "Dockerfile"
-    with open(dockerfile_path, 'w', encoding='utf-8') as f:
-        f.write(dockerfile_content)
-    
-    try:
-        # Check docker availability
-        subprocess.run(["docker", "--version"], check=True, capture_output=True, encoding='utf-8', errors='replace')
-        
-        start_time = time.time()
-        # Merge stdout and stderr
-        result = subprocess.run(
-            ["docker", "build", "-t", image_tag, "."],
-            cwd=repo_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
-        duration = time.time() - start_time
-        
-        # Log the full build output to file
-        if LOG_FILE_PATH:
-             with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*20} DOCKER BUILD OUTPUT (Combined) {'='*20}\n")
-                f.write(result.stdout)
-                f.write(f"\n{'='*50}\n")
-
-        if result.returncode == 0:
-            logger(f"[SUCCESS] Docker build completed in {duration:.2f}s")
-            logger(f"[INFO] Image tag: {image_tag}")
-            return True, result.stdout
-        else:
-            logger(f"[FAILURE] Docker build failed (Exit Code: {result.returncode})")
-            logger(f"[ERROR LOG] Last 20 lines of output:")
-            logger("\n".join(result.stdout.splitlines()[-20:]))
-            return False, result.stdout
-            
-    except FileNotFoundError:
-        logger("[ERROR] Docker not found. Is it installed and in your PATH?")
-        return False, "Docker not found"
-    except Exception as e:
-        logger(f"[ERROR] Build exception: {e}")
-        return False, str(e)
-
 def main():
     global LOG_FILE_PATH
 
@@ -233,19 +437,52 @@ def main():
     llm = setup_llm()
     dockerfile_content = generate_dockerfile(llm, readme_content)
     
-    success, log = build_docker_image(repo_path, dockerfile_content, image_tag=f"zero-shot-{repo_name.lower()}:latest")
-    
-    # Save results including the Dockerfile and logs
+    # Save Dockerfile BEFORE build
     with open(script_dir / f"{repo_name}_Dockerfile", 'w', encoding='utf-8') as f:
         f.write(dockerfile_content)
-        
     logger(f"\n[INFO] Saved Dockerfile to {repo_name}_Dockerfile")
+
+    # TEST DOCKER BUILD using ported logic
+    image_tag = f"zero-shot-{repo_name.lower()}:latest"
+    tester = DockerBuildTester(timeout=600)
     
-    if not success:
-        with open(script_dir / f"{repo_name}_build_error.log", 'w', encoding='utf-8') as f:
-            f.write(log)
-        logger(f"[INFO] Saved error log to {repo_name}_build_error.log")
+    dockerfile_path = script_dir / f"{repo_name}_Dockerfile"
+    # Note: Using repo_path as context, but referencing the saved Dockerfile
+    # Ideally we should move Dockerfile to repo_path or point to it
+    # The build_dockerfile argument expects a path to the file
+    
+    logger("\n[BUILD] Attempting to build Docker image...")
+    build_result = tester.build_dockerfile(str(dockerfile_path), str(repo_path), image_tag)
+    
+    if build_result["success"]:
+        logger(f"[SUCCESS] Docker build completed in {build_result['duration_seconds']:.2f}s")
+        logger(f"[INFO] Image tag: {image_tag}")
+        tester.cleanup_image(image_tag)
+    else:
+        logger(f"[FAILURE] Docker build failed (Exit Code: {build_result['exit_code']})")
+        logger(f"  Stage: {build_result.get('stage', 'UNKNOWN')}")
+        logger(f"  Command: {build_result.get('failed_command', 'Unknown')}")
+        logger(f"  Error Snippet: {build_result.get('error_snippet', 'No snippet')}")
         
+        # Save error summary
+        error_summary_file = script_dir / f"{repo_name}_docker_build_error_summary.txt"
+        with open(error_summary_file, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("DOCKER BUILD ERROR SUMMARY\n")
+            f.write("="*80 + "\n\n")
+            f.write(f"Repository: {repo_name}\n")
+            f.write(f"URL: {repo_url}\n")
+            f.write(f"Timestamp: {time.ctime()}\n\n")
+            f.write(f"Failure Stage: {build_result.get('stage', 'UNKNOWN')}\n")
+            f.write(f"Failed Docker Command: {build_result.get('failed_command', 'Unknown')}\n")
+            f.write(f"Exit Code: {build_result.get('exit_code', -1)}\n\n")
+            if build_result.get('error_snippet'):
+                f.write(f"Error Snippet (last error line):\n{'-'*80}\n")
+                f.write(f"{build_result['error_snippet']}\n")
+                f.write(f"{'-'*80}\n\n")
+            f.write(f"See full Docker output in: {repo_name}_agent.log\n")
+        logger(f"[INFO] Saved error summary to {error_summary_file.name}")
+
     # Cleanup
     if os.getenv("KEEP_TEMP", "false").lower() != "true":
          try:
