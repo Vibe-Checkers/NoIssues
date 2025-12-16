@@ -621,8 +621,7 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
         if report_dir:
             import planner_agent
             planner_agent._set_report_directory(str(report_dir))
-            # Also set global for backwards compatibility
-            planner_agent.REPORT_DIRECTORY = str(report_dir)
+            # NOTE: No longer setting global REPORT_DIRECTORY - thread-local only for thread safety
             print(f"[INFO] Report directory: {report_dir}")
 
         # Define analysis queries using discovery-based approach with relative paths
@@ -1042,8 +1041,7 @@ def main():
         # Set thread-local report directory for web search to save files (thread-safe)
         import planner_agent
         planner_agent._set_report_directory(str(report_dir))
-        # Also set global for backwards compatibility
-        planner_agent.REPORT_DIRECTORY = str(report_dir)
+        # NOTE: No longer setting global REPORT_DIRECTORY - thread-local only for thread safety
         
         report_dir_result = analyze_repository(agent, repo_path, repo_name, repo_url, callback_handler, report_dir=report_dir)
         # Use the returned report_dir (should be same as what we passed)

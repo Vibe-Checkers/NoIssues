@@ -28,14 +28,17 @@ print("[STARTUP] All imports loaded successfully!")
 class DockerBuildTester:
     """Tests generated Dockerfiles by actually building them with Docker."""
 
-    def __init__(self, timeout: int = 600):
+    def __init__(self, timeout: int = 600, platform: str = None):
         """
         Initialize Docker build tester.
 
         Args:
             timeout: Maximum time in seconds to wait for Docker build (default: 10 minutes)
+            platform: Optional platform to build for (e.g., "linux/amd64", "linux/arm64")
+                     Use None for native platform. Useful for cross-platform testing.
         """
         self.timeout = timeout
+        self.platform = platform
         self.docker_available = self._check_docker()
 
     def _check_docker(self) -> bool:
@@ -87,14 +90,20 @@ class DockerBuildTester:
 
         # Build Docker image
         try:
-            cmd = [
-                "docker", "build",
+            cmd = ["docker", "build"]
+
+            # Add platform flag if specified (for cross-platform builds)
+            if self.platform:
+                cmd.extend(["--platform", self.platform])
+
+            cmd.extend([
                 "-f", dockerfile_path,
                 "-t", image_name,
                 context_path
-            ]
+            ])
 
-            print(f"[DOCKER BUILD] Running: {' '.join(cmd)}")
+            platform_info = f" (platform: {self.platform})" if self.platform else ""
+            print(f"[DOCKER BUILD] Running: {' '.join(cmd)}{platform_info}")
 
             result = subprocess.run(
                 cmd,
@@ -191,7 +200,14 @@ class DockerBuildTester:
         if any(x in error_lower for x in ["cannot connect to the docker daemon", "is the docker daemon running", "docker: not found", "docker: command not found"]):
             return "DOCKER_DAEMON", failed_step or "Docker daemon not accessible"
 
-        # 2. Platform/Architecture Incompatibility (ARM vs x86)
+        # 2. Docker BuildKit Storage Corruption
+        # This occurs when parallel builds + aggressive cleanup corrupt the overlay2 storage driver
+        # Symptoms: "parent snapshot sha256:... does not exist: not found"
+        # Solution: Requires system-wide docker builder prune --all --force
+        if "parent snapshot" in error_lower and "does not exist" in error_lower:
+            return "INFRASTRUCTURE_CORRUPTION", failed_step or "Docker BuildKit cache corrupted - requires prune"
+
+        # 3. Platform/Architecture Incompatibility (ARM vs x86)
         # This is a special case of image pull - the image exists but for wrong architecture
         if any(x in error_lower for x in [
             "invalidbaseimageplatform", "platform", "linux/amd64", "linux/arm64",
@@ -199,39 +215,48 @@ class DockerBuildTester:
         ]) and any(x in error_lower for x in ["amd64", "arm64", "architecture", "platform"]):
             return "PLATFORM_INCOMPATIBLE", failed_step or "Base image platform mismatch (amd64 vs arm64)"
 
-        # 3. Base Image Pull Issues (FROM command)
+        # 4. Base Image Pull Issues (FROM command)
         if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
             return "IMAGE_PULL", failed_step or "Failed to pull base image"
 
-        # 4. Dockerfile Syntax
+        # 5. Dockerfile Syntax
         if any(x in error_lower for x in ["dockerfile parse error", "unknown instruction"]):
             return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
 
-        # 5. File Copy/Add (COPY/ADD commands)
+        # 6. File Copy/Add (COPY/ADD commands)
         if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
             return "FILE_COPY", failed_step or "File copy/add failed"
 
-        # 6. Dependency Installation (RUN pip/npm/go/cargo install commands)
+        # 7. Dependency Installation (RUN pip/npm/go/cargo install commands)
         if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
             return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
 
-        # 7. Build/Compilation (RUN build commands)
+        # 7a. Dependency Rot (missing/removed versions - terminal condition)
+        # Symptoms: npm notarget, pip no matching distribution, outdated lockfiles
+        if any(x in error_lower for x in [
+            "notarget", "no matching version", "no matching distribution",
+            "could not find a version that satisfies", "no such file or directory: 'package-lock.json'",
+            "error: no matching package named", "version solving failed"
+        ]):
+            return "DEPENDENCY_ROT", failed_step or "Dependency version no longer exists (requires code update)"
+
+        # 8. Build/Compilation (RUN build commands)
         if any(x in error_lower for x in ["compilation error", "build error", "webpack", "tsc"]):
             return "BUILD_COMPILE", failed_step or "Build/compilation failed"
 
-        # 8. Runtime Execution (CMD/ENTRYPOINT)
+        # 9. Runtime Execution (CMD/ENTRYPOINT)
         if any(x in error_lower for x in ["command not found", "exec format error"]):
             return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
 
-        # 9. Permission/User Issues
+        # 10. Permission/User Issues
         if "permission denied" in error_lower or "useradd" in error_lower:
             return "PERMISSION", failed_step or "Permission/user management error"
 
-        # 10. Network Issues
+        # 11. Network Issues
         if any(x in error_lower for x in ["connection refused", "connection timeout", "network unreachable"]):
             return "NETWORK", failed_step or "Network connection error"
 
-        # 11. Storage Issues
+        # 12. Storage Issues
         if any(x in error_lower for x in ["no space left", "disk full", "quota exceeded"]):
             return "STORAGE", failed_step or "Disk space error"
 
@@ -278,6 +303,90 @@ class DockerBuildTester:
             return True
         except Exception:
             return False
+
+    def prune_build_cache(self) -> bool:
+        """
+        Clear Docker BuildKit cache to fix storage corruption.
+
+        This is required when parallel builds + aggressive cleanup cause overlay2
+        storage driver corruption, resulting in "parent snapshot does not exist" errors.
+
+        Returns:
+            True if prune succeeded, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                ["docker", "builder", "prune", "--all", "--force"],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def check_infrastructure_health(self) -> Tuple[bool, str]:
+        """
+        Check Docker infrastructure health before starting parallel tests.
+
+        Verifies:
+        1. Docker daemon is running
+        2. BuildKit is functional
+        3. No existing cache corruption
+
+        Returns:
+            Tuple of (healthy: bool, message: str)
+        """
+        try:
+            # Check Docker daemon
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                return False, "Docker daemon is not running or not accessible"
+
+            # Check BuildKit by attempting a trivial build
+            test_dockerfile = "FROM scratch\n"
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.Dockerfile', delete=False) as f:
+                f.write(test_dockerfile)
+                test_dockerfile_path = f.name
+
+            try:
+                result = subprocess.run(
+                    ["docker", "build", "-f", test_dockerfile_path, "-t", "infra-health-check:test", "."],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                # Check for corruption in test build output
+                if "parent snapshot" in result.stderr.lower() and "does not exist" in result.stderr.lower():
+                    return False, "Docker BuildKit cache is corrupted - prune required"
+
+                # Clean up test image
+                subprocess.run(
+                    ["docker", "rmi", "-f", "infra-health-check:test"],
+                    capture_output=True,
+                    timeout=10
+                )
+
+                return True, "Infrastructure health check passed"
+
+            finally:
+                import os
+                try:
+                    os.unlink(test_dockerfile_path)
+                except:
+                    pass
+
+        except subprocess.TimeoutExpired:
+            return False, "Docker health check timed out"
+        except Exception as e:
+            return False, f"Health check failed: {str(e)}"
 
 
 class EmpiricalTester:
@@ -389,8 +498,7 @@ class EmpiricalTester:
             # Set thread-local report directory for web search caching (thread-safe)
             import planner_agent
             planner_agent._set_report_directory(str(report_dir))
-            # Also set global for backwards compatibility
-            planner_agent.REPORT_DIRECTORY = str(report_dir)
+            # NOTE: No longer setting global REPORT_DIRECTORY - thread-local only for thread safety
 
             # Run analysis
             log_file = self.logs_dir / f"{repo_name}_agent_log.txt"

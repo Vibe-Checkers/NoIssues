@@ -158,7 +158,10 @@ class GPT5NanoWrapper(BaseChatModel):
         return "gpt-5-nano-wrapper"
 
     def bind_tools(self, tools, **kwargs):
-        return self.llm.bind_tools(tools, **kwargs)
+        """Bind tools while preserving the wrapper (keeps semaphore and param stripping)."""
+        bound = self.llm.bind_tools(tools, **kwargs)
+        # Return a new wrapper instance with the bound LLM
+        return GPT5NanoWrapper(llm=bound)
 
 
 # ============================================================================
@@ -169,8 +172,9 @@ class GPT5NanoWrapper(BaseChatModel):
 _thread_local = threading.local()
 
 # Global semaphore to limit concurrent API calls
-# Serialize API calls to prevent DNS resolution failures under parallel load
-_api_semaphore = threading.Semaphore(1)
+# Allow 2 concurrent calls for better parallelism while avoiding DNS issues
+# (Previously 1, but with connection pooling + keepalive, 2 is safe)
+_api_semaphore = threading.Semaphore(2)
 
 # ============================================================================
 # Singleton HTTP Client (Thread-Safe)
@@ -987,29 +991,15 @@ def search_web(query: str) -> str:
                             logger.error(f"Could not save web search file {idx}: {save_error}")
                             # Continue anyway - don't break the loop
                     
-                    # Prepare summary for agent (limited chars)
-                    page_summary = f"\n{'='*70}\nPAGE {idx}: {title}\nURL: {url}\n{'='*70}\n"
-                    page_summary += relevant_content
-                    
-                    # Check if we have room in output
-                    if total_output_chars + len(page_summary) <= max_output_chars:
-                        fetched_pages.append(page_summary)
-                        total_output_chars += len(page_summary)
-                    elif total_output_chars < max_output_chars - 500:  # Add partial if there's significant room
-                        remaining = max_output_chars - total_output_chars - 200
-                        if remaining > 500:
-                            page_summary_short = page_summary[:remaining] + "\n[Content truncated...]"
-                            fetched_pages.append(page_summary_short)
-                            total_output_chars = max_output_chars
-                    
-                    logger.info(f"Successfully processed page {idx}: {title} ({len(relevant_content)} chars extracted)")
-                    
+                    # NOTE: Don't append to fetched_pages yet - wait until after depth-1 crawling
+                    # so we only append once with all content included
+
                 except Exception as unexpected_error:
                     # Catch any other unexpected errors
                     error_msg = f"Unexpected error: {type(unexpected_error).__name__}: {str(unexpected_error)}"
                     logger.error(f"Unexpected error processing {url}: {error_msg}")
                     continue
-                    
+
                 # DEPTH-1 CRAWLING LOGIC
                 # If content seems generic (no strong "Build"/"Install" sections extracted), looks for links
                 is_generic = len(relevant_content) < 500 or "SECTION:" not in relevant_content
@@ -1068,10 +1058,11 @@ def search_web(query: str) -> str:
                         except Exception as e:
                             logger.warning(f"Failed to crawl sub-page {best_link}: {e}")
 
+                # NOW append to fetched_pages (after optional depth-1 crawling is complete)
                 # Prepare summary for agent (limited chars)
                 page_summary = f"\n{'='*70}\nPAGE {idx}: {title}\nURL: {url}\n{'='*70}\n"
                 page_summary += relevant_content
-                
+
                 # Check if we have room in output
                 if total_output_chars + len(page_summary) <= max_output_chars:
                     fetched_pages.append(page_summary)
@@ -1082,8 +1073,8 @@ def search_web(query: str) -> str:
                         page_summary_short = page_summary[:remaining] + "\n[Content truncated...]"
                         fetched_pages.append(page_summary_short)
                         total_output_chars = max_output_chars
-                
-                logger.info(f"Successfully processed page {idx}: {title} ({len(relevant_content)} chars extracted)")
+
+                logger.info(f"Successfully processed page {idx}: {title} ({len(relevant_content)} chars extracted, appended to results)")
             output = f"WEB SEARCH RESULTS - Build/Installation Guides\n"
             output += f"{'='*70}\n"
             output += f"Found {len(all_results)} total results, fetched top {len(fetched_pages)} pages\n"

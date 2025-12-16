@@ -26,9 +26,11 @@ import gc
 import shutil
 import ssl
 import certifi
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # Load environment variables FIRST before any other imports
@@ -60,6 +62,52 @@ print("[STARTUP] All imports loaded successfully!")
 # Token pricing (USD per 1K tokens). Override via env to match your Azure SKU.
 PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_PROMPT_COST_PER_1K", "0"))
 COMPLETION_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_COMPLETION_COST_PER_1K", "0"))
+
+
+def repo_slug(repo_url: str) -> str:
+    """
+    Generate a unique, filesystem-safe slug from a repository URL.
+
+    Prevents collisions for forks and same-name repos across different owners.
+    Format: owner__repo (e.g., "facebook__react", "myuser__react")
+
+    Args:
+        repo_url: GitHub repository URL
+
+    Returns:
+        Sanitized slug string safe for filesystem and Docker image names
+
+    Examples:
+        >>> repo_slug("https://github.com/facebook/react")
+        'facebook__react'
+        >>> repo_slug("https://github.com/myuser/react.git")
+        'myuser__react'
+    """
+    try:
+        path = urlparse(repo_url).path.strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+
+        # Split path into owner/repo
+        parts = path.split("/")
+        if len(parts) >= 2:
+            owner, repo = parts[0], parts[1]
+        else:
+            # Fallback: use just the repo name
+            owner = "unknown"
+            repo = parts[0] if parts else "repo"
+
+        # Create slug with owner__repo format
+        slug = f"{owner}__{repo}".lower()
+
+        # Sanitize: allow only alphanumeric, underscore, dash, dot
+        slug = re.sub(r"[^a-z0-9_.-]+", "-", slug)
+
+        return slug
+    except Exception:
+        # Ultimate fallback: hash the URL
+        import hashlib
+        return f"repo_{hashlib.md5(repo_url.encode()).hexdigest()[:12]}"
 
 
 def compute_token_cost(token_usage: Dict) -> Dict[str, float]:
@@ -111,7 +159,8 @@ class ParallelEmpiricalTester:
 
         # Initialize results storage
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.results_file = self.results_dir / f"results_{self.timestamp}.json"
+        self.results_jsonl_file = self.results_dir / f"results_{self.timestamp}.jsonl"  # Append-only
+        self.results_json_file = self.results_dir / f"results_{self.timestamp}.json"   # Final snapshot
         self.summary_file = self.results_dir / f"summary_{self.timestamp}.txt"
         self.master_log_file = self.results_dir / f"master_log_{self.timestamp}.txt"
 
@@ -143,18 +192,22 @@ class ParallelEmpiricalTester:
 
         Args:
             repo_url: GitHub repository URL
-            worker_id: Worker thread ID
+            worker_id: Task ID (index in repository list, NOT actual thread ID)
 
         Returns:
             Dictionary with complete test results
         """
+        # Generate unique slug to prevent collisions (e.g., facebook__react vs myuser__react)
+        slug = repo_slug(repo_url)
+        # Keep human-friendly short name for display
         repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
         test_start_time = time.time()
 
         result = {
             "repo_url": repo_url,
-            "repo_name": repo_name,
-            "worker_id": worker_id,
+            "repo_slug": slug,  # Unique identifier for filesystem/docker
+            "repo_name": repo_name,  # Human-friendly display name
+            "task_id": worker_id,  # Renamed from worker_id for clarity
             "timestamp": datetime.now().isoformat(),
             "agent_analysis": {},
             "dockerfile_test": {},
@@ -165,7 +218,9 @@ class ParallelEmpiricalTester:
         repo_path = None
 
         try:
-            self.log(repo_name, f"[Worker {worker_id}] Starting test", to_console=True)
+            # Get actual thread ID for accurate parallel debugging
+            thread_id = threading.get_ident()
+            self.log(repo_name, f"[Task {worker_id}, Thread {thread_id}] Starting test", to_console=True)
 
             # Step 1: Clone repository with retry logic
             self.log(repo_name, "Cloning repository...", to_console=True)
@@ -221,18 +276,17 @@ class ParallelEmpiricalTester:
             self.log(repo_name, "Running agent analysis...", to_console=True)
             analysis_start = time.time()
 
-            # Create report directory
-            report_dir = self.reports_dir / f"{repo_name}_{self.timestamp}"
+            # Create report directory using slug to prevent collisions
+            report_dir = self.reports_dir / f"{slug}_{self.timestamp}"
             report_dir.mkdir(exist_ok=True)
 
             # Set thread-local report directory for web search caching (thread-safe)
             import planner_agent
             planner_agent._set_report_directory(str(report_dir))
-            # Also set global for backwards compatibility
-            planner_agent.REPORT_DIRECTORY = str(report_dir)
+            # NOTE: No longer setting global REPORT_DIRECTORY - thread-local only for thread safety
 
-            # Run analysis with repo-specific log
-            log_file = self.logs_dir / f"{repo_name}_agent_log.txt"
+            # Run analysis with repo-specific log (use slug to prevent collisions)
+            log_file = self.logs_dir / f"{slug}_agent_log.txt"
             report_dir_result = analyze_repository(
                 agent, repo_path, repo_name, repo_url,
                 callback_handler, log_file_path=log_file, report_dir=report_dir
@@ -291,15 +345,58 @@ class ParallelEmpiricalTester:
                     # Read current Dockerfile content
                     with open(dockerfile_path, 'r', encoding='utf-8') as f:
                         dockerfile_content = f.read()
-                    
+
                     if iteration == 0:
                         result["dockerfile_content"] = dockerfile_content
                         self.log(repo_name, f"Testing initial Dockerfile (iteration {iteration})...", to_console=True)
                     else:
                         self.log(repo_name, f"Testing refined Dockerfile (iteration {iteration}/{max_refinement_iterations})...", to_console=True)
 
-                    # Test Docker build
-                    image_name = f"parallel-empirical-{repo_name.lower()}:latest"
+                    # CRITICAL: Strip digest pins to prevent BuildKit corruption
+                    # Analysis shows 100% correlation between @sha256 pins and layer corruption
+                    digests_removed = self._strip_digest_pins_from_dockerfile(dockerfile_path)
+                    if digests_removed:
+                        self.log(repo_name, "Stripped digest pins from FROM statements to prevent corruption", to_console=False)
+
+                    # Validate multi-stage COPY --from references
+                    multistage_validation = self._validate_multistage_references(dockerfile_path)
+                    if multistage_validation['invalid_refs']:
+                        self.log(
+                            repo_name,
+                            f"Warning: Invalid COPY --from references: {', '.join(multistage_validation['invalid_refs'])}",
+                            to_console=False
+                        )
+                        if multistage_validation['defined_stages']:
+                            self.log(
+                                repo_name,
+                                f"  - Defined stages are: {', '.join(multistage_validation['defined_stages'])}",
+                                to_console=False
+                            )
+                        else:
+                            self.log(
+                                repo_name,
+                                f"  - No build stages defined (this will try to pull from registry)",
+                                to_console=False
+                            )
+
+                    # Validate COPY sources exist in repository
+                    copy_validation = self._validate_copy_sources(dockerfile_path, repo_path)
+                    if copy_validation['missing']:
+                        self.log(
+                            repo_name,
+                            f"Warning: Missing COPY sources: {', '.join(copy_validation['missing'])}",
+                            to_console=False
+                        )
+                        if copy_validation['suggestions']:
+                            for missing, alternatives in copy_validation['suggestions'].items():
+                                self.log(
+                                    repo_name,
+                                    f"  - Instead of {missing}, found: {', '.join(alternatives)}",
+                                    to_console=False
+                                )
+
+                    # Test Docker build using slug to prevent image name collisions
+                    image_name = f"parallel-empirical-{slug}:latest"
                     docker_result = self.docker_tester.build_dockerfile(
                         str(dockerfile_path),
                         repo_path,
@@ -321,12 +418,16 @@ class ParallelEmpiricalTester:
                         result["dockerfile_test"]["success"] = True
                         result["dockerfile_test"]["final_iteration"] = iteration
                         iteration_result["message"] = "Build successful"
-                        
+
                         self.log(
                             repo_name,
                             f"Docker build SUCCESS at iteration {iteration} ({docker_result['duration_seconds']:.1f}s)",
                             to_console=True
                         )
+
+                        # Append successful iteration BEFORE breaking
+                        result["dockerfile_test"]["iterations"].append(iteration_result)
+
                         # Cleanup image
                         self.docker_tester.cleanup_image(image_name)
                         break  # Exit refinement loop on success
@@ -344,9 +445,9 @@ class ParallelEmpiricalTester:
                             to_console=True
                         )
 
-                        # Save error log for this iteration
+                        # Save error log for this iteration using slug
                         error_iteration_suffix = f"_iter{iteration}" if iteration > 0 else ""
-                        raw_error_file = self.docker_errors_dir / f"{repo_name}_docker_error{error_iteration_suffix}.log"
+                        raw_error_file = self.docker_errors_dir / f"{slug}_docker_error{error_iteration_suffix}.log"
                         with open(raw_error_file, 'w', encoding='utf-8') as f:
                             f.write(f"# Docker Build Error Log - Iteration {iteration}\n")
                             f.write(f"# Repository: {repo_name}\n")
@@ -360,7 +461,92 @@ class ParallelEmpiricalTester:
 
                         # Check if we should attempt refinement
                         if iteration < max_refinement_iterations:
-                            # Check for non-recoverable errors
+                            # Check for infrastructure corruption that requires prune
+                            if stage == "INFRASTRUCTURE_CORRUPTION":
+                                self.log(
+                                    repo_name,
+                                    f"INFRASTRUCTURE CORRUPTION DETECTED - Docker BuildKit cache corrupted",
+                                    to_console=True
+                                )
+                                self.log(
+                                    repo_name,
+                                    f"Attempting system-wide docker builder prune to fix corruption...",
+                                    to_console=True
+                                )
+
+                                # Execute prune to clear corrupted build cache
+                                prune_success = self.docker_tester.prune_build_cache()
+
+                                if prune_success:
+                                    # Exponential backoff after prune to let Docker stabilize
+                                    # Base delay: 2 seconds, doubles each iteration (2s, 4s, 8s, 16s...)
+                                    backoff_delay = min(2 ** iteration, 30)  # Cap at 30 seconds
+                                    self.log(
+                                        repo_name,
+                                        f"Docker builder prune completed - waiting {backoff_delay}s for stabilization...",
+                                        to_console=True
+                                    )
+                                    time.sleep(backoff_delay)
+
+                                    self.log(
+                                        repo_name,
+                                        f"Retrying build after prune (iteration {iteration + 1})...",
+                                        to_console=True
+                                    )
+                                    iteration_result["prune_executed"] = True
+                                    iteration_result["prune_success"] = True
+                                    iteration_result["backoff_delay_seconds"] = backoff_delay
+                                    result["dockerfile_test"]["iterations"].append(iteration_result)
+                                    # Continue to retry build after prune
+                                    continue
+                                else:
+                                    self.log(
+                                        repo_name,
+                                        f"Docker builder prune FAILED - cannot recover from corruption",
+                                        to_console=True
+                                    )
+                                    iteration_result["prune_executed"] = True
+                                    iteration_result["prune_success"] = False
+                                    iteration_result["refinement_skipped"] = True
+                                    iteration_result["reason"] = "Infrastructure corruption - prune failed"
+                                    result["dockerfile_test"]["iterations"].append(iteration_result)
+                                    break  # Cannot recover if prune fails
+
+                            # Check for transient errors that benefit from retry with backoff
+                            transient_stages = ["NETWORK", "IMAGE_PULL"]
+                            if stage in transient_stages and iteration < 3:  # Only retry transient errors up to 3 times
+                                # Exponential backoff for transient failures
+                                backoff_delay = min(2 ** iteration, 30)  # 1s, 2s, 4s... cap at 30s
+                                self.log(
+                                    repo_name,
+                                    f"Transient error '{stage}' detected - retrying after {backoff_delay}s backoff...",
+                                    to_console=True
+                                )
+                                time.sleep(backoff_delay)
+                                iteration_result["transient_retry"] = True
+                                iteration_result["backoff_delay_seconds"] = backoff_delay
+                                result["dockerfile_test"]["iterations"].append(iteration_result)
+                                # Retry without refinement (same Dockerfile)
+                                continue
+
+                            # Check for dependency rot (terminal - requires code/lockfile update)
+                            if stage == "DEPENDENCY_ROT":
+                                self.log(
+                                    repo_name,
+                                    f"DEPENDENCY ROT DETECTED - Package versions no longer available",
+                                    to_console=True
+                                )
+                                self.log(
+                                    repo_name,
+                                    f"This requires updating package.json/requirements.txt/lockfiles in source code",
+                                    to_console=True
+                                )
+                                iteration_result["refinement_skipped"] = True
+                                iteration_result["reason"] = "Dependency rot - requires code update, not Dockerfile changes"
+                                result["dockerfile_test"]["iterations"].append(iteration_result)
+                                break  # Cannot fix with Dockerfile iterations
+
+                            # Check for other non-recoverable errors
                             non_recoverable_stages = ["DOCKER_DAEMON", "BUILD_TIMEOUT", "BUILD_EXCEPTION"]
                             if stage in non_recoverable_stages:
                                 self.log(
@@ -414,7 +600,7 @@ class ParallelEmpiricalTester:
                                     f.write(f"{docker_result['error_snippet']}\n")
                                     f.write(f"{'-'*80}\n\n")
                                 
-                                f.write(f"See full error: docker_errors/{repo_name}_docker_error{error_iteration_suffix}.log\n")
+                                f.write(f"See full error: docker_errors/{slug}_docker_error{error_iteration_suffix}.log\n")
 
                     # Store iteration result
                     result["dockerfile_test"]["iterations"].append(iteration_result)
@@ -463,9 +649,9 @@ class ParallelEmpiricalTester:
                     except:
                         pass
 
-                # Cleanup Docker image
+                # Cleanup Docker image using slug
                 try:
-                    image_name = f"parallel-empirical-{repo_name.lower()}:latest"
+                    image_name = f"parallel-empirical-{slug}:latest"
                     self.docker_tester.cleanup_image(image_name)
                 except:
                     pass
@@ -476,9 +662,161 @@ class ParallelEmpiricalTester:
             # Save result
             with self.results_lock:
                 self.results.append(result)
-                self._save_incremental_results()
+                self._save_incremental_results(result)  # Append to JSONL
 
         return result
+
+    def _validate_multistage_references(self, dockerfile_path: Path) -> Dict[str, list]:
+        """
+        Validate that COPY --from=<stage> references actually exist as build stages.
+
+        Common issue: COPY --from=builder when no "FROM ... AS builder" exists,
+        causing Docker to try pulling "builder:latest" from registry.
+
+        Args:
+            dockerfile_path: Path to Dockerfile
+
+        Returns:
+            Dict with 'invalid_refs' (list of missing stage names) and 'defined_stages' (list of actual stages)
+        """
+        try:
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Find all defined stages: FROM ... AS <name>
+            defined_stages = set()
+            stage_pattern = r'FROM\s+[^\s]+\s+AS\s+([^\s]+)'
+            for match in re.finditer(stage_pattern, content, re.IGNORECASE):
+                stage_name = match.group(1).strip()
+                defined_stages.add(stage_name)
+
+            # Find all COPY --from=<stage> references
+            invalid_refs = []
+            copy_from_pattern = r'COPY\s+--from=([^\s]+)'
+            for match in re.finditer(copy_from_pattern, content, re.IGNORECASE):
+                ref = match.group(1).strip()
+                # Skip numeric stage indexes (e.g., --from=0)
+                if ref.isdigit():
+                    continue
+                # Check if this stage was defined
+                if ref not in defined_stages:
+                    invalid_refs.append(ref)
+
+            return {
+                'invalid_refs': invalid_refs,
+                'defined_stages': list(defined_stages)
+            }
+
+        except Exception as e:
+            print(f"[WARNING] Could not validate multi-stage references: {e}")
+            return {'invalid_refs': [], 'defined_stages': []}
+
+    def _validate_copy_sources(self, dockerfile_path: Path, repo_path: str) -> Dict[str, list]:
+        """
+        Validate that COPY sources in Dockerfile actually exist in the repository.
+
+        Common issue: Agent assumes requirements.txt exists but repo uses pyproject.toml.
+
+        Args:
+            dockerfile_path: Path to Dockerfile
+            repo_path: Path to repository root
+
+        Returns:
+            Dict with 'missing' (list of missing files) and 'suggestions' (alternatives found)
+        """
+        try:
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            repo_path_obj = Path(repo_path)
+            missing = []
+            suggestions = {}
+
+            # Parse COPY commands (ignore COPY --from=... multi-stage copies)
+            # Pattern: COPY <src> <dest> or COPY ["<src>", "<dest>"]
+            copy_pattern = r'^COPY\s+(?!--from)([^\s\[]+)'
+
+            for line in content.split('\n'):
+                line = line.strip()
+                match = re.match(copy_pattern, line, re.IGNORECASE)
+                if match:
+                    source = match.group(1)
+                    # Skip wildcards and context copies
+                    if source in ['.', '*', '**'] or '*' in source:
+                        continue
+
+                    # Check if source exists
+                    source_path = repo_path_obj / source
+                    if not source_path.exists():
+                        missing.append(source)
+
+                        # Look for alternatives (common substitutions)
+                        alternatives = []
+                        if 'requirements.txt' in source:
+                            for alt in ['pyproject.toml', 'setup.py', 'environment.yml', 'Pipfile']:
+                                if (repo_path_obj / alt).exists():
+                                    alternatives.append(alt)
+                        elif 'package.json' in source:
+                            for alt in ['yarn.lock', 'pnpm-lock.yaml']:
+                                if (repo_path_obj / alt).exists():
+                                    alternatives.append(alt)
+
+                        if alternatives:
+                            suggestions[source] = alternatives
+
+            return {'missing': missing, 'suggestions': suggestions}
+
+        except Exception as e:
+            print(f"[WARNING] Could not validate COPY sources: {e}")
+            return {'missing': [], 'suggestions': {}}
+
+    def _strip_digest_pins_from_dockerfile(self, dockerfile_path: Path) -> bool:
+        """
+        Remove digest pins (@sha256:...) from FROM statements to prevent BuildKit corruption.
+
+        CRITICAL: Analysis shows 100% correlation between digest-pinned images and
+        "parent snapshot does not exist" errors. Digest-pinned layers are treated as
+        dangling content and garbage-collected during parallel builds with cleanup.
+
+        Args:
+            dockerfile_path: Path to Dockerfile to sanitize
+
+        Returns:
+            True if any digests were removed, False otherwise
+        """
+        try:
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            original_content = content
+
+            # Remove digest pins: FROM ubuntu:22.04@sha256:... -> FROM ubuntu:22.04
+            # Pattern: @sha256:<64 hex chars>
+            content = re.sub(
+                r'(@sha256:[0-9a-f]{64})',
+                '',
+                content,
+                flags=re.IGNORECASE
+            )
+
+            # Also handle @sha512 if present
+            content = re.sub(
+                r'(@sha512:[0-9a-f]{128})',
+                '',
+                content,
+                flags=re.IGNORECASE
+            )
+
+            if content != original_content:
+                with open(dockerfile_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return True
+
+            return False
+
+        except Exception as e:
+            print(f"[WARNING] Could not strip digest pins: {e}")
+            return False
 
     def _sanitize_error_for_azure(self, error_log: str, max_length: int = 400) -> str:
         """Sanitize error log to avoid Azure content safety filters."""
@@ -1088,7 +1426,9 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
 
         # 2. Remove Docker image (even on failure to free disk space)
         if "dockerfile_test" in result:
-            image_name = f"parallel-empirical-{repo_name.lower()}:latest"
+            # Use slug from result for consistency
+            slug = result.get("repo_slug", repo_name.lower())
+            image_name = f"parallel-empirical-{slug}:latest"
             try:
                 self.docker_tester.cleanup_image(image_name)
                 self.log(repo_name, f"Removed Docker image {image_name}", to_console=False)
@@ -1125,18 +1465,20 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
         gc.collect()
         self.log(repo_name, "Cleanup complete", to_console=False)
 
-    def _save_incremental_results(self):
-        """Save results incrementally (already locked)."""
+    def _save_incremental_results(self, result: Dict):
+        """
+        Append single result to JSONL file (O(1) instead of O(n)).
+        Already inside results_lock context.
+
+        Args:
+            result: The test result to append
+        """
         try:
-            with open(self.results_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "timestamp": self.timestamp,
-                    "max_workers": self.max_workers,
-                    "total_tested": len(self.results),
-                    "results": self.results
-                }, f, indent=2, ensure_ascii=False)
+            # Append to JSONL (one line per result, append-only)
+            with open(self.results_jsonl_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(result, ensure_ascii=False) + '\n')
         except Exception as e:
-            print(f"[WARNING] Could not save incremental results: {e}")
+            print(f"[WARNING] Could not append to JSONL results: {e}")
 
     def run_parallel_tests(self, repo_urls: List[str]) -> Dict:
         """
@@ -1154,6 +1496,28 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
         print("="*80)
         print(f"\nResults directory: {self.results_dir.absolute()}")
         print(f"Master log: {self.master_log_file}")
+
+        # Pre-test infrastructure health check
+        print("\n[HEALTH CHECK] Verifying Docker infrastructure...")
+        healthy, health_message = self.docker_tester.check_infrastructure_health()
+
+        if not healthy:
+            print(f"[HEALTH CHECK] FAILED: {health_message}")
+            if "corrupted" in health_message.lower():
+                print("[HEALTH CHECK] Attempting to fix corruption with docker builder prune...")
+                if self.docker_tester.prune_build_cache():
+                    print("[HEALTH CHECK] Prune successful - rechecking infrastructure...")
+                    healthy, health_message = self.docker_tester.check_infrastructure_health()
+                    if healthy:
+                        print(f"[HEALTH CHECK] PASSED: {health_message}")
+                    else:
+                        print(f"[HEALTH CHECK] Still unhealthy after prune: {health_message}")
+                        print("[HEALTH CHECK] WARNING: Proceeding with tests, but failures likely...")
+                else:
+                    print("[HEALTH CHECK] Prune failed - proceeding anyway...")
+        else:
+            print(f"[HEALTH CHECK] PASSED: {health_message}")
+
         print("\nStarting parallel tests...\n")
 
         overall_start = time.time()
@@ -1300,7 +1664,8 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                 "avg_refinement_attempts": sum(iteration_stats["refinement_attempts"]) / len(iteration_stats["refinement_attempts"]) if iteration_stats["refinement_attempts"] else 0,
                 "total_refinement_attempts": sum(iteration_stats["refinement_attempts"])
             },
-            "results_file": str(self.results_file),
+            "results_jsonl_file": str(self.results_jsonl_file),
+            "results_json_file": str(self.results_json_file),
             "master_log": str(self.master_log_file)
         }
 
@@ -1317,8 +1682,10 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
             f.write("OVERALL RESULTS\n")
             f.write("-"*80 + "\n")
             f.write(f"Total Repositories: {total}\n")
-            f.write(f"Successful: {successful} ({successful/total*100:.1f}%)\n")
-            f.write(f"Failed: {failed} ({failed/total*100:.1f}%)\n\n")
+            success_pct = (successful/total*100) if total > 0 else 0
+            failed_pct = (failed/total*100) if total > 0 else 0
+            f.write(f"Successful: {successful} ({success_pct:.1f}%)\n")
+            f.write(f"Failed: {failed} ({failed_pct:.1f}%)\n\n")
 
             f.write("PERFORMANCE METRICS\n")
             f.write("-"*80 + "\n")
@@ -1334,7 +1701,9 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                 f.write("FAILURE BREAKDOWN BY STAGE\n")
                 f.write("-"*80 + "\n")
                 for stage, count in sorted(failure_stages.items(), key=lambda x: x[1], reverse=True):
-                    f.write(f"{stage:40s}: {count:3d} ({count/failed*100:.1f}%)\n")
+                    # Guard against division by zero if all tests succeed
+                    pct = (count / max(failed, 1) * 100)
+                    f.write(f"{stage:40s}: {count:3d} ({pct:.1f}%)\n")
                 f.write("\n")
             
             if iteration_stats["succeeded_at_iteration"] or iteration_stats["refinement_attempts"]:
@@ -1396,8 +1765,10 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
         print("PARALLEL EMPIRICAL TESTING SUMMARY")
         print(f"{'='*80}")
         print(f"Total Repositories: {total}")
-        print(f"Successful: {successful} ({successful/total*100:.1f}%)")
-        print(f"Failed: {failed} ({failed/total*100:.1f}%)")
+        success_pct_console = (successful/total*100) if total > 0 else 0
+        failed_pct_console = (failed/total*100) if total > 0 else 0
+        print(f"Successful: {successful} ({success_pct_console:.1f}%)")
+        print(f"Failed: {failed} ({failed_pct_console:.1f}%)")
         print(f"Overall Duration: {overall_duration/60:.2f} minutes")
         print(f"Theoretical Sequential: {theoretical_sequential/60:.2f} minutes")
         print(f"Speedup: {speedup:.2f}x")
@@ -1438,10 +1809,24 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                 iter_label = "Initial" if iter_num == 0 else f"Refinement {iter_num}"
                 print(f"  {iter_label:20s}: {count:3d} repositories")
 
+        # Save final JSON snapshot (pretty-printed for human reading)
+        try:
+            with open(self.results_json_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "timestamp": self.timestamp,
+                    "max_workers": self.max_workers,
+                    "total_tested": len(self.results),
+                    "summary": summary,
+                    "results": self.results
+                }, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[WARNING] Could not save final JSON snapshot: {e}")
+
         print(f"\nResults saved to: {self.results_dir.absolute()}")
         print(f"Summary: {self.summary_file}")
         print(f"Master log: {self.master_log_file}")
-        print(f"Detailed results: {self.results_file}")
+        print(f"Incremental results (JSONL): {self.results_jsonl_file}")
+        print(f"Final results (JSON): {self.results_json_file}")
 
         return summary
 
@@ -1486,6 +1871,17 @@ def main():
     if len(sys.argv) > 2 and sys.argv[2] == "--workers":
         if len(sys.argv) > 3:
             max_workers = int(sys.argv[3])
+            # Warn about high concurrency risks
+            if max_workers > 8:
+                print("\n" + "="*80)
+                print("WARNING: High Worker Count Detected")
+                print("="*80)
+                print(f"You specified {max_workers} workers, which may cause:")
+                print("  - Docker BuildKit cache corruption (race conditions)")
+                print("  - Overlay2 storage driver issues")
+                print("  - 'parent snapshot does not exist' errors")
+                print("\nRECOMMENDATION: Use 4-8 workers for stability")
+                print("="*80 + "\n")
         else:
             print("ERROR: --workers requires a number")
             sys.exit(1)
