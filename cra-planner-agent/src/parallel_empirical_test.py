@@ -516,22 +516,10 @@ class ParallelEmpiricalTester:
                                     result["dockerfile_test"]["iterations"].append(iteration_result)
                                     break  # Cannot recover if prune fails
 
-                            # Check for transient errors that benefit from retry with backoff
-                            transient_stages = ["NETWORK", "IMAGE_PULL"]
-                            if stage in transient_stages and iteration < 3:  # Only retry transient errors up to 3 times
-                                # Exponential backoff for transient failures
-                                backoff_delay = min(2 ** iteration, 30)  # 1s, 2s, 4s... cap at 30s
-                                self.log(
-                                    repo_name,
-                                    f"Transient error '{stage}' detected - retrying after {backoff_delay}s backoff...",
-                                    to_console=True
-                                )
-                                time.sleep(backoff_delay)
-                                iteration_result["transient_retry"] = True
-                                iteration_result["backoff_delay_seconds"] = backoff_delay
-                                result["dockerfile_test"]["iterations"].append(iteration_result)
-                                # Retry without refinement (same Dockerfile)
-                                continue
+                            # NOTE: Transient error retry logic (NETWORK/IMAGE_PULL) has been removed.
+                            # User policy: Treat ALL errors as important and requiring agent intervention immediately.
+                            # No blind retries.
+                            pass
 
                             # Check for dependency rot (terminal - requires code/lockfile update)
                             if stage == "DEPENDENCY_ROT":
