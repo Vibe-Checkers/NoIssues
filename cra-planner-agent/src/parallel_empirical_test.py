@@ -29,7 +29,7 @@ import certifi
 import re
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -338,6 +338,10 @@ class ParallelEmpiricalTester:
                 max_refinement_iterations = 10
                 iteration_success = False
 
+                # Initialize state for refinement tracking
+                previous_from_lines = []
+                previous_tools_used = []
+
                 # Iterative refinement loop
                 for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-10 = refinements
                     iteration_start_time = time.time()
@@ -563,11 +567,27 @@ class ParallelEmpiricalTester:
                             self.log(repo_name, f"Attempting Dockerfile refinement (iteration {iteration + 1}/{max_refinement_iterations})...", to_console=True)
                             
                             refinement_start = time.time()
-                            refinement_success = self._refine_dockerfile_with_error_feedback(
-                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, iteration + 1, docker_result
+                            refinement_success, tools_used = self._refine_dockerfile_with_error_feedback(
+                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, 
+                                iteration + 1, docker_result, previous_from_lines, previous_tools_used
                             )
                             refinement_duration = time.time() - refinement_start
                             
+                            # Update state for next iteration
+                            if tools_used:
+                                previous_tools_used = tools_used
+                            
+                            # Track FROM line changes
+                            try:
+                                with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                                    current_content = f.read()
+                                for line in current_content.split('\n'):
+                                    if line.strip().upper().startswith('FROM '):
+                                        previous_from_lines.append(line.strip())
+                                        break
+                            except:
+                                pass
+
                             if refinement_success:
                                 self.log(repo_name, f"Dockerfile refined successfully ({refinement_duration:.1f}s)", to_console=True)
                                 iteration_result["refinement_success"] = True
@@ -855,8 +875,9 @@ class ParallelEmpiricalTester:
 
     def _refine_dockerfile_with_error_feedback(
         self, agent, dockerfile_path: Path, error_log_path: Path, 
-        repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None
-    ) -> bool:
+        repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None,
+        previous_from_lines: List[str] = None, previous_tools_used: List[str] = None
+    ) -> Tuple[bool, List[str]]:
         """
         Refine Dockerfile based on build error feedback with enhanced analysis.
         
@@ -873,7 +894,7 @@ class ParallelEmpiricalTester:
             docker_result: Docker build result dict with stage and failed_command info
             
         Returns:
-            True if refinement appears successful (Dockerfile was modified), False otherwise
+            Tuple of (Success bool, List of tools used)
         """
         try:
             # Read current Dockerfile
@@ -886,7 +907,29 @@ class ParallelEmpiricalTester:
             
             # Get absolute path for Dockerfile (agent can read from repo_path context)
             dockerfile_absolute = str(dockerfile_path.absolute())
+
+            # Initialize tools_used for return tracking
+            result_tools_used = []
             
+            # STAGNATION DETECTION: Check if we are stuck on the same base image
+            stagnation_prefix = ""
+            current_from = ""
+            for line in current_dockerfile.split('\n'):
+                if line.strip().upper().startswith('FROM '):
+                    current_from = line.strip()
+                    break
+            
+            if previous_from_lines and len(previous_from_lines) >= 2 and current_from:
+                # Check last 2 iterations
+                if previous_from_lines[-1] == current_from and previous_from_lines[-2] == current_from:
+                    self.log(repo_name, "STAGNATION DETECTED: Base image hasn't changed for 3 attempts despite failures!", to_console=True)
+                    stagnation_prefix = f"""CRITICAL - STAGNATION DETECTED!
+You have tried the base image '{current_from}' multiple times and it keeps failing.
+STOP TRYING THE SAME IMAGE. YOU MUST CHANGE THE BASE IMAGE TO SOMETHING ELSE.
+Use `DockerImageSearch` to find a completely different tag or base image.
+DO NOT use the same tag again.
+"""
+
             # Detect error type for targeted guidance
             error_log_lower = error_log.lower()
             
@@ -1259,6 +1302,21 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
 
             self.log(repo_name, f"Requesting enhanced Dockerfile refinement (iteration {iteration})...", to_console=False)
             
+            # If this is not the first iteration, check if agent was lazy (didn't use search tools)
+            tool_warning = ""
+            if iteration > 0 and previous_tools_used:
+                # List of search/investigation tools
+                search_tools = ['SearchDockerError', 'SearchWeb', 'DockerImageSearch', 'GoogleSearch', 'BingSearch']
+                used_search = any(t in search_tools for t in previous_tools_used)
+                
+                if not used_search:
+                    self.log(repo_name, "Agent did not use search tools in previous iteration - injecting warning", to_console=True)
+                    tool_warning = """
+WARNING: In the previous iteration, you attempted to fix the error WITHOUT using any search tools.
+You are blindly guessing!
+YOU MUST USE 'SearchDockerError' or 'SearchWeb' to understand the error before proposing a fix.
+"""
+
             # Invoke agent with max_iterations=8 but simpler prompts to force tool usage
             # Shorter prompts = agent focuses more on tool calls vs text generation
             from run_agent import _invoke_agent_with_iteration_limit
@@ -1267,7 +1325,7 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                 result = _invoke_agent_with_iteration_limit(
                     agent,
                     {
-                        "input": refinement_query,
+                        "input": stagnation_prefix + tool_warning + refinement_query,
                         "chat_history": f"Repository: {repo_name}. Dockerfile iteration {iteration}. Use tools to investigate."
                     },
                     max_iterations=10  # Enough iterations to use multiple tools and analyze
@@ -1292,24 +1350,25 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
                         result = {"output": fallback_result.content, "intermediate_steps": []}
                     except Exception as fallback_error:
                         self.log(repo_name, f"Fallback LLM also failed: {fallback_error}", to_console=False)
-                        return False
+                        return False, []
                 else:
                     raise  # Re-raise if not iteration limit error
             
             # Log tool usage during refinement for debugging
             if 'intermediate_steps' in result:
                 tools_used = [action.tool for action, _ in result['intermediate_steps']]
+                result_tools_used = tools_used  # Store for return
                 self.log(repo_name, f"Refinement tools used: {', '.join(tools_used) if tools_used else 'none'}", to_console=True)
                 
-                # Special check: Did agent use DockerImageSearch for image pull errors?
                 if is_image_pull_error and 'DockerImageSearch' not in tools_used:
                     self.log(repo_name, "WARNING: IMAGE_PULL error but agent didn't use DockerImageSearch!", to_console=True)
+                    # We could add this warning to the next prompt, but stagnation logic above covers it better now
             
             refined_output = result.get('output', '').strip()
             
             if not refined_output:
                 self.log(repo_name, "Agent returned empty output for refinement", to_console=False)
-                return False
+                return False, result_tools_used
             
             # Extract Dockerfile content from output (may be wrapped in code blocks or have prose)
             refined_dockerfile = refined_output
@@ -1346,7 +1405,7 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
             elif from_index == -1:
                 # No FROM found at all - this is a failed refinement
                 self.log(repo_name, "Refined output does not contain FROM statement, refinement may have failed", to_console=True)
-                return False
+                return False, result_tools_used
             
             # Final cleanup: remove any trailing prose after Dockerfile content
             # Dockerfile ends when we see patterns like "This Dockerfile..." or explanation text
@@ -1366,12 +1425,12 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
             # Final validation: must have FROM
             if 'FROM' not in refined_dockerfile.upper():
                 self.log(repo_name, "Refined output does not contain FROM statement after cleanup, refinement may have failed", to_console=True)
-                return False
+                return False, result_tools_used
             
             # Check if Dockerfile actually changed
             if refined_dockerfile.strip() == current_dockerfile.strip():
                 self.log(repo_name, "Refined Dockerfile is identical to current one", to_console=True)
-                return False
+                return False, result_tools_used
             
             # Log what changed for debugging
             current_from = None
@@ -1401,13 +1460,13 @@ OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"
             
             self.log(repo_name, f"Dockerfile updated (backup: {backup_path.name})", to_console=False)
             
-            return True
+            return True, result_tools_used
             
         except Exception as e:
             self.log(repo_name, f"Exception during Dockerfile refinement: {e}", to_console=False)
             import traceback
             self.log(repo_name, f"Traceback: {traceback.format_exc()}", to_console=False)
-            return False
+            return False, []
 
     def _aggressive_cleanup(self, repo_name: str, repo_path: Optional[str], result: Dict):
         """

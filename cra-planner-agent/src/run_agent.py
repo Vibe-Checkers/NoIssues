@@ -632,14 +632,17 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
 
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install', 'build', 'run', or 'start' commands mentioned in configuration files or scripts. Identify: entry points, default ports, required environment variables, volume mounts, and any runtime configuration. Compare with official documentation.",
 
-            """Based on the information you gathered in Query 1, 2, and 3, create a Dockerfile AND a .dockerignore file.
+        # NEW STEP: Mandatory Base Image Verification
+        "**MANDATORY VERIFICATION STEP**: Before generating the Dockerfile, you MUST identify and VERIFY the best Docker base image. 1) Decide on the image (e.g., node:18-alpine, python:3.9-slim). 2) Use `DockerImageSearch` with input 'tags:<image>' to list valid tags. 3) Select a tag that is verifyingly compatible with the host architecture. 4) Use `DockerImageSearch` with input '<image>:<tag>' to confirm it exists. Output ONLY the verified 'FROM' line you will use.",
 
-**IMPORTANT**: You already have all the information needed from the previous 3 queries:
-- Query 1: Project structure, type, and configuration files
-- Query 2: Dependencies, build scripts, and requirements
-- Query 3: Installation instructions, entry points, and environment setup
+            """Based on the information you gathered in Query 1, 2, 3, and the VERIFIED base image from Query 4, create a Dockerfile AND a .dockerignore file.
 
-**YOUR TASK**: Generate the Dockerfile and .dockerignore using the information from previous queries.
+**IMPORTANT**: You already have all the information needed:
+- Query 1-3: Project structure, dependencies, build instructions
+- Query 4: The VERIFIED base image (use this EXACTLY)
+
+**YOUR TASK**: Generate the Dockerfile and .dockerignore.
+
 
 **OPTIONAL**: You MAY use DockerImageSearch ONLY if you need to verify a base image tag exists. Otherwise, provide the Final Answer immediately.
 

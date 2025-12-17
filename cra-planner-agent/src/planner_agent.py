@@ -499,6 +499,9 @@ def search_docker_error(error_keywords: str) -> str:
     try:
         logger.info(f"Searching Docker error solutions for: {error_keywords}")
         
+        results = []
+        
+        # PRIMARY METHOD: DuckDuckGo Search (via ddgs)
         try:
             from ddgs import DDGS
             import requests
@@ -510,13 +513,13 @@ def search_docker_error(error_keywords: str) -> str:
                 f"docker {error_keywords} solution",
             ]
             
-            results = []
             seen_urls = set()
             
             with DDGS() as ddgs:
                 for query in search_queries:
                     try:
-                        search_results = list(ddgs.text(query, max_results=4))
+                        # Fetch more results to filter duplicates
+                        search_results = list(ddgs.text(query, max_results=5))
                         for result in search_results:
                             url = result.get('href', '')
                             if url and url not in seen_urls:
@@ -529,53 +532,67 @@ def search_docker_error(error_keywords: str) -> str:
                                 if len(results) >= 6:
                                     break
                     except Exception as e:
-                        logger.warning(f"Search query failed: {query} - {e}")
+                        logger.warning(f"DDGS query failed: {query} - {e}")
                         continue
                     
                     if len(results) >= 6:
                         break
-            
-            if not results:
-                return f"No solutions found for: {error_keywords}. Try:\n1) Use DockerImageSearch with 'tags:<image>' to list available tags\n2) Check Dockerfile syntax\n3) Verify dependency versions"
-            
-            summary_parts = [f"Web Search Results for '{error_keywords}':\n{'='*60}\n"]
-            
-            for idx, result in enumerate(results[:5], 1):
-                summary_parts.append(f"\n{idx}. {result['title']}")
-                summary_parts.append(f"   URL: {result['url']}")
-                if result['snippet']:
-                    snippet = result['snippet'][:300]
-                    summary_parts.append(f"   {snippet}...")
-                summary_parts.append("")
-                
-            # FETCH TOP RESULT CONTENT (Depth-1)
-            # This is critical for actually solving the error
-            if results:
-                top_url = results[0]['url']
-                try:
-                    logger.info(f"Fetching top error solution: {top_url}")
-                    # Use a short timeout to keep it fast
-                    resp = requests.get(top_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-                    if resp.status_code == 200:
-                        soup = BeautifulSoup(resp.content, 'html.parser')
-                        # Use our smart extraction
-                        content = extract_relevant_sections(soup, max_chars_per_section=2000, max_total_chars=3000)
                         
-                        summary_parts.append(f"\n{'='*60}\nTOP SOLUTION DETAILED CONTENT ({top_url})\n{'='*60}\n{content}")
-                except Exception as e:
-                    logger.warning(f"Could not fetch top error solution {top_url}: {e}")
-            
-            summary_parts.append(f"\nTIP: Use FetchWebPage tool to read full content from other URLs")
-            
-            summary = '\n'.join(summary_parts)
-            
-            if len(summary) > 6000: # Increased limit since we have real content
-                summary = summary[:6000] + "\n\n[Truncated]"
-            
-            return summary
-            
         except ImportError:
-            return "Error: duckduckgo_search (ddgs) not installed. Cannot search for Docker error solutions."
+            logger.warning("ddgs not installed, falling back to SearchWeb")
+        except Exception as e:
+            logger.warning(f"DDGS search failed completely: {e}")
+            
+        # FALLBACK METHOD: Standard SearchWeb (using requests/BeautifulSoup loop if available)
+        if not results:
+            logger.info("Using fallback SearchWeb implementation for error search...")
+            try:
+                # Reuse the existing search_web tool logic if imported or accessible
+                # Since we are inside the same module, we can call search_web directly
+                fallback_result = search_web(error_keywords)
+                if "No results found" not in fallback_result:
+                    return f"FALLBACK SEARCH RESULTS:\n{fallback_result}"
+            except Exception as e:
+                logger.error(f"Fallback search also failed: {e}")
+
+        if not results:
+            return f"No solutions found for: {error_keywords}. Try:\n1) Use DockerImageSearch with 'tags:<image>' to list available tags\n2) Check Dockerfile syntax\n3) Verify dependency versions"
+        
+        summary_parts = [f"Web Search Results for '{error_keywords}':\n{'='*60}\n"]
+        
+        for idx, result in enumerate(results[:5], 1):
+            summary_parts.append(f"\n{idx}. {result['title']}")
+            summary_parts.append(f"   URL: {result['url']}")
+            if result['snippet']:
+                snippet = result['snippet'][:300]
+                summary_parts.append(f"   {snippet}...")
+            summary_parts.append("")
+            
+        # FETCH TOP RESULT CONTENT (Depth-1)
+        # This is critical for actually solving the error
+        if results:
+            top_url = results[0]['url']
+            try:
+                logger.info(f"Fetching top error solution: {top_url}")
+                # Use a short timeout to keep it fast
+                resp = requests.get(top_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    # Use our smart extraction
+                    content = extract_relevant_sections(soup, max_chars_per_section=2000, max_total_chars=3000)
+                    
+                    summary_parts.append(f"\n{'='*60}\nTOP SOLUTION DETAILED CONTENT ({top_url})\n{'='*60}\n{content}")
+            except Exception as e:
+                logger.warning(f"Could not fetch top error solution {top_url}: {e}")
+        
+        summary_parts.append(f"\nTIP: Use FetchWebPage tool to read full content from other URLs")
+        
+        summary = '\n'.join(summary_parts)
+        
+        if len(summary) > 6000: # Increased limit since we have real content
+            summary = summary[:6000] + "\n\n[Truncated]"
+        
+        return summary
         
     except Exception as e:
         logger.error(f"Docker error search failed: {e}")
@@ -1738,281 +1755,251 @@ def _get_host_platform() -> tuple:
         return (f'linux/{machine}', machine)
 
 
+def _get_expanded_platform_info():
+    """Helper to get detailed platform info for Docker compatibility checks."""
+    import platform
+    host_arch = platform.machine().lower()
+    
+    if host_arch in ['arm64', 'aarch64']:
+        return {
+            'docker_arch': 'arm64',
+            'variants': ['arm64', 'aarch64', 'arm64/v8'],
+            'display_name': 'ARM64',
+            'description': 'Apple Silicon / Raspberry Pi'
+        }
+    elif host_arch in ['x86_64', 'amd64']:
+        return {
+            'docker_arch': 'amd64',
+            'variants': ['amd64', 'x86_64'],
+            'display_name': 'AMD64',
+            'description': 'Intel/AMD x86_64'
+        }
+    else:
+        return {
+            'docker_arch': host_arch,
+            'variants': [host_arch],
+            'display_name': host_arch.upper(),
+            'description': f'{host_arch} processor'
+        }
+
+def _docker_hub_list_tags(image_name: str, platform_info: dict) -> str:
+    """Helper to list and filter tags for an image."""
+    import requests
+    
+    # Handle official images
+    api_image_name = f"library/{image_name}" if "/" not in image_name else image_name
+    url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags"
+    params = {"page_size": 100, "ordering": "-last_updated"}  # Increased to 100
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code == 404:
+            return f"ERROR: Image '{image_name}' not found on Docker Hub. Check the image name."
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        
+        if not results:
+            return f"No tags found for image: {image_name}"
+
+        # Categorization buckets
+        categories = {
+            "versioned": [],
+            "slim": [],
+            "jdk": [], 
+            "latest": [],
+            "compatible": [],
+            "other": []
+        }
+        
+        for tag_info in results:
+            tag = tag_info.get("name", "")
+            last_updated = tag_info.get("last_updated", "")[:10]
+            
+            # Check architecture support
+            images = tag_info.get("images", [])
+            archs = [img.get("architecture", "") for img in images]
+            is_compatible = any(arch in platform_info['variants'] for arch in archs)
+            
+            compat_marker = "[OK]" if is_compatible else "[!!]"
+            entry = f"{tag} {compat_marker} (updated: {last_updated})"
+            
+            if is_compatible:
+                categories["compatible"].append(tag)
+                
+            tag_lower = tag.lower()
+            if tag_lower in ["latest", "stable"]:
+                categories["latest"].append(entry)
+            elif any(x in tag_lower for x in ["slim", "alpine", "minimal", "distroless"]):
+                categories["slim"].append(entry)
+            elif any(x in tag_lower for x in ["jdk", "jre", "openjdk", "temurin"]):
+                categories["jdk"].append(entry)
+            elif any(c.isdigit() for c in tag) and "." in tag:
+                categories["versioned"].append(entry)
+            else:
+                categories["other"].append(entry)
+
+        # Build Output
+        output = [
+            f"Available tags for '{image_name}':",
+            f"{'='*60}",
+            f"HOST: {platform_info['display_name']} ({platform_info['description']})",
+            f"[OK] = Compatible  |  [!!] = INCOMPATIBLE",
+            ""
+        ]
+        
+        if categories["versioned"]:
+            output.append("VERSIONED TAGS (Recommended):")
+            output.extend([f"  - {image_name}:{t.split(' ')[0]}" for t in categories["versioned"][:15]])
+            output.append("")
+            
+        if categories["jdk"]:
+            output.append("JAVA/JDK TAGS:")
+            output.extend([f"  - {image_name}:{t.split(' ')[0]}" for t in categories["jdk"][:10]])
+            output.append("")
+            
+        if categories["slim"]:
+            output.append("SLIM/ALPINE TAGS:")
+            output.extend([f"  - {image_name}:{t.split(' ')[0]}" for t in categories["slim"][:10]])
+            output.append("")
+            
+        if categories["latest"]:
+            output.append("LATEST (Use with caution):")
+            output.extend([f"  - {image_name}:{t.split(' ')[0]}" for t in categories["latest"]])
+            output.append("")
+            
+        # Smart Recommendation
+        output.append("RECOMMENDATION:")
+        if categories["compatible"]:
+            rec = categories["compatible"][0]
+            # Try to find a better recommendation (versioned > latest)
+            for t in categories["compatible"]:
+                if any(c.isdigit() for c in t) and "latest" not in t.lower():
+                    rec = t
+                    break
+            output.append(f"Use: {image_name}:{rec} (Verified {platform_info['display_name']} compatible)")
+        else:
+            output.append(f"WARNING: No {platform_info['display_name']} compatible tags found!")
+            
+        return "\n".join(output)
+
+    except Exception as e:
+        return f"Error listing tags: {str(e)}"
+
+def _docker_hub_verify_tag(image_name: str, tag: str, platform_info: dict) -> str:
+    """Helper to verify a specific tag exists and check architecture."""
+    import requests
+    
+    api_image_name = f"library/{image_name}" if "/" not in image_name else image_name
+    url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags/{tag}"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            images = data.get("images", [])
+            archs = list(set([img.get("architecture", "unknown") for img in images]))
+            
+            is_compatible = any(arch in platform_info['variants'] for arch in archs)
+            
+            status = "COMPATIBLE" if is_compatible else "NOT COMPATIBLE"
+            
+            output = [
+                f"VERIFIED: {image_name}:{tag} EXISTS",
+                f"   Architectures: {', '.join(sorted(archs))}",
+                f"   Host Platform: {platform_info['display_name']} -> {status}",
+                ""
+            ]
+            
+            if is_compatible:
+                output.append(f"   Safe to use: FROM {image_name}:{tag}")
+            else:
+                output.append("   WARNING: Image verified but incompatible with host architecture!")
+                output.append(f"   The build will fail on {platform_info['display_name']}.")
+                
+            return "\n".join(output)
+            
+        elif response.status_code == 404:
+            return f"NOT FOUND: {image_name}:{tag} does not exist.\nUse 'tags:{image_name}' to see valid tags."
+        else:
+            return f"Error verifying verify: HTTP {response.status_code}"
+            
+    except Exception as e:
+        return f"Error verifying tag: {str(e)}"
+
+def _docker_hub_search(term: str) -> str:
+    """Helper to search Docker Hub with smart sorting (Official first)."""
+    import requests
+    
+    url = "https://hub.docker.com/v2/search/repositories"
+    params = {"query": term, "page_size": 10}
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        
+        if not results:
+            return f"No results found for '{term}'"
+            
+        # IMPROVEMENT: Sort Official images to top
+        results.sort(key=lambda x: (not x.get("is_official", False), -x.get("star_count", 0)))
+        
+        output = [f"Docker Hub Search Results for '{term}':", f"{'='*60}"]
+        
+        for res in results[:5]:  # Top 5
+            name = res.get("repo_name")
+            is_official = " [OFFICIAL]" if res.get("is_official") else ""
+            stars = res.get("star_count", 0)
+            desc = res.get("short_description", "")[:80] + "..." if len(res.get("short_description", "")) > 80 else res.get("short_description", "")
+            
+            simple_name = name.split("/")[-1] if "/" in name else name
+            
+            output.append(f"- {name}{is_official}")
+            output.append(f"  Stars: {stars} | {desc}")
+            output.append(f"  List tags: 'tags:{simple_name}'")
+            output.append(f"{'-'*60}")
+            
+        return "\n".join(output)
+
+    except Exception as e:
+        return f"Error searching: {str(e)}"
+
 def docker_image_search(query: str) -> str:
     """
     Search Docker Hub for images, list available tags, or verify a specific tag exists.
-    Automatically detects host platform and checks for compatibility.
-    
-    THREE MODES OF OPERATION:
-    1. "tags:<image>" - LIST all available tags (e.g., "tags:maven", "tags:python")
-    2. "<image>:<tag>" - VERIFY specific tag exists (e.g., "python:3.9", "maven:3.8.7-openjdk-11")
-    3. "<search term>" - SEARCH for images (e.g., "python", "nodejs")
     
     Args:
         query: 
-            - "tags:<image>" to list available tags for an image
-            - "<image>:<tag>" to verify a specific tag exists
-            - "<search term>" to search for images
-        
-    Returns:
-        List of tags, verification result, or search results (with platform compatibility info)
+            - "tags:<image>" to list available tags (e.g., "tags:python")
+            - "<image>:<tag>" to verify a specific tag (e.g., "python:3.9")
+            - "<search term>" to search for images (e.g., "python")
     """
     try:
         import requests
         
-        # Detect host platform for compatibility checking
-        host_platform, host_arch = _get_host_platform()
+        # Get host info once
+        platform_info = _get_expanded_platform_info()
+        logger.info(f"Docker Hub query: {query} (Host: {platform_info['display_name']})")
         
-        logger.info(f"Docker Hub query: {query} (host: {host_platform})")
+        query = query.strip()
         
-        # MODE 1: List available tags for an image
+        # Dispatch based on query pattern
         if query.lower().startswith("tags:"):
-            image_name = query[5:].strip()  # Remove "tags:" prefix
+            image_name = query[5:].strip()
+            return _docker_hub_list_tags(image_name, platform_info)
             
-            # Handle official images (e.g., python -> library/python)
-            api_image_name = image_name
-            if "/" not in image_name:
-                api_image_name = f"library/{image_name}"
-            
-            url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags"
-            params = {"page_size": 50, "ordering": "-last_updated"}  # Get most recent 50 tags
-            
-            try:
-                response = requests.get(url, params=params, timeout=15)
-                if response.status_code == 404:
-                    return f"ERROR: Image '{image_name}' not found on Docker Hub. Check the image name."
-                response.raise_for_status()
-                data = response.json()
-                
-                results = data.get("results", [])
-                if not results:
-                    return f"No tags found for image: {image_name}"
-                
-                # Detect host platform dynamically for architecture compatibility
-                import platform
-                host_arch = platform.machine().lower()
-                if host_arch in ['arm64', 'aarch64']:
-                    host_docker_arch = 'arm64'
-                    arch_variants = ["arm64", "aarch64"]
-                elif host_arch in ['x86_64', 'amd64']:
-                    host_docker_arch = 'amd64'
-                    arch_variants = ["amd64", "x86_64"]
-                else:
-                    host_docker_arch = host_arch
-                    arch_variants = [host_arch]
-                
-                # Categorize tags for better readability with host platform info
-                versioned_tags = []  # Tags with version numbers (e.g., 3.9, 3.8.7)
-                slim_tags = []       # Slim/alpine/minimal variants
-                jdk_tags = []        # JDK-specific tags (for maven, gradle)
-                latest_tags = []     # Latest/stable tags
-                host_compatible = [] # Tags compatible with host platform
-                other_tags = []      # Everything else
-                
-                for tag_info in results:
-                    tag = tag_info.get("name", "")
-                    last_updated = tag_info.get("last_updated", "")[:10]  # Just date
-                    
-                    # Check architectures for host platform compatibility
-                    images = tag_info.get("images", [])
-                    archs = [img.get("architecture", "") for img in images]
-                    is_compatible = any(arch in arch_variants for arch in archs)
-                    
-                    compat_indicator = "[OK]" if is_compatible else "[!!]"
-                    tag_entry = f"{tag} {compat_indicator} (updated: {last_updated})"
-                    
-                    # Track host-compatible tags separately
-                    if is_compatible:
-                        host_compatible.append(tag)
-                    
-                    # Categorize
-                    tag_lower = tag.lower()
-                    if tag_lower in ["latest", "stable"]:
-                        latest_tags.append(tag_entry)
-                    elif "slim" in tag_lower or "alpine" in tag_lower or "minimal" in tag_lower:
-                        slim_tags.append(tag_entry)
-                    elif "jdk" in tag_lower or "openjdk" in tag_lower:
-                        jdk_tags.append(tag_entry)
-                    elif any(c.isdigit() for c in tag):
-                        versioned_tags.append(tag_entry)
-                    else:
-                        other_tags.append(tag_entry)
-                
-                # Build output with categories - detect host platform dynamically
-                import platform
-                host_arch = platform.machine().lower()
-                if host_arch in ['arm64', 'aarch64']:
-                    host_docker_arch = 'arm64'
-                    arch_name = 'ARM64'
-                    arch_devices = 'Apple Silicon M1/M2/M3/M4, Raspberry Pi'
-                elif host_arch in ['x86_64', 'amd64']:
-                    host_docker_arch = 'amd64'
-                    arch_name = 'AMD64'
-                    arch_devices = 'Intel/AMD x86_64 processors'
-                else:
-                    host_docker_arch = host_arch
-                    arch_name = host_arch.upper()
-                    arch_devices = f'{host_arch} processors'
-                
-                output = f"Available tags for '{image_name}':\n"
-                output += f"{'='*60}\n"
-                output += f"YOUR HOST PLATFORM: {arch_name} ({arch_devices})\n"
-                output += f"[OK] = {arch_name} compatible (will work on your system)\n"
-                output += f"[!!] = NO {arch_name} support (will fail on your system)\n\n"
-                
-                if versioned_tags:
-                    output += f"VERSIONED TAGS (recommended for stability):\n"
-                    for tag in versioned_tags[:15]:  # Limit to top 15
-                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
-                    if len(versioned_tags) > 15:
-                        output += f"  ... and {len(versioned_tags) - 15} more\n"
-                    output += "\n"
-                
-                if jdk_tags:
-                    output += f"JDK/OPENJDK TAGS:\n"
-                    for tag in jdk_tags[:10]:
-                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
-                    output += "\n"
-                
-                if slim_tags:
-                    output += f"SLIM/ALPINE TAGS (smaller images):\n"
-                    for tag in slim_tags[:10]:
-                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
-                    output += "\n"
-                
-                if latest_tags:
-                    output += f"LATEST/STABLE (avoid - may change):\n"
-                    for tag in latest_tags:
-                        output += f"  - {image_name}:{tag.split(' ')[0]}\n"
-                    output += "\n"
-                
-                # Recommend host-compatible tag if available
-                if host_compatible:
-                    recommended = host_compatible[0]
-                    output += f"RECOMMENDED ({host_docker_arch.upper()} compatible): {image_name}:{recommended}\n"
-                else:
-                    output += f"WARNING: No {host_docker_arch.upper()} compatible tags found! Consider using a different base image.\n"
-                    output += f"   For Java: Use 'eclipse-temurin' instead of 'openjdk'\n"
-                    output += f"   For Maven: Use 'maven:3.9-eclipse-temurin-17'\n"
-                
-                return output
-                
-            except Exception as e:
-                return f"Error listing tags for {image_name}: {str(e)}"
-        
-        # MODE 2: Verify specific image tag exists
         elif ":" in query and " " not in query:
             parts = query.split(":")
-            image_name = parts[0]
-            tag = parts[1]
+            return _docker_hub_verify_tag(parts[0], parts[1], platform_info)
             
-            # Handle official images (e.g., python -> library/python)
-            api_image_name = image_name
-            if "/" not in image_name:
-                api_image_name = f"library/{image_name}"
-                
-            url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags/{tag}"
-            
-            try:
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    last_updated = data.get("last_updated", "unknown")[:10]
-                    images = data.get("images", [])
-                    archs = list(set([img.get("architecture", "unknown") for img in images]))
-                    
-                    # Detect host platform dynamically for compatibility check
-                    import platform
-                    host_arch = platform.machine().lower()
-                    if host_arch in ['arm64', 'aarch64']:
-                        host_docker_arch = 'arm64'
-                        arch_variants = ["arm64", "aarch64"]
-                        arch_name = 'ARM64'
-                        arch_devices = 'Apple Silicon M1/M2/M3/M4'
-                    elif host_arch in ['x86_64', 'amd64']:
-                        host_docker_arch = 'amd64'
-                        arch_variants = ["amd64", "x86_64"]
-                        arch_name = 'AMD64'
-                        arch_devices = 'Intel/AMD x86_64'
-                    else:
-                        host_docker_arch = host_arch
-                        arch_variants = [host_arch]
-                        arch_name = host_arch.upper()
-                        arch_devices = f'{host_arch} system'
-                    
-                    # Check for host platform compatibility
-                    is_host_compatible = any(arch in arch_variants for arch in archs)
-                    
-                    output = f"VERIFIED: {query} EXISTS on Docker Hub\n"
-                    output += f"   Last Updated: {last_updated}\n"
-                    output += f"   Architectures: {', '.join(archs)}\n"
-                    output += f"   Your Platform: {arch_name} ({arch_devices})\n"
-                    
-                    # Add host platform compatibility status
-                    if is_host_compatible:
-                        output += f"   {arch_name} ({arch_devices}): COMPATIBLE\n"
-                    else:
-                        output += f"   {arch_name} ({arch_devices}): NOT COMPATIBLE!\n"
-                        output += f"   WARNING: This image will FAIL on your system!\n"
-                        output += f"   TIP: Use a newer version or different base image with {arch_name} support.\n"
-                    
-                    if is_host_compatible:
-                        output += f"   Safe to use in Dockerfile: FROM {query}"
-                    else:
-                        output += f"   DO NOT USE - find a {arch_name}-compatible alternative!"
-                    
-                    return output
-                elif response.status_code == 404:
-                    # Image doesn't exist - suggest listing tags
-                    return f"NOT FOUND: {query} does NOT exist on Docker Hub!\n\nTIP: To find valid tags, use: tags:{image_name}\n   Example: DockerImageSearch with input 'tags:{image_name}'"
-                else:
-                    return f"Error verifying image {query}: HTTP {response.status_code}"
-            except Exception as e:
-                return f"Error verifying image {query}: {str(e)}"
-        
-        # MODE 3: General search for images
         else:
-            url = "https://hub.docker.com/v2/search/repositories"
-            params = {"query": query, "page_size": 5}
+            return _docker_hub_search(query)
             
-            try:
-                response = requests.get(url, params=params, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                results = data.get("results", [])
-                if not results:
-                    return f"No Docker images found for query: {query}"
-                
-                output = f"Docker Hub Search Results for '{query}':\n"
-                output += f"{'='*60}\n"
-                
-                for res in results:
-                    name = res.get("repo_name", "unknown")
-                    star_count = res.get("star_count", 0)
-                    is_official = "[OFFICIAL]" if res.get("is_official") else ""
-                    desc = res.get("short_description", "")[:100]
-                    if len(res.get("short_description", "")) > 100:
-                        desc += "..."
-                    
-                    # Extract just the image name for official images
-                    simple_name = name.split("/")[-1] if "/" in name else name
-                        
-                    output += f"\n- {name} {is_official}\n"
-                    output += f"  Stars: {star_count}\n"
-                    output += f"  Description: {desc}\n"
-                    output += f"  List tags: DockerImageSearch with 'tags:{simple_name}'\n"
-                    output += f"{'-'*60}"
-                    
-                return output
-                
-            except Exception as e:
-                return f"Error searching Docker Hub: {str(e)}"
-                
     except ImportError:
         return "Error: requests package required. Install with: pip install requests"
     except Exception as e:
-        logger.error(f"Unexpected error in docker_image_search: {e}")
+        logger.error(f"Error in docker_image_search: {e}")
         return f"Error: {str(e)}"
 
 
@@ -2159,13 +2146,15 @@ Returns top web results with snippets. Use FetchWebPage to read full content fro
         doc_search_context += f"- Recommended search: '{repo_name} {detected_language} documentation' or '{repo_name} official documentation'\n"
         doc_search_context += f"- Search for official documentation early in your analysis to understand build requirements, dependencies, and setup procedures.\n"
     elif repo_name:
-        doc_search_context = f"\n\nDOCUMENTATION SEARCH GUIDANCE:\n"
-        doc_search_context += f"- Repository: {repo_name}\n"
-        doc_search_context += f"- Recommended search: '{repo_name} documentation' or '{repo_name} official documentation'\n"
-        doc_search_context += f"- Search for official documentation early in your analysis.\n"
+                    doc_search_context += f"- Search for official documentation early in your analysis.\n"
 
+    # Detect host architecture for prompt context
+    _, host_arch_name = _get_host_platform()
+    
     # Custom ReAct prompt for reasoning models
     template = """You are analyzing a repository to understand its structure and create build instructions.
+
+HOST ARCHITECTURE: {host_arch_name} (You MUST ensure Docker images are compatible with this architecture)
 
 Available tools: {tool_names}
 
@@ -2178,7 +2167,8 @@ ANALYSIS APPROACH - Discovery over Assumptions:
 4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
 5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
 6. CROSS-REFERENCE: Verify findings from web documentation with local files
-7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`. Do not assume images exist.{doc_search_context}
+7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`. Do not assume images exist. **CRITICAL**: Ensure the image supports {host_arch_name}.
+8. **BUILD DEPENDENCIES**: If the project uses compiled languages (Python/Node with native modules, C++, etc.), ALWAYS install `build-essential`, `gcc`, `make`, or `python3-dev` in the Dockerfile.{doc_search_context}
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 1. **NEVER write free text or explanations outside the format below**
@@ -2188,7 +2178,8 @@ CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 5. After "Action Input: <input>", STOP IMMEDIATELY - do not write anything else
 6. Do NOT write "Observation:" - the system provides it
 7. **If you want to provide a final answer, write "Final Answer:" after Thought, not free text**
-8. WHEN TO STOP AND PROVIDE FINAL ANSWER:
+8. **DO NOT wrap Action or Action Input in markdown code blocks (like ```)**
+9. WHEN TO STOP AND PROVIDE FINAL ANSWER:
    - You have searched for official documentation using SearchWeb
    - You have examined the main configuration files (package.json, Cargo.toml, Makefile, etc.)
    - You have read key documentation (README, INSTALL, BUILD files)
@@ -2256,6 +2247,9 @@ Thought:{agent_scratchpad}"""
     
     # Insert doc_search_context
     template = template.replace("{doc_search_context}", doc_search_context)
+    
+    # Insert host architecture
+    template = template.replace("{host_arch_name}", host_arch_name)
 
     prompt = PromptTemplate.from_template(template)
 
@@ -2272,8 +2266,8 @@ Thought:{agent_scratchpad}"""
         error_str = str(error)
         logger.warning(f"Parsing error: {error_str}")
         if "Could not parse" in error_str or "Missing 'Action:'" in error_str or "Invalid Format" in error_str:
-            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text.\n\nIf I want to provide the final answer, I MUST write 'Final Answer:' followed by the answer.\n\nExample Tool Usage:\nThought: I need to search.\nAction: SearchWeb\nAction Input: query\n\nExample Final Answer:\nThought: I am done.\nFinal Answer: The result is..."
-        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. If I am done, I must write 'Final Answer:'."
+            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text or markdown code blocks for the Action.\n\nCorrect Example:\nThought: I need to search.\nAction: SearchWeb\nAction Input: query\n\nExample Final Answer:\nThought: I am done.\nFinal Answer: The result is..."
+        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. If I am done, I must write 'Final Answer:'. Do not use markdown blocks."
 
     agent_executor = AgentExecutor(
         agent=agent,
