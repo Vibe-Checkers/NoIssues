@@ -501,7 +501,26 @@ def search_docker_error(error_keywords: str) -> str:
         
         results = []
         
-        # PRIMARY METHOD: DuckDuckGo Search (via ddgs)
+        # Azure Safety Sanitization: Remove code-like symbols to prevent content filter triggers
+        # We strip characters that look like injection attacks: {} [] <> ; $ \ ` ' "
+        import re
+        
+        # 1. Remove obvious code block markers and special chars
+        clean_keywords = re.sub(r'[{}<>\[\]$;`\\\'"]', '', error_keywords)
+        
+        # 2. Remove extremely long file paths (keep filenames)
+        # Matches /very/long/path/to/file.ext -> file.ext
+        clean_keywords = re.sub(r'(?:/[a-zA-Z0-9_\-\.]+)+/([a-zA-Z0-9_\-\.]+\.[a-z]+)', r'\1', clean_keywords)
+        
+        # 3. Collapse whitespace and truncate
+        clean_keywords = re.sub(r'\s+', ' ', clean_keywords).strip()
+        
+        if len(clean_keywords) > 200:
+            logger.warning(f"Sanitizing search query: '{error_keywords[:50]}...' -> '{clean_keywords[:200]}...'")
+            error_keywords = clean_keywords[:200]
+        else:
+            error_keywords = clean_keywords
+
         try:
             from ddgs import DDGS
             import requests
@@ -513,6 +532,10 @@ def search_docker_error(error_keywords: str) -> str:
                 f"docker {error_keywords} solution",
             ]
             
+            # Clean queries of newlines/tabs which confuse search engines
+            search_queries = [q.replace('\n', ' ').replace('\r', ' ').strip() for q in search_queries]
+            
+            results = []
             seen_urls = set()
             
             with DDGS() as ddgs:
@@ -581,7 +604,11 @@ def search_docker_error(error_keywords: str) -> str:
                     # Use our smart extraction
                     content = extract_relevant_sections(soup, max_chars_per_section=2000, max_total_chars=3000)
                     
-                    summary_parts.append(f"\n{'='*60}\nTOP SOLUTION DETAILED CONTENT ({top_url})\n{'='*60}\n{content}")
+                    # Sanitize content relative to "Azure Error" (remove non-printable chars)
+                    # This prevents binary data or weird encodings from breaking the LLM context
+                    cleaned_content = "".join(c for c in content if c.isprintable() or c in ['\n', '\r', '\t'])
+                    
+                    summary_parts.append(f"\n{'='*60}\nTOP SOLUTION DETAILED CONTENT ({top_url})\n{'='*60}\n{cleaned_content}")
             except Exception as e:
                 logger.warning(f"Could not fetch top error solution {top_url}: {e}")
         
@@ -2123,7 +2150,7 @@ def create_planner_agent(
 
 RECOMMENDED WORKFLOW for fixing image errors:
 1. First use 'tags:maven' to list ALL available tags
-2. Pick a specific versioned tag from the list
+2. Pick a MODERN, VERSIONED tag (e.g., '3.9.6', '21-jdk'). AVOID ancient tags (e.g., '0.10', '3.3.1').
 3. Verify with 'maven:3.9.6' before using in Dockerfile"""
         ),
         Tool(
@@ -2161,13 +2188,22 @@ Available tools: {tool_names}
 {tools}
 
 ANALYSIS APPROACH - Discovery over Assumptions:
+
+**CONTEXT AWARENESS**:
+- You may receive "PRE-LOADED CONFIGURATION FILES" (package.json, requirements.txt, etc.) in your input.
+- **ALWAYS** check these first! They contain critical dependency and build info.
+- Do not re-read these files using `ReadFile` unless you need to see lines beyond the preview.
+
 1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation" or "{repo_name} official documentation". This gives you authoritative build instructions, prerequisites, and setup guides from official sources. Do this BEFORE exploring local files.
 2. START BROAD: Use DirectoryTree to see overall structure
 3. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
 4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
 5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
 6. CROSS-REFERENCE: Verify findings from web documentation with local files
-7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`. Do not assume images exist. **CRITICAL**: Ensure the image supports {host_arch_name}.
+7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`.
+   - **CRITICAL**: Do NOT use ancient/deprecated images (e.g., `python:2.7`, `node:0.10`, `ubuntu:trusty`). These cause "Manifest V1" errors and will fail.
+   - **ALWAYS** prefer modern LTS versions (e.g., `node:18`, `python:3.10`, `ubuntu:22.04`) unless the project *strictly* requires legacy versions.
+   - **ARCH CHECK**: Ensure the image supports {host_arch_name}.
 8. **BUILD DEPENDENCIES**: If the project uses compiled languages (Python/Node with native modules, C++, etc.), ALWAYS install `build-essential`, `gcc`, `make`, or `python3-dev` in the Dockerfile.{doc_search_context}
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
