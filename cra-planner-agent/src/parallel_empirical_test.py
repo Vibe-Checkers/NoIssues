@@ -1080,8 +1080,10 @@ Error: {safe_error}"""
    Replace the failing image with your VERIFIED tag.
 
 CRITICAL RULES:
-- You MUST use DockerImageSearch with "tags:{base_image_name}" to see available tags
-- Pick a SPECIFIC VERSION tag (e.g., "3.9.6" not "latest")
+- You MUST CHANGE the base image. The previous one ({problematic_image}) failed.
+- You MUST use DockerImageSearch with "tags:{base_image_name}" to see available tags.
+- If unsure, Check the 'latest' tag or modern LTS versions (e.g. "node:20", "python:3.11").
+- Pick a SPECIFIC, MODERN VERSION tag. DO NOT use ancient tags (e.g. "0.10", "2.7").
 - VERIFY the tag exists before using it
 - Your Final Answer MUST start with FROM and contain ONLY Dockerfile content
 - NO explanations or prose - ONLY the Dockerfile

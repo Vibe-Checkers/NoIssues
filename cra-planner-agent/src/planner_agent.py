@@ -2189,20 +2189,17 @@ Available tools: {tool_names}
 
 ANALYSIS APPROACH - Discovery over Assumptions:
 
-**CONTEXT AWARENESS**:
-- You may receive "PRE-LOADED CONFIGURATION FILES" (package.json, requirements.txt, etc.) in your input.
-- **ALWAYS** check these first! They contain critical dependency and build info.
-- Do not re-read these files using `ReadFile` unless you need to see lines beyond the preview.
 
-1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation" or "{repo_name} official documentation". This gives you authoritative build instructions, prerequisites, and setup guides from official sources. Do this BEFORE exploring local files.
-2. START BROAD: Use DirectoryTree to see overall structure
-3. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
-4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
-5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
-6. CROSS-REFERENCE: Verify findings from web documentation with local files
-7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`.
-   - **CRITICAL**: Do NOT use ancient/deprecated images (e.g., `python:2.7`, `node:0.10`, `ubuntu:trusty`). These cause "Manifest V1" errors and will fail.
-   - **ALWAYS** prefer modern LTS versions (e.g., `node:18`, `python:3.10`, `ubuntu:22.04`) unless the project *strictly* requires legacy versions.
+1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation".
+2. **ANALYZE PRE-LOADED CONTEXT**: Check the "PRE-LOADED CONFIGURATION FILES" section in your input. These give you immediate dependency info (package.json, requirements.txt, etc.) without needing extra ReadFile calls.
+3. START BROAD: Use DirectoryTree to see overall structure
+4. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
+5. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
+6. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
+7. CROSS-REFERENCE: Verify findings from web documentation with local files
+8. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`.
+   - **CRITICAL**: Do NOT use ancient/deprecated images. These cause "Manifest V1" errors.
+   - **RULE**: Defaults to **LATEST LTS** (e.g., `node:20-alpine`, `python:3.11-slim`) if no specific version is found.
    - **ARCH CHECK**: Ensure the image supports {host_arch_name}.
 8. **BUILD DEPENDENCIES**: If the project uses compiled languages (Python/Node with native modules, C++, etc.), ALWAYS install `build-essential`, `gcc`, `make`, or `python3-dev` in the Dockerfile.{doc_search_context}
 
