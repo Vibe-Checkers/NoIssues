@@ -216,6 +216,11 @@ class DockerBuildTester:
             return "PLATFORM_INCOMPATIBLE", failed_step or "Base image platform mismatch (amd64 vs arm64)"
 
         # 4. Base Image Pull Issues (FROM command)
+        # 4a. Image Validation Failures (corrupted/deprecated manifest)
+        if any(x in error_lower for x in ["failed validation", "failed to load cache key"]):
+            return "IMAGE_VALIDATION_FAILED", failed_step or "Docker image failed validation (likely deprecated/corrupted manifest)"
+
+        # 4b. General image pull failures
         if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
             return "IMAGE_PULL", failed_step or "Failed to pull base image"
 
@@ -224,10 +229,37 @@ class DockerBuildTester:
             return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
 
         # 6. File Copy/Add (COPY/ADD commands)
+        # 6a. File missing from build context
+        if "failed to compute cache key" in error_lower and "not found" in error_lower:
+            return "FILE_COPY_MISSING", failed_step or "COPY command references file that doesn't exist in build context"
+
+        # 6b. General copy failures
         if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
             return "FILE_COPY", failed_step or "File copy/add failed"
 
         # 7. Dependency Installation (RUN pip/npm/go/cargo install commands)
+        # 7a. Missing dependency files (package.json, requirements.txt not at expected location)
+        if any(x in error_lower for x in ["enoent", "no such file or directory"]) and \
+           any(x in error_lower for x in ["package.json", "requirements.txt", "pom.xml", "cargo.toml", "go.mod"]):
+            return "DEPENDENCY_FILE_MISSING", failed_step or "Dependency file not found at expected location"
+
+        # 7b. Missing build tools for native dependencies
+        if any(x in error_lower for x in ["node-gyp", "gyp err", "gcc: command not found",
+                                            "make: command not found", "build-essential",
+                                            "python: command not found", "python3: command not found"]):
+            return "DEPENDENCY_BUILD_TOOLS", failed_step or "Missing build tools (gcc, make, python) for native dependencies"
+
+        # 7c. Network issues during dependency install
+        if any(x in error_lower for x in ["npm install", "pip install", "pnpm install", "yarn install"]) and \
+           any(x in error_lower for x in ["network", "fetch_404", "registry unreachable", "econnrefused", "etimedout"]):
+            return "DEPENDENCY_NETWORK", failed_step or "Network error during dependency installation"
+
+        # 7d. Lockfile mismatch issues
+        if any(x in error_lower for x in ["frozen-lockfile", "frozen lockfile", "lock file"]) and \
+           any(x in error_lower for x in ["outdated", "not in sync", "mismatch", "not up to date"]):
+            return "DEPENDENCY_LOCKFILE_MISMATCH", failed_step or "Lockfile out of sync with package.json"
+
+        # 7e. General dependency installation failures
         if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
             return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
 
@@ -245,6 +277,12 @@ class DockerBuildTester:
             return "BUILD_COMPILE", failed_step or "Build/compilation failed"
 
         # 9. Runtime Execution (CMD/ENTRYPOINT)
+        # 9a. Build tool/script not found (exit code 127 = command not found)
+        if ("exit code: 127" in error_lower or "command not found" in error_lower) and \
+           any(x in error_lower for x in ["gradlew", "./configure", "autogen.sh", "bootstrap", "cmake", "./build"]):
+            return "BUILD_TOOL_MISSING", failed_step or "Build tool or script not found/executable"
+
+        # 9b. General runtime execution failures
         if any(x in error_lower for x in ["command not found", "exec format error"]):
             return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
 

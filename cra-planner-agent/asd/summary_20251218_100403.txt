@@ -1,0 +1,426 @@
+================================================================================
+PARALLEL EMPIRICAL TESTING SUMMARY
+================================================================================
+
+Test Run: 20251218_100403
+Date: 2025-12-18 15:55:00
+Parallel Workers: 16
+
+OVERALL RESULTS
+--------------------------------------------------------------------------------
+Total Repositories: 50
+Successful: 28 (56.0%)
+Failed: 22 (44.0%)
+
+PERFORMANCE METRICS
+--------------------------------------------------------------------------------
+Overall Duration: 350.95 minutes
+Theoretical Sequential Time: 5122.50 minutes
+Speedup: 14.60x
+Average Duration per Repo: 6147.00 seconds
+Average Token Usage: 0 tokens
+Average Cost per Repo: $0.0000
+Total Cost: $0.0000
+
+FAILURE BREAKDOWN BY STAGE
+--------------------------------------------------------------------------------
+UNKNOWN                                 :   7 (31.8%)
+DEPENDENCY_INSTALL                      :   7 (31.8%)
+BUILD_TIMEOUT                           :   3 (13.6%)
+IMAGE_PULL                              :   2 (9.1%)
+FILE_COPY                               :   1 (4.5%)
+PERMISSION                              :   1 (4.5%)
+DOCKERFILE_SYNTAX                       :   1 (4.5%)
+
+ITERATION REFINEMENT STATISTICS
+--------------------------------------------------------------------------------
+Success by iteration:
+  Initial             :   4 repositories
+  Refinement 1        :   4 repositories
+  Refinement 2        :   3 repositories
+  Refinement 3        :   2 repositories
+  Refinement 4        :   4 repositories
+  Refinement 5        :   5 repositories
+  Refinement 6        :   1 repositories
+  Refinement 7        :   1 repositories
+  Refinement 8        :   3 repositories
+  Refinement 9        :   1 repositories
+
+Average refinement attempts: 6.7
+Total refinement attempts: 294
+
+DETAILED RESULTS
+--------------------------------------------------------------------------------
+
+1. ✓ Activiti
+   URL: https://github.com/Activiti/Activiti
+   Language: Java
+   Duration: 1659.69s
+   Succeeded at: Initial
+   Total iterations tested: 1
+
+2. ✓ Chart.js
+   URL: https://github.com/chartjs/Chart.js
+   Language: JavaScript
+   Duration: 1675.08s
+   Succeeded at: Initial
+   Total iterations tested: 1
+
+3. ✗ flink
+   URL: https://github.com/apache/flink
+   Language: Java
+   Duration: 2587.11s
+   Failure Stage: BUILD_TIMEOUT
+   Failed Command: Unknown
+   Refinement attempts: 0
+
+4. ✓ cpython
+   URL: https://github.com/python/cpython
+   Language: Python
+   Duration: 2932.17s
+   Succeeded at: After 2 refinement(s)
+   Total iterations tested: 3
+
+5. ✗ deno
+   URL: https://github.com/denoland/deno
+   Language: JavaScript
+   Duration: 3480.01s
+   Failure Stage: BUILD_TIMEOUT
+   Failed Command: Unknown
+   Refinement attempts: 2
+
+6. ✗ JSON-java
+   URL: https://github.com/stleaACry/JSON-java
+   Language: Unknown
+   Duration: 5.57s
+   Failure Stage: UNKNOWN
+   Failed Command: Unknown
+
+7. ✓ express
+   URL: https://github.com/expressjs/express
+   Language: JavaScript
+   Duration: 3683.61s
+   Succeeded at: After 4 refinement(s)
+   Total iterations tested: 5
+
+8. ✓ FreeRTOS
+   URL: https://github.com/FreeRTOS/FreeRTOS
+   Language: C
+   Duration: 2180.07s
+   Succeeded at: Initial
+   Total iterations tested: 1
+
+9. ✓ distcc
+   URL: https://github.com/distcc/distcc
+   Language: C
+   Duration: 3895.99s
+   Succeeded at: After 3 refinement(s)
+   Total iterations tested: 4
+
+10. ✓ flask
+   URL: https://github.com/pallets/flask
+   Language: Python
+   Duration: 3946.95s
+   Succeeded at: After 4 refinement(s)
+   Total iterations tested: 5
+
+11. ✓ folly
+   URL: https://github.com/facebook/folly
+   Language: C
+   Duration: 4454.40s
+   Succeeded at: After 5 refinement(s)
+   Total iterations tested: 6
+
+12. ✓ imgui
+   URL: https://github.com/ocornut/imgui
+   Language: C++
+   Duration: 2534.17s
+   Succeeded at: After 1 refinement(s)
+   Total iterations tested: 2
+
+13. ✓ langchain
+   URL: https://github.com/langchain-ai/langchain
+   Language: Python
+   Duration: 2038.44s
+   Succeeded at: Initial
+   Total iterations tested: 1
+
+14. ✓ ansible
+   URL: https://github.com/ansible/ansible
+   Language: Python
+   Duration: 6209.94s
+   Succeeded at: After 6 refinement(s)
+   Total iterations tested: 7
+
+15. ✓ keras
+   URL: https://github.com/keras-team/keras
+   Language: Python
+   Duration: 2534.57s
+   Succeeded at: After 2 refinement(s)
+   Total iterations tested: 3
+
+16. ✓ ccache
+   URL: https://github.com/ccache/ccache
+   Language: C++
+   Duration: 6288.59s
+   Succeeded at: After 5 refinement(s)
+   Total iterations tested: 6
+
+17. ✗ axios
+   URL: https://github.com/axios/axios
+   Language: JavaScript
+   Duration: 7964.16s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #4 [1/7] FROM docker.io/library/node:18-alpine@sha256:8d6421d663b4c28fd3ebc498332f249011d118945588d0a35cb9bc4b8ca09d9e
+   Refinement attempts: 10
+
+18. ✓ bootstrap
+   URL: https://github.com/twbs/bootstrap
+   Language: JavaScript
+   Duration: 8069.20s
+   Succeeded at: After 8 refinement(s)
+   Total iterations tested: 9
+
+19. ✗ commons-csv
+   URL: https://github.com/apache/commons-csv
+   Language: Java
+   Duration: 8458.42s
+   Failure Stage: UNKNOWN
+   Failed Command: #6 [build 1/6] FROM docker.io/library/openjdk:9-b130-jdk@sha256:d97a61ca065b3754a38b72e13a80790b9dee956faa895b0b3036b57c996f47ff
+   Refinement attempts: 10
+
+20. ✓ json-c
+   URL: https://github.com/json-c/json-c
+   Language: C
+   Duration: 5985.33s
+   Succeeded at: After 5 refinement(s)
+   Total iterations tested: 6
+
+21. ✓ msgpack-c
+   URL: https://github.com/msgpack/msgpack-c
+   Language: Unknown
+   Duration: 4156.08s
+   Succeeded at: After 1 refinement(s)
+   Total iterations tested: 2
+
+22. ✗ dubbo
+   URL: https://github.com/apache/dubbo
+   Language: Java
+   Duration: 10020.63s
+   Failure Stage: UNKNOWN
+   Failed Command: #5 [stage-0 1/6] FROM docker.io/library/openjdk:9-b130-jdk@sha256:d97a61ca065b3754a38b72e13a80790b9dee956faa895b0b3036b57c996f47ff
+   Refinement attempts: 10
+
+23. ✗ django
+   URL: https://github.com/django/django
+   Language: Python
+   Duration: 10036.42s
+   Failure Stage: UNKNOWN
+   Failed Command: #4 [stage-0 1/4] FROM docker.io/library/python:3.11-slim@sha256:158caf0e080e2cd74ef2879ed3c4e697792ee65251c8208b7afb56683c32ea6c
+   Refinement attempts: 10
+
+24. ✓ mpv
+   URL: https://github.com/mpv-player/mpv
+   Language: C
+   Duration: 5675.38s
+   Succeeded at: After 5 refinement(s)
+   Total iterations tested: 6
+
+25. ✓ libevent
+   URL: https://github.com/libevent/libevent
+   Language: C
+   Duration: 6250.42s
+   Succeeded at: After 5 refinement(s)
+   Total iterations tested: 6
+
+26. ✓ nest
+   URL: https://github.com/nestjs/nest
+   Language: TypeScript
+   Duration: 4890.92s
+   Succeeded at: After 4 refinement(s)
+   Total iterations tested: 5
+
+27. ✗ git
+   URL: https://github.com/git/git
+   Language: C
+   Duration: 9512.11s
+   Failure Stage: FILE_COPY
+   Failed Command: #4 [1/5] FROM docker.io/library/debian:12-slim@sha256:e899040a73d36e2b36fa33216943539d9957cba8172b858097c2cabcdb20a3e2
+   Refinement attempts: 10
+
+28. ✗ guava
+   URL: https://github.com/google/guava
+   Language: Java
+   Duration: 8856.23s
+   Failure Stage: UNKNOWN
+   Failed Command: #6 [stage-0 1/6] FROM docker.io/library/openjdk:9-b130-jdk@sha256:d97a61ca065b3754a38b72e13a80790b9dee956faa895b0b3036b57c996f47ff
+   Refinement attempts: 10
+
+29. ✓ react-native
+   URL: https://github.com/facebook/react-native
+   Language: JavaScript
+   Duration: 2140.06s
+   Succeeded at: After 1 refinement(s)
+   Total iterations tested: 2
+
+30. ✗ mermaid
+   URL: https://github.com/mermaid-js/mermaid
+   Language: JavaScript
+   Duration: 8428.04s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #4 [1/6] FROM docker.io/library/node:20-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448
+   Refinement attempts: 10
+
+31. ✓ scikit-learn
+   URL: https://github.com/scikit-learn/scikit-learn
+   Language: Python
+   Duration: 2284.64s
+   Succeeded at: After 1 refinement(s)
+   Total iterations tested: 2
+
+32. ✗ node
+   URL: https://github.com/nodejs/node
+   Language: JavaScript
+   Duration: 8624.11s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #4 [1/8] FROM docker.io/library/node:20-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448
+   Refinement attempts: 10
+
+33. ✓ tensorflow
+   URL: https://github.com/tensorflow/tensorflow
+   Language: C
+   Duration: 4477.06s
+   Succeeded at: After 2 refinement(s)
+   Total iterations tested: 3
+
+34. ✗ mybatis-3
+   URL: https://github.com/mybatis/mybatis-3
+   Language: Java
+   Duration: 10916.32s
+   Failure Stage: IMAGE_PULL
+   Failed Command: Failed to pull base image
+   Refinement attempts: 10
+
+35. ✓ TypeScript
+   URL: https://github.com/microsoft/TypeScript
+   Language: JavaScript
+   Duration: 4762.96s
+   Succeeded at: After 3 refinement(s)
+   Total iterations tested: 4
+
+36. ✗ numpy
+   URL: https://github.com/numpy/numpy
+   Language: Python
+   Duration: 10894.84s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #5 [1/6] FROM docker.io/library/python:3.11-slim@sha256:158caf0e080e2cd74ef2879ed3c4e697792ee65251c8208b7afb56683c32ea6c
+   Refinement attempts: 10
+
+37. ✗ pandas
+   URL: https://github.com/pandas-dev/pandas
+   Language: Python
+   Duration: 9407.59s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #5 [1/5] FROM docker.io/library/python:3.11-slim@sha256:158caf0e080e2cd74ef2879ed3c4e697792ee65251c8208b7afb56683c32ea6c
+   Refinement attempts: 10
+
+38. ✗ opencv
+   URL: https://github.com/opencv/opencv
+   Language: C++
+   Duration: 10398.37s
+   Failure Stage: BUILD_TIMEOUT
+   Failed Command: Unknown
+   Refinement attempts: 9
+
+39. ✗ react
+   URL: https://github.com/facebook/react
+   Language: JavaScript
+   Duration: 8888.37s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #4 [1/6] FROM docker.io/library/node:20-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448
+   Refinement attempts: 10
+
+40. ✗ openvpn
+   URL: https://github.com/OpenVPN/openvpn
+   Language: C
+   Duration: 10505.88s
+   Failure Stage: UNKNOWN
+   Failed Command: #4 [1/6] FROM docker.io/library/debian:stable-slim@sha256:1c25564b03942d874bf6a2b71f2062b71af8bc1475aa873c523e6f7c8fa29e60
+   Refinement attempts: 10
+
+41. ✓ pytest
+   URL: https://github.com/pytest-dev/pytest
+   Language: Python
+   Duration: 9143.09s
+   Succeeded at: After 8 refinement(s)
+   Total iterations tested: 9
+
+42. ✓ scipy
+   URL: https://github.com/scipy/scipy
+   Language: Python
+   Duration: 7859.94s
+   Succeeded at: After 8 refinement(s)
+   Total iterations tested: 9
+
+43. ✗ RxJava
+   URL: https://github.com/ReactiveX/RxJava
+   Language: Java
+   Duration: 9350.52s
+   Failure Stage: UNKNOWN
+   Failed Command: #4 [1/7] FROM docker.io/library/eclipse-temurin:17_35-jdk-alpine@sha256:e78a9657273fe6d06ab55c0ff65b53cc9f88b3b5e6a2dc791d66b0630cc4cfb9
+   Refinement attempts: 10
+
+44. ✗ spring-framework
+   URL: https://github.com/spring-projects/spring-framework
+   Language: Java
+   Duration: 8423.44s
+   Failure Stage: PERMISSION
+   Failed Command: #4 [1/7] FROM docker.io/library/gradle:3.4.1-jdk7@sha256:046723c61d54150ff897a07ae9be05109c5fd53f2502fbb18030410c85d1d519
+   Refinement attempts: 10
+
+45. ✓ xrdp
+   URL: https://github.com/neutrinolabs/xrdp
+   Language: C
+   Duration: 3155.85s
+   Succeeded at: After 4 refinement(s)
+   Total iterations tested: 5
+
+46. ✗ rocketmq
+   URL: https://github.com/apache/rocketmq
+   Language: Java
+   Duration: 10304.55s
+   Failure Stage: DOCKERFILE_SYNTAX
+   Failed Command: Dockerfile syntax error
+   Refinement attempts: 10
+
+47. ✗ webpack
+   URL: https://github.com/webpack/webpack
+   Language: JavaScript
+   Duration: 8079.48s
+   Failure Stage: IMAGE_PULL
+   Failed Command: Failed to pull base image
+   Refinement attempts: 10
+
+48. ✓ webview
+   URL: https://github.com/webview/webview
+   Language: C++
+   Duration: 5700.08s
+   Succeeded at: After 9 refinement(s)
+   Total iterations tested: 10
+
+49. ✓ xgboost
+   URL: https://github.com/dmlc/xgboost
+   Language: C
+   Duration: 4941.66s
+   Succeeded at: After 7 refinement(s)
+   Total iterations tested: 8
+
+50. ✗ vue
+   URL: https://github.com/vuejs/vue
+   Language: JavaScript
+   Duration: 8681.58s
+   Failure Stage: DEPENDENCY_INSTALL
+   Failed Command: #5 [1/7] FROM docker.io/library/node:18-alpine@sha256:8d6421d663b4c28fd3ebc498332f249011d118945588d0a35cb9bc4b8ca09d9e
+   Refinement attempts: 10
+
+================================================================================

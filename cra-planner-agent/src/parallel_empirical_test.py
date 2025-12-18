@@ -335,15 +335,16 @@ class ParallelEmpiricalTester:
                     "final_iteration": 0,
                     "success": False
                 }
-                max_refinement_iterations = 10
+                max_refinement_iterations = 15  # Increased from 10 to 15 based on empirical data
                 iteration_success = False
 
                 # Initialize state for refinement tracking
                 previous_from_lines = []
                 previous_tools_used = []
+                consecutive_validation_errors = 0  # Track repeated validation failures
 
                 # Iterative refinement loop
-                for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-10 = refinements
+                for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-15 = refinements
                     iteration_start_time = time.time()
                     
                     # Read current Dockerfile content
@@ -538,6 +539,41 @@ class ParallelEmpiricalTester:
                                 result["dockerfile_test"]["iterations"].append(iteration_result)
                                 break  # Cannot fix with Dockerfile iterations
 
+                            # Check for Docker image validation errors (e.g., "" failed validation)
+                            error_message = docker_result.get('error_message', '')
+                            if 'failed validation' in error_message or 'failed to solve' in error_message:
+                                consecutive_validation_errors += 1
+                                self.log(
+                                    repo_name,
+                                    f"Docker image validation error detected (consecutive: {consecutive_validation_errors})",
+                                    to_console=True
+                                )
+
+                                # After 2-3 consecutive validation errors, force image change
+                                if consecutive_validation_errors >= 3:
+                                    self.log(
+                                        repo_name,
+                                        f"FORCING BASE IMAGE CHANGE after {consecutive_validation_errors} validation failures",
+                                        to_console=True
+                                    )
+                                    # Extract current image and suggest fallback
+                                    current_from_line = None
+                                    try:
+                                        for line in dockerfile_content.split('\n'):
+                                            if line.strip().upper().startswith('FROM '):
+                                                current_from_line = line.strip()
+                                                break
+                                    except:
+                                        pass
+
+                                    if current_from_line:
+                                        self.log(repo_name, f"Current problematic image: {current_from_line}", to_console=True)
+                                        iteration_result["forced_image_change"] = True
+                                        iteration_result["previous_from_line"] = current_from_line
+                            else:
+                                # Reset counter if different error type
+                                consecutive_validation_errors = 0
+
                             # Check for other non-recoverable errors
                             non_recoverable_stages = ["DOCKER_DAEMON", "BUILD_TIMEOUT", "BUILD_EXCEPTION"]
                             if stage in non_recoverable_stages:
@@ -556,8 +592,9 @@ class ParallelEmpiricalTester:
                             
                             refinement_start = time.time()
                             refinement_success, tools_used = self._refine_dockerfile_with_error_feedback(
-                                agent, dockerfile_path, raw_error_file, repo_path, repo_name, 
-                                iteration + 1, docker_result, previous_from_lines, previous_tools_used
+                                agent, dockerfile_path, raw_error_file, repo_path, repo_name,
+                                iteration + 1, docker_result, previous_from_lines, previous_tools_used,
+                                consecutive_validation_errors
                             )
                             refinement_duration = time.time() - refinement_start
                             
@@ -862,9 +899,10 @@ class ParallelEmpiricalTester:
         return result if result else "Error details sanitized for safety"
 
     def _refine_dockerfile_with_error_feedback(
-        self, agent, dockerfile_path: Path, error_log_path: Path, 
+        self, agent, dockerfile_path: Path, error_log_path: Path,
         repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None,
-        previous_from_lines: List[str] = None, previous_tools_used: List[str] = None
+        previous_from_lines: List[str] = None, previous_tools_used: List[str] = None,
+        consecutive_validation_errors: int = 0
     ) -> Tuple[bool, List[str]]:
         """
         Refine Dockerfile based on build error feedback with enhanced analysis.
@@ -1000,12 +1038,6 @@ It was built for a different architecture which is incompatible with this system
 **STEP 2 - VERIFY {arch_name} SUPPORT**: Use DockerImageSearch with "{base_image_name}:<tag>"
    Check the "Architectures" field - must include "{host_docker_arch}" support
 
-COMMON FIXES FOR {arch_name} COMPATIBILITY:
-- OLD: maven:3.3.x-jdk-8 -> NEW: maven:3.9-eclipse-temurin-17 (multi-arch)
-- OLD: openjdk:8-jdk -> NEW: eclipse-temurin:17-jdk (multi-arch)
-- OLD: node:14 -> NEW: node:20-slim (multi-arch)
-- OLD: python:3.8-slim -> NEW: python:3.11-slim (multi-arch)
-
 **STEP 3 - UPDATE DOCKERFILE**: Read {dockerfile_absolute}
    Replace the base image with a {arch_name}-compatible version
 
@@ -1059,34 +1091,43 @@ Error: {safe_error}"""
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
                 
                 # Extract base image name (without tag) for searching
-                base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
-                
-                # NEW APPROACH: Web search first to understand what tags exist, then verify
-                refinement_query = f"""CRITICAL DOCKERFILE ERROR: Base image "{problematic_image}" DOES NOT EXIST on Docker Hub!
+                base_image_name = problematic_image.split(':')[0].split('@')[0] if problematic_image != "unknown" else "unknown"
 
-**STEP 1 - WEB SEARCH FIRST**: Use SearchDockerError with "docker hub {base_image_name} available tags versions"
-   This will show you what tags are commonly used and recommended.
+                # Detect repeated validation failures and adjust strategy
+                urgency_note = ""
+                search_strategy = ""
 
-**STEP 2 - LIST AVAILABLE TAGS**: Use DockerImageSearch with "tags:{base_image_name}"
-   This queries Docker Hub API and shows ALL available tags categorized by:
-   - Versioned tags (recommended for stability)
-   - JDK/OpenJDK tags (for Java projects)
-   - Slim/Alpine tags (smaller images)
+                if consecutive_validation_errors >= 2:
+                    urgency_note = f"\n**CRITICAL**: You've tried {consecutive_validation_errors} times with validation errors. The image is likely DEPRECATED/UNAVAILABLE.\n"
+                    search_strategy = f"""
+**DISCOVERY STRATEGY** (Find modern alternatives):
+1. Use SearchWeb with "docker hub {base_image_name} modern alternatives 2025" to discover recommended replacements
+2. Use DockerImageSearch with "tags:{base_image_name}" to see if ANY tags are still available
+3. If no tags found or all deprecated, search for alternative images that serve the same purpose
+4. Once you identify an alternative, verify it exists with DockerImageSearch
+"""
+                else:
+                    search_strategy = f"""
+**VERIFICATION STRATEGY**:
+1. Use DockerImageSearch with "tags:{base_image_name}" to list available tags
+2. Pick a modern, stable version tag from the list (prefer LTS versions)
+3. Use DockerImageSearch with "{base_image_name}:<tag>" to verify it exists
+"""
 
-**STEP 3 - VERIFY YOUR CHOICE**: Use DockerImageSearch with "{base_image_name}:<your-chosen-tag>"
-   Confirm the tag exists before using it.
+                # General-purpose prompt that discovers solutions dynamically
+                refinement_query = f"""CRITICAL: Base image "{problematic_image}" FAILED!
+{urgency_note}
+{search_strategy}
+**THEN**:
+4. Read current Dockerfile: {dockerfile_absolute}
+5. Update FROM line with your VERIFIED working image
+6. Provide Final Answer with ONLY Dockerfile content (no explanations)
 
-**STEP 4 - UPDATE DOCKERFILE**: Read the current Dockerfile at: {dockerfile_absolute}
-   Replace the failing image with your VERIFIED tag.
-
-CRITICAL RULES:
-- You MUST CHANGE the base image. The previous one ({problematic_image}) failed.
-- You MUST use DockerImageSearch with "tags:{base_image_name}" to see available tags.
-- If unsure, Check the 'latest' tag or modern LTS versions (e.g. "node:20", "python:3.11").
-- Pick a SPECIFIC, MODERN VERSION tag. DO NOT use ancient tags (e.g. "0.10", "2.7").
-- VERIFY the tag exists before using it
-- Your Final Answer MUST start with FROM and contain ONLY Dockerfile content
-- NO explanations or prose - ONLY the Dockerfile
+RULES:
+- DO NOT reuse "{problematic_image}" - it failed validation
+- MUST use tools (SearchWeb + DockerImageSearch) to discover and verify alternatives
+- If image has no available tags, find a modern replacement that serves the same purpose
+- Final Answer: ONLY Dockerfile content starting with FROM
 
 Error: {safe_error}"""
 
@@ -1172,16 +1213,23 @@ IMPORTANT: This is NOT an image problem - DO NOT change the base image!
 **STEP 1:** Use SearchDockerError with "{error_keywords}" to find solutions
 **STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}
 **STEP 3:** Read the project dependency files (package.json, requirements.txt, pom.xml, etc.)
-**STEP 4:** Fix the RUN commands to install missing system packages
+**STEP 4:** **CHECK FOR NATIVE DEPENDENCIES**:
+   - Look at the dependency file for packages that might need C/C++ compilation
+   - Use SearchWeb with: "[package_name] docker build dependencies" to check if it needs native tools
+   - Common indicators: packages with "native", "binding", or that interface with databases/crypto/images
+   - If uncertain, search: "does [package_name] require gcc or build tools"
+**STEP 5:** If native dependencies found, use SearchWeb to find required build tools for that specific package
+**STEP 6:** Fix the RUN commands to install missing system packages BEFORE dependency install
 
 CRITICAL RULES:
 - DO NOT CHANGE THE BASE IMAGE (FROM line) - it is CORRECT!
 - ONLY fix RUN commands to add missing dependencies
-- Common fixes: add build-essential, python3-dev, gcc, make, etc.
+- Use SearchWeb to discover what's needed - DO NOT GUESS!
+- Add build tools BEFORE the dependency install command
 - Your Final Answer MUST start with the SAME FROM line as the current Dockerfile
 
 WRONG: Changing FROM maven:... to FROM node:... (DO NOT DO THIS!)
-CORRECT: Keep FROM maven:... and add RUN apt-get install build-essential
+CORRECT: Keep FROM maven:... and add RUN apt-get install [searched-packages]
 
 Error: {safe_error}
 
@@ -1256,6 +1304,146 @@ WORKDIR /app
 Error: {safe_error}
 
 OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
+
+            # NEW: Handle specific dependency error subcategories
+            elif stage == "DEPENDENCY_FILE_MISSING":
+                self.log(repo_name, f"DEPENDENCY_FILE_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""DEPENDENCY FILE NOT FOUND ERROR
+
+The Dockerfile is trying to COPY a dependency file that doesn't exist at the expected location.
+
+**STEP 1:** Use GrepFiles to search for dependency files (package.json, requirements.txt, pom.xml) in the repository
+**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Fix COPY commands to use correct paths
+**STEP 4:** Ensure files are copied BEFORE running install commands
+
+COMMON FIXES:
+- Files in subdirectory: COPY ./subdir/package.json ./
+- Monorepo: COPY entire workspace first
+- Wrong file name: Check actual file names in repo
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "DEPENDENCY_BUILD_TOOLS":
+                self.log(repo_name, f"DEPENDENCY_BUILD_TOOLS error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""MISSING BUILD TOOLS ERROR
+
+Native dependencies need build tools (compilers, headers) not in base image.
+
+**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 2:** Extract the base image OS and programming language from Dockerfile
+**STEP 3:** Read dependency files (package.json, requirements.txt, Cargo.toml, pom.xml) to identify packages
+**STEP 4:** Analyze error log to find specific missing commands or libraries
+**STEP 5:** Use SearchWeb with specific query based on what you found:
+   - Format: "docker [OS] install build tools for [language] [failing_package_or_command]"
+   - Example: "docker alpine install build tools for python when gcc missing"
+   - Example: "docker debian install dependencies for node-gyp"
+   - Example: "docker ubuntu install libssl-dev for rust openssl"
+**STEP 6:** Based on search results, add RUN command BEFORE dependency install
+
+DISCOVERY APPROACH:
+1. Be SPECIFIC in your search query - include OS, language, and the failing package/command
+2. Look for official documentation in search results
+3. If first search doesn't help, try a different query with more context from the error
+4. Check error log for library names (libssl, libpq, libffi, etc.) and search for those specifically
+
+DO NOT GUESS OR USE HARDCODED EXAMPLES!
+USE SEARCHWEB TO DISCOVER THE CORRECT SOLUTION!
+DO NOT CHANGE BASE IMAGE!
+
+Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "DEPENDENCY_LOCKFILE_MISMATCH":
+                self.log(repo_name, f"DEPENDENCY_LOCKFILE_MISMATCH error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""LOCKFILE MISMATCH ERROR
+
+Lockfile is out of sync with package.json.
+
+**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 2:** Change install command:
+
+INSTEAD OF: npm ci (requires exact lockfile match)
+USE: npm install (generates new lockfile)
+
+INSTEAD OF: pnpm install --frozen-lockfile
+USE: pnpm install
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "FILE_COPY_MISSING":
+                self.log(repo_name, f"FILE_COPY_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""FILE COPY MISSING ERROR
+
+COPY command references file that doesn't exist in build context.
+
+**STEP 1:** Use GrepFiles to find the file in the repository
+**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Fix COPY path or remove if file doesn't exist
+**STEP 4:** Check if file is in .dockerignore
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "BUILD_TOOL_MISSING":
+                self.log(repo_name, f"BUILD_TOOL_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""BUILD TOOL/SCRIPT MISSING ERROR
+
+Build script or tool not found/executable.
+
+**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 2:** Identify missing tool (gradlew, configure, cmake, etc.)
+**STEP 3:** Either:
+   - Install the tool: RUN apt-get install cmake
+   - Make script executable: RUN chmod +x ./gradlew
+   - Copy script if missing: COPY gradlew ./
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "IMAGE_VALIDATION_FAILED":
+                self.log(repo_name, f"IMAGE_VALIDATION_FAILED error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+
+                base_image_name = "unknown"
+                try:
+                    with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip().upper().startswith('FROM '):
+                                base_image_name = line.strip().split()[1].split(':')[0].split('@')[0]
+                                break
+                except:
+                    pass
+
+                refinement_query = f"""IMAGE VALIDATION FAILED - DEPRECATED/CORRUPTED MANIFEST
+
+The image manifest is corrupted or uses deprecated Docker v1 schema.
+
+**STEP 1:** Use SearchWeb with "docker hub {base_image_name} modern alternatives 2024"
+**STEP 2:** Use DockerImageSearch with "tags:{base_image_name}" to find valid tags
+**STEP 3:** Pick a modern verified tag
+**STEP 4:** Update Dockerfile FROM line
+
+MUST USE DockerImageSearch to verify! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
 
             else:
                 self.log(repo_name, f"BUILD error detected - instructing agent to analyze carefully", to_console=True)
