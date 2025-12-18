@@ -559,51 +559,6 @@ def _invoke_agent_with_iteration_limit(agent, inputs: dict, max_iterations: int 
         agent.max_iterations = original_max_iterations
 
 
-def _preload_config_files(repo_path: str) -> str:
-    """Pre-read key config files to give agent immediate context."""
-    configs = []
-    # Prioritize files that define dependencies and build scripts
-    key_files = [
-        "package.json", 
-        "requirements.txt", 
-        "pyproject.toml",
-        "pom.xml", 
-        "build.gradle", 
-        "go.mod", 
-        "Cargo.toml", 
-        "Gemfile", 
-        "composer.json",
-        "Makefile",
-        "CMakeLists.txt"
-    ]
-    
-    repo_path_obj = Path(repo_path)
-    
-    for filename in key_files:
-        path = repo_path_obj / filename
-        if path.exists():
-            try:
-                # Read first 80 lines (enough for scripts/dependencies usually)
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-                    # Limit to 40 lines to prevent context window bloat
-                    content = "".join(lines[:40])
-                    if len(lines) > 40:
-                        content += "\n...[truncated]..."
-                    configs.append(f"\n--- {filename} (first 40 lines) ---\n{content}\n")
-            except Exception:
-                pass
-                
-    if not configs:
-        return ""
-        
-    # Cap total context size
-    full_context = "\n\nPRE-LOADED CONFIGURATION FILES (DO NOT READ THESE AGAIN UNLESS NEEDED):\n" + "".join(configs)
-    if len(full_context) > 6000:
-        full_context = full_context[:6000] + "\n...[truncated due to size]..."
-    return full_context
-
-
 def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, callback_handler, log_file_path=None, report_dir=None):
     """
     Run analysis queries on a cloned repository.
@@ -669,12 +624,9 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
             # NOTE: No longer setting global REPORT_DIRECTORY - thread-local only for thread safety
             print(f"[INFO] Report directory: {report_dir}")
 
-        # Pre-load context
-        preload_context = _preload_config_files(repo_path)
-
         # Define analysis queries using discovery-based approach with relative paths
         # Use simple string concatenation to avoid f-string issues with JSON braces
-        first_query = "Analyze the repository. **FIRST**: Search the web for official documentation using the repository name and language. Then show me the directory tree structure (depth 2), and identify what type of project this is by finding and examining configuration files.\n" + preload_context
+        first_query = "Analyze the repository. **FIRST**: Search the web for official documentation using the repository name and language. Then show me the directory tree structure (depth 2), and identify what type of project this is by finding and examining configuration files."
 
         queries = [
         first_query,
