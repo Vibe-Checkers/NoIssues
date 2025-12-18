@@ -2188,20 +2188,21 @@ Available tools: {tool_names}
 {tools}
 
 ANALYSIS APPROACH - Discovery over Assumptions:
-
-
-1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation".
-2. **ANALYZE PRE-LOADED CONTEXT**: Check the "PRE-LOADED CONFIGURATION FILES" section in your input. These give you immediate dependency info (package.json, requirements.txt, etc.) without needing extra ReadFile calls.
-3. START BROAD: Use DirectoryTree to see overall structure
-4. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
-5. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
-6. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
-7. CROSS-REFERENCE: Verify findings from web documentation with local files
-8. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`.
-   - **CRITICAL**: Do NOT use ancient/deprecated images. These cause "Manifest V1" errors.
-   - **RULE**: Defaults to **LATEST LTS** (e.g., `node:20-alpine`, `python:3.11-slim`) if no specific version is found.
-   - **ARCH CHECK**: Ensure the image supports {host_arch_name}.
-8. **BUILD DEPENDENCIES**: If the project uses compiled languages (Python/Node with native modules, C++, etc.), ALWAYS install `build-essential`, `gcc`, `make`, or `python3-dev` in the Dockerfile.{doc_search_context}
+1. **START WITH WEB SEARCH**: **MANDATORY FIRST STEP** - Use SearchWeb to find official documentation. Search for "{repo_name} {language} documentation" or "{repo_name} official documentation". This gives you authoritative build instructions, prerequisites, and setup guides from official sources. Do this BEFORE exploring local files.
+2. START BROAD: Use DirectoryTree to see overall structure
+3. LOCATE FILES: Use FindFiles to locate config files (don't assume locations)
+4. READ & EXTRACT: Use ReadFile and ExtractJsonField to examine configs
+5. SEARCH PATTERNS: Use GrepFiles to find build commands, imports, requirements
+6. CROSS-REFERENCE: Verify findings from web documentation with local files
+7. **VERIFY DOCKER IMAGES**: If you plan to use a Docker base image (e.g., in a FROM instruction), you MUST verify it exists using `DockerImageSearch`.
+   - **CRITICAL**: Do NOT use ancient/deprecated images. These cause "Manifest V1" errors and pull failures.
+   - **ALWAYS USE LATEST**: Use the latest stable version or latest LTS (e.g., `node:latest`, `python:latest`, `golang:latest`) unless the project specifically requires an older version.
+   - **ARCH CHECK**: Ensure the image supports {host_arch_name} architecture by checking the DockerImageSearch results.
+   - **ALWAYS VERIFY**: Never assume an image exists - always use DockerImageSearch to confirm before using it in a Dockerfile.
+8. **BUILD DEPENDENCIES**: If the project uses compiled languages or native modules (Python with C extensions, Node.js with node-gyp, C++, Rust, etc.), ALWAYS install build tools in the Dockerfile:
+   - Debian/Ubuntu: `RUN apt-get update && apt-get install -y build-essential gcc make python3-dev`
+   - Alpine: `RUN apk add --no-cache gcc musl-dev make python3-dev`
+   - Include build tools BEFORE dependency installation commands.{doc_search_context}
 
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 1. **NEVER write free text or explanations outside the format below**
