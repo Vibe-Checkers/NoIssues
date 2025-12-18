@@ -936,7 +936,15 @@ class ParallelEmpiricalTester:
 
             # Initialize tools_used for return tracking
             result_tools_used = []
-            
+
+            # Extract stage from docker_result early (needed for error type detection)
+            if docker_result:
+                stage = docker_result.get('stage', 'BUILD')
+                failed_cmd = docker_result.get('failed_command', 'unknown')
+            else:
+                stage = 'BUILD'
+                failed_cmd = 'unknown'
+
             # STAGNATION DETECTION: Check if we are stuck on the same base image
             stagnation_prefix = ""
             current_from = ""
@@ -986,9 +994,151 @@ DO NOT use the same tag again.
                 "syntax error", "unexpected token", "parse error", "invalid syntax",
                 "unknown instruction", "dockerfile parse error", "failed to parse"
             ])
-            
-            # NEW: Handle platform incompatibility error FIRST
-            if is_platform_error:
+
+            # Check specific stage values FIRST (most precise error classification from docker_result)
+            # These come from error analysis in empirical_test.py and are more specific than pattern matching
+            if stage == "DEPENDENCY_FILE_MISSING":
+                self.log(repo_name, f"DEPENDENCY_FILE_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""DEPENDENCY FILE NOT FOUND ERROR
+
+The Dockerfile is trying to COPY a dependency file that doesn't exist at the expected location.
+
+**STEP 1:** Use GrepFiles to search for dependency files (package.json, requirements.txt, pom.xml) in the repository
+**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Fix COPY commands to use correct paths
+**STEP 4:** Ensure files are copied BEFORE running install commands
+
+COMMON FIXES:
+- Files in subdirectory: COPY ./subdir/package.json ./
+- Monorepo: COPY entire workspace first
+- Wrong file name: Check actual file names in repo
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "DEPENDENCY_BUILD_TOOLS":
+                self.log(repo_name, f"DEPENDENCY_BUILD_TOOLS error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""MISSING BUILD TOOLS ERROR
+
+Native dependencies need build tools (compilers, headers) not in base image.
+
+**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 2:** Extract the base image OS and programming language from Dockerfile
+**STEP 3:** Read dependency files (package.json, requirements.txt, Cargo.toml, pom.xml) to identify packages
+**STEP 4:** Analyze error log to find specific missing commands or libraries
+**STEP 5:** Use SearchWeb with specific query based on what you found:
+   - Format: "docker [OS] install build tools for [language] [failing_package_or_command]"
+   - Example: "docker alpine install build tools for python when gcc missing"
+   - Example: "docker debian install dependencies for node-gyp"
+   - Example: "docker ubuntu install libssl-dev for rust openssl"
+**STEP 6:** Based on search results, add RUN command BEFORE dependency install
+
+DISCOVERY APPROACH:
+1. Be SPECIFIC in your search query - include OS, language, and the failing package/command
+2. Look for official documentation in search results
+3. If first search doesn't help, try a different query with more context from the error
+4. Check error log for library names (libssl, libpq, libffi, etc.) and search for those specifically
+
+DO NOT GUESS OR USE HARDCODED EXAMPLES!
+USE SEARCHWEB TO DISCOVER THE CORRECT SOLUTION!
+DO NOT CHANGE BASE IMAGE!
+
+Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "DEPENDENCY_LOCKFILE_MISMATCH":
+                self.log(repo_name, f"DEPENDENCY_LOCKFILE_MISMATCH error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""LOCKFILE MISMATCH ERROR
+
+Lockfile is out of sync with package.json.
+
+**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 2:** Change install command:
+
+INSTEAD OF: npm ci (requires exact lockfile match)
+USE: npm install (generates new lockfile)
+
+INSTEAD OF: pnpm install --frozen-lockfile
+USE: pnpm install
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "FILE_COPY_MISSING":
+                self.log(repo_name, f"FILE_COPY_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""FILE COPY MISSING ERROR
+
+COPY command references file that doesn't exist in build context.
+
+**STEP 1:** Use GrepFiles to find the file in the repository
+**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Fix COPY path or remove if file doesn't exist
+**STEP 4:** Check if file is in .dockerignore
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "BUILD_TOOL_MISSING":
+                self.log(repo_name, f"BUILD_TOOL_MISSING error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""BUILD TOOL/SCRIPT MISSING ERROR
+
+Build script or tool not found/executable.
+
+**STEP 1:** Use GrepFiles to find the build script in the repository
+**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 3:** Fix path or ensure file is executable (chmod +x)
+**STEP 4:** Check if tool needs to be installed first
+
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            elif stage == "IMAGE_VALIDATION_FAILED":
+                self.log(repo_name, f"IMAGE_VALIDATION_FAILED error detected", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+
+                # Extract problematic image
+                problematic_image = "unknown"
+                for line in current_dockerfile.split('\n'):
+                    line_stripped = line.strip()
+                    if line_stripped.upper().startswith('FROM '):
+                        image_part = line_stripped[5:].split()[0]
+                        if ' as ' in image_part.lower():
+                            image_part = image_part.split()[0]
+                        problematic_image = image_part
+                        break
+
+                base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
+
+                refinement_query = f"""IMAGE VALIDATION FAILED
+
+The base image "{problematic_image}" could not be validated (may be invalid, deprecated, or unavailable).
+
+**STEP 1:** Use SearchDockerError with "docker image validation failed {base_image_name}"
+**STEP 2:** Use DockerImageSearch with "tags:{base_image_name}" to find valid tags
+**STEP 3:** Pick a modern verified tag
+**STEP 4:** Update Dockerfile FROM line
+
+MUST USE DockerImageSearch to verify! Final Answer: ONLY Dockerfile content.
+
+Error: {safe_error}"""
+
+            # Handle pattern-based error detection (fallback for cases without specific stage classification)
+            elif is_platform_error:
                 # Detect host platform dynamically
                 import platform
                 host_arch = platform.machine().lower()
@@ -1305,157 +1455,9 @@ Error: {safe_error}
 
 OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
 
-            # NEW: Handle specific dependency error subcategories
-            elif stage == "DEPENDENCY_FILE_MISSING":
-                self.log(repo_name, f"DEPENDENCY_FILE_MISSING error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
-
-                refinement_query = f"""DEPENDENCY FILE NOT FOUND ERROR
-
-The Dockerfile is trying to COPY a dependency file that doesn't exist at the expected location.
-
-**STEP 1:** Use GrepFiles to search for dependency files (package.json, requirements.txt, pom.xml) in the repository
-**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 3:** Fix COPY commands to use correct paths
-**STEP 4:** Ensure files are copied BEFORE running install commands
-
-COMMON FIXES:
-- Files in subdirectory: COPY ./subdir/package.json ./
-- Monorepo: COPY entire workspace first
-- Wrong file name: Check actual file names in repo
-
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
-            elif stage == "DEPENDENCY_BUILD_TOOLS":
-                self.log(repo_name, f"DEPENDENCY_BUILD_TOOLS error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
-
-                refinement_query = f"""MISSING BUILD TOOLS ERROR
-
-Native dependencies need build tools (compilers, headers) not in base image.
-
-**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 2:** Extract the base image OS and programming language from Dockerfile
-**STEP 3:** Read dependency files (package.json, requirements.txt, Cargo.toml, pom.xml) to identify packages
-**STEP 4:** Analyze error log to find specific missing commands or libraries
-**STEP 5:** Use SearchWeb with specific query based on what you found:
-   - Format: "docker [OS] install build tools for [language] [failing_package_or_command]"
-   - Example: "docker alpine install build tools for python when gcc missing"
-   - Example: "docker debian install dependencies for node-gyp"
-   - Example: "docker ubuntu install libssl-dev for rust openssl"
-**STEP 6:** Based on search results, add RUN command BEFORE dependency install
-
-DISCOVERY APPROACH:
-1. Be SPECIFIC in your search query - include OS, language, and the failing package/command
-2. Look for official documentation in search results
-3. If first search doesn't help, try a different query with more context from the error
-4. Check error log for library names (libssl, libpq, libffi, etc.) and search for those specifically
-
-DO NOT GUESS OR USE HARDCODED EXAMPLES!
-USE SEARCHWEB TO DISCOVER THE CORRECT SOLUTION!
-DO NOT CHANGE BASE IMAGE!
-
-Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
-            elif stage == "DEPENDENCY_LOCKFILE_MISMATCH":
-                self.log(repo_name, f"DEPENDENCY_LOCKFILE_MISMATCH error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
-
-                refinement_query = f"""LOCKFILE MISMATCH ERROR
-
-Lockfile is out of sync with package.json.
-
-**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 2:** Change install command:
-
-INSTEAD OF: npm ci (requires exact lockfile match)
-USE: npm install (generates new lockfile)
-
-INSTEAD OF: pnpm install --frozen-lockfile
-USE: pnpm install
-
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
-            elif stage == "FILE_COPY_MISSING":
-                self.log(repo_name, f"FILE_COPY_MISSING error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
-
-                refinement_query = f"""FILE COPY MISSING ERROR
-
-COPY command references file that doesn't exist in build context.
-
-**STEP 1:** Use GrepFiles to find the file in the repository
-**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 3:** Fix COPY path or remove if file doesn't exist
-**STEP 4:** Check if file is in .dockerignore
-
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
-            elif stage == "BUILD_TOOL_MISSING":
-                self.log(repo_name, f"BUILD_TOOL_MISSING error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
-
-                refinement_query = f"""BUILD TOOL/SCRIPT MISSING ERROR
-
-Build script or tool not found/executable.
-
-**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 2:** Identify missing tool (gradlew, configure, cmake, etc.)
-**STEP 3:** Either:
-   - Install the tool: RUN apt-get install cmake
-   - Make script executable: RUN chmod +x ./gradlew
-   - Copy script if missing: COPY gradlew ./
-
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
-            elif stage == "IMAGE_VALIDATION_FAILED":
-                self.log(repo_name, f"IMAGE_VALIDATION_FAILED error detected", to_console=True)
-                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
-
-                base_image_name = "unknown"
-                try:
-                    with open(dockerfile_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if line.strip().upper().startswith('FROM '):
-                                base_image_name = line.strip().split()[1].split(':')[0].split('@')[0]
-                                break
-                except:
-                    pass
-
-                refinement_query = f"""IMAGE VALIDATION FAILED - DEPRECATED/CORRUPTED MANIFEST
-
-The image manifest is corrupted or uses deprecated Docker v1 schema.
-
-**STEP 1:** Use SearchWeb with "docker hub {base_image_name} modern alternatives 2024"
-**STEP 2:** Use DockerImageSearch with "tags:{base_image_name}" to find valid tags
-**STEP 3:** Pick a modern verified tag
-**STEP 4:** Update Dockerfile FROM line
-
-MUST USE DockerImageSearch to verify! Final Answer: ONLY Dockerfile content.
-
-Error: {safe_error}"""
-
             else:
                 self.log(repo_name, f"BUILD error detected - instructing agent to analyze carefully", to_console=True)
-                
-                # Get stage and failed command from docker_result if available
-                if docker_result:
-                    stage = docker_result.get('stage', 'BUILD')
-                    failed_cmd = docker_result.get('failed_command', 'unknown')
-                else:
-                    stage = 'BUILD'
-                    failed_cmd = 'unknown'
-                
+
                 # Sanitize error
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
                 
