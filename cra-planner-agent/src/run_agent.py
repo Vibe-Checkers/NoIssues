@@ -635,8 +635,273 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
 
         "Based on everything you've learned so far, read the README file and extract installation/build instructions. Also search for any 'install', 'build', 'run', or 'start' commands mentioned in configuration files or scripts. Identify: entry points, default ports, required environment variables, volume mounts, and any runtime configuration. Compare with official documentation.",
 
-        # NEW STEP: Mandatory Base Image Verification
-        "**MANDATORY VERIFICATION STEP**: Before generating the Dockerfile, you MUST identify and VERIFY the best Docker base image. 1) Decide on the image (e.g., node:18-alpine, python:3.9-slim). 2) Use `DockerImageSearch` with input 'tags:<image>' to list valid tags. 3) Select a tag that is verifyingly compatible with the host architecture. 4) Use `DockerImageSearch` with input '<image>:<tag>' to confirm it exists. Output ONLY the verified 'FROM' line you will use.",
+        # NEW STEP: Mandatory Modern Base Image Selection with Discovery-Based Approach
+        """**MANDATORY: DISCOVER AND SELECT MODERN BASE IMAGE**
+
+You MUST select a modern, maintained Docker base image using the DockerImageSearch tool.
+CRITICAL: Never trust version numbers from old repository config files!
+
+═══════════════════════════════════════════════════════════════════════════════
+## STEP 1: UNDERSTAND DEPRECATED vs MODERN IMAGES
+═══════════════════════════════════════════════════════════════════════════════
+
+**DEPRECATED IMAGE INDICATORS** (DO NOT USE):
+❌ Python 2.x (EOL 2020) → Broken apt repositories, exit code 100 errors
+❌ Python 3.0-3.8 (EOL) → Security vulnerabilities, no updates
+❌ Node.js 0.x-17.x (EOL) → No security patches, outdated npm
+❌ JDK 6, 7, 8 (EOL 2019-2022) → Security issues, old bytecode
+❌ Rust < 1.60 → Cannot compile modern dependencies (edition 2021)
+❌ GCC < 9 → Missing C++17/20 support
+❌ ANY image with "Last updated" before 2022 → Likely broken/unmaintained
+
+**HOW TO RECOGNIZE DEPRECATED**:
+- Check "Last updated" date in DockerImageSearch results
+- Major version in EOL list (Python 2.x, Node 14.x, etc.)
+- Build errors: "apt-get exit code 100", "manifest unknown", "platform mismatch"
+
+═══════════════════════════════════════════════════════════════════════════════
+## STEP 2: USE DockerImageSearch TOOL TO DISCOVER MODERN IMAGES
+═══════════════════════════════════════════════════════════════════════════════
+
+**REQUIRED PROCESS** (You MUST follow these steps):
+
+**2a. Identify Base Image Name**
+From previous queries, determine what language/framework is needed:
+- Python → base image: `python`
+- Node.js → base image: `node`
+- Java+Maven → base image: `maven` or `eclipse-temurin`
+- Rust → base image: `rust`
+- C/C++ → base image: `gcc` or `ubuntu`
+- Go → base image: `golang`
+
+**2b. List Available Tags (MANDATORY TOOL CALL)**
+Call DockerImageSearch with: `tags:<base_image>`
+
+Example tool calls:
+- For Python: DockerImageSearch input: `tags:python`
+- For Node.js: DockerImageSearch input: `tags:node`
+- For Rust: DockerImageSearch input: `tags:rust`
+
+**2c. Analyze Tool Output and Select Tag**
+
+The tool returns tags sorted by "Last updated" (newest first) with these markers:
+- `[OK]` = Compatible with your architecture ✅ USE THESE
+- `[!!]` = INCOMPATIBLE with your architecture ❌ DO NOT USE
+
+Selection Rules:
+1. **Pick from top 15 results** (recently updated = actively maintained)
+2. **Must have [OK] marker** (architecture compatible)
+3. **Prefer MAJOR.MINOR format**, avoid MAJOR.MINOR.PATCH
+   - ✅ GOOD: `3.12-slim`, `20-alpine`, `1.75-slim` (auto-updates patches)
+   - ❌ AVOID: `3.12.1-slim`, `20.10.0` (frozen at specific patch)
+4. **Prefer slim/alpine variants** (smaller, faster)
+   - `-slim` = Debian-based, smaller than full
+   - `-alpine` = Alpine-based, smallest
+   - No suffix = Full image (larger but more tools)
+5. **Check "Last updated" date**
+   - ✅ 2025-XX-XX or 2024-XX-XX = Modern
+   - ❌ 2022-XX-XX or older = Too old
+
+**2d. Verify Selected Tag (MANDATORY TOOL CALL)**
+Call DockerImageSearch with: `<image>:<tag>`
+
+Example: DockerImageSearch input: `python:3.12-slim`
+
+This confirms:
+- Tag exists
+- Architecture support
+- Last updated date
+- Digest/SHA256
+
+═══════════════════════════════════════════════════════════════════════════════
+## STEP 3: CONCRETE EXAMPLES OF TOOL USAGE
+═══════════════════════════════════════════════════════════════════════════════
+
+**Example 1: Python Project with Old Version**
+Repository has: `python_requires=">=2.7"` in setup.py
+
+Your reasoning:
+"Repository specifies Python 2.7 (EOL 2020, broken apt repos).
+Python 3 has excellent backwards compatibility. Let me discover current version..."
+
+Tool Call #1: DockerImageSearch with input `tags:python`
+
+Expected output (example):
+```
+Available tags for 'python':
+============================================================
+HOST: ARM64 (Apple Silicon / Raspberry Pi)
+[OK] = Compatible  |  [!!] = INCOMPATIBLE
+
+VERSIONED TAGS (Examples):
+  - python:3.13-slim [OK] (updated: 2024-12-15)
+  - python:3.12-slim [OK] (updated: 2024-12-14)
+  - python:3.11-slim [OK] (updated: 2024-12-10)
+  - python:3.10-slim [OK] (updated: 2024-12-08)
+  - python:3.13-alpine [OK] (updated: 2024-12-12)
+  - python:3.12-alpine [OK] (updated: 2024-12-11)
+  ...
+```
+
+Your decision:
+"I see python:3.13-slim updated 2024-12-15 with [OK] marker. This is latest stable."
+
+Tool Call #2: DockerImageSearch with input `python:3.13-slim`
+
+Expected output (example):
+```
+✅ VERIFIED: python:3.13-slim
+   Last Updated: 2024-12-15
+   Architectures: linux/amd64, linux/arm64 ✅ (Compatible with ARM64)
+   Digest: sha256:abc123...
+   Status: Tag exists and is compatible
+```
+
+Your output: "VERIFIED MODERN BASE IMAGE: FROM python:3.13-slim"
+
+---
+
+**Example 2: Node.js Project with Ancient Version**
+Repository has: `"node": "0.12.2"` in package.json
+
+Your reasoning:
+"package.json shows node 0.12.2 from 2015 (10 years old, EOL).
+Modern Node has backwards compatibility. Let me find current LTS..."
+
+Tool Call #1: DockerImageSearch with input `tags:node`
+
+Expected output (example):
+```
+Available tags for 'node':
+============================================================
+HOST: AMD64 (Intel/AMD x86_64)
+[OK] = Compatible  |  [!!] = INCOMPATIBLE
+
+VERSIONED TAGS (Recommended):
+  - node:23-slim [OK] (updated: 2024-12-18)
+  - node:22-alpine [OK] (updated: 2024-12-17)
+  - node:20-slim [OK] (updated: 2024-12-16)  ← LTS
+  - node:20-alpine [OK] (updated: 2024-12-15)  ← LTS
+  - node:18-slim [OK] (updated: 2024-11-30)
+  ...
+```
+
+Your decision:
+"I see node:20-slim (LTS) updated 2024-12-16 with [OK]. LTS means long-term support."
+
+Tool Call #2: DockerImageSearch with input `node:20-slim`
+
+Expected output (example):
+```
+✅ VERIFIED: node:20-slim
+   Last Updated: 2024-12-16
+   Architectures: linux/amd64, linux/arm64, linux/arm/v7 ✅
+   Digest: sha256:def456...
+   Status: Tag exists and is compatible
+```
+
+Your output: "VERIFIED MODERN BASE IMAGE: FROM node:20-slim"
+
+---
+
+**Example 3: Rust Project with Old Compiler**
+Repository has: Dockerfile.example mentions `FROM rust:1.19.0`
+
+Your reasoning:
+"Old Dockerfile references rust:1.19.0 from 2017 (7+ years old).
+Rust edition 2021 requires >=1.56. Let me find current version..."
+
+Tool Call #1: DockerImageSearch with input `tags:rust`
+
+Expected output (example):
+```
+Available tags for 'rust':
+============================================================
+HOST: ARM64 (Apple Silicon / Raspberry Pi)
+
+VERSIONED TAGS (Recommended):
+  - rust:1.83-slim [OK] (updated: 2024-12-10)
+  - rust:1.82-alpine [OK] (updated: 2024-11-28)
+  - rust:1.81-slim [OK] (updated: 2024-11-15)
+  - rust:1.83-bookworm [OK] (updated: 2024-12-09)
+  ...
+```
+
+Your decision:
+"rust:1.83-slim is latest stable (updated 2024-12-10), supports modern code."
+
+Tool Call #2: DockerImageSearch with input `rust:1.83-slim`
+
+Expected output (example):
+```
+✅ VERIFIED: rust:1.83-slim
+   Last Updated: 2024-12-10
+   Architectures: linux/amd64, linux/arm64 ✅
+   Digest: sha256:ghi789...
+   Status: Tag exists and is compatible
+```
+
+Your output: "VERIFIED MODERN BASE IMAGE: FROM rust:1.83-slim"
+
+---
+
+**Example 4: Maven Project with Old JDK**
+Repository has: `<maven.compiler.source>1.7</maven.compiler.source>` in pom.xml
+
+Your reasoning:
+"pom.xml specifies Java 7 (EOL 2022). Modern JDK compiles old Java code.
+Let me find modern Maven with current JDK..."
+
+Tool Call #1: DockerImageSearch with input `tags:maven`
+
+Expected output (example):
+```
+Available tags for 'maven':
+============================================================
+VERSIONED TAGS (Recommended):
+  - maven:3.9-eclipse-temurin-21 [OK] (updated: 2024-12-01)
+  - maven:3.9-eclipse-temurin-17 [OK] (updated: 2024-11-28)
+  - maven:3.9-amazoncorretto-21 [OK] (updated: 2024-11-25)
+  ...
+```
+
+Your decision:
+"maven:3.9-eclipse-temurin-17 (JDK 17 LTS) compiles Java 7 code fine."
+
+Tool Call #2: DockerImageSearch with input `maven:3.9-eclipse-temurin-17`
+
+Expected output (example):
+```
+✅ VERIFIED: maven:3.9-eclipse-temurin-17
+   Last Updated: 2024-11-28
+   Architectures: linux/amd64, linux/arm64 ✅
+   Status: Tag exists and is compatible
+```
+
+Your output: "VERIFIED MODERN BASE IMAGE: FROM maven:3.9-eclipse-temurin-17"
+
+═══════════════════════════════════════════════════════════════════════════════
+## YOUR TASK (MANDATORY STEPS)
+═══════════════════════════════════════════════════════════════════════════════
+
+1. **Identify language/framework** from previous queries
+2. **If repository config has old version** → Recognize it's deprecated
+3. **Call DockerImageSearch with `tags:<base_image>`** (REQUIRED - NO SHORTCUTS!)
+4. **Analyze results** using selection rules above
+5. **Call DockerImageSearch with `<image>:<selected_tag>`** to verify (REQUIRED!)
+6. **Output**: "VERIFIED MODERN BASE IMAGE: FROM <image>:<tag>"
+
+**CRITICAL RULES**:
+- ✅ MUST use DockerImageSearch tool (can't skip!)
+- ✅ MUST pick tags with [OK] marker (architecture compatible)
+- ✅ MUST prefer recently updated tags (2024 > 2023 > 2022)
+- ✅ MUST prefer MAJOR.MINOR over MAJOR.MINOR.PATCH
+- ❌ NEVER use tags with "Last updated" before 2022
+- ❌ NEVER trust old version numbers from repo configs
+- ❌ NEVER use tags with [!!] marker (incompatible)
+
+**Why this matters**: Modern images = faster builds, better security, fewer errors!
+""",
 
             """Based on the information you gathered in Query 1, 2, 3, and the VERIFIED base image from Query 4, create a Dockerfile AND a .dockerignore file.
 
@@ -646,6 +911,39 @@ def analyze_repository(agent, repo_path: str, repo_name: str, repo_url: str, cal
 
 **YOUR TASK**: Generate the Dockerfile and .dockerignore.
 
+**CRITICAL OUTPUT FORMAT RULES**:
+❌ **NEVER include DOCKERFILE_START, DOCKERFILE_END, DOCKERIGNORE_START, DOCKERIGNORE_END inside the actual file content!**
+❌ **NEVER use placeholder text like [PATH], [HASH], [VERSION] - use real values!**
+❌ **NEVER use shell syntax (||, 2>/dev/null, &&) in COPY commands - Docker syntax only!**
+❌ **NEVER manually install package managers (curl Maven/Gradle) - use official base images!**
+
+**WRONG OUTPUT EXAMPLES**:
+```dockerfile
+FROM gcc:13
+COPY . .
+CMD ["/bin/bash"]
+DOCKERFILE_END   ❌ NO! This is a delimiter, not content!
+```
+
+```dockerfile
+FROM docker.io[PATH]/gcc:13@sha256:[HASH]   ❌ NO placeholders!
+COPY package.json ./ 2>/dev/null || true     ❌ NO shell syntax!
+RUN curl https://apache.org/.../maven.tar.gz ❌ Don't curl package managers!
+```
+
+**CORRECT OUTPUT EXAMPLES**:
+```dockerfile
+FROM gcc:13
+COPY . .
+CMD ["/bin/bash"]
+```
+
+```dockerfile
+FROM maven:3.9-eclipse-temurin-17 AS build  ✅ Use official image!
+COPY package*.json ./                        ✅ Docker glob syntax!
+WORKDIR /app
+CMD ["java", "-jar", "app.jar"]
+```
 
 **OPTIONAL**: You MAY use DockerImageSearch ONLY if you need to verify a base image tag exists. Otherwise, provide the Final Answer immediately.
 

@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from improved_error_recognition import ImprovedErrorRecognition
 
 # Load environment variables FIRST before any other imports
 print("[STARTUP] Loading environment variables...")
@@ -352,6 +353,36 @@ class ParallelEmpiricalTester:
                         dockerfile_content = f.read()
 
                     if iteration == 0:
+                        # === CLEAN AND VALIDATE INITIAL AGENT OUTPUT ===
+                        recognizer = ImprovedErrorRecognition()
+
+                        # 1. Clean agent output (remove delimiters, placeholders, fix syntax)
+                        original_content = dockerfile_content
+                        dockerfile_content = recognizer.clean_agent_dockerfile_output(dockerfile_content)
+                        if dockerfile_content != original_content:
+                            self.log(repo_name, "✓ Cleaned agent output", to_console=True)
+
+                        # 2. Validate for remaining errors
+                        has_error, error_type = recognizer.detect_output_format_errors(dockerfile_content)
+                        if has_error:
+                            self.log(repo_name, f"⚠️ Output validation warning: {error_type}", to_console=True)
+
+                        # 3. Modernize old base images
+                        dockerfile_content, was_modernized = recognizer.modernize_base_image(dockerfile_content)
+                        if was_modernized:
+                            self.log(repo_name, "🔄 Modernized old base image", to_console=True)
+
+                        # 4. Fix manual package manager installs
+                        dockerfile_content, was_fixed = recognizer.prevent_manual_package_manager_install(dockerfile_content)
+                        if was_fixed:
+                            self.log(repo_name, "🔧 Replaced manual package manager install with base image", to_console=True)
+
+                        # Write cleaned Dockerfile back
+                        if dockerfile_content != original_content:
+                            with open(dockerfile_path, 'w', encoding='utf-8') as f:
+                                f.write(dockerfile_content)
+                            self.log(repo_name, "Dockerfile cleaned and validated", to_console=False)
+
                         result["dockerfile_content"] = dockerfile_content
                         self.log(repo_name, f"Testing initial Dockerfile (iteration {iteration})...", to_console=True)
                     else:
@@ -863,6 +894,21 @@ class ParallelEmpiricalTester:
             print(f"[WARNING] Could not strip digest pins: {e}")
             return False
 
+    def _classify_docker_error_improved(self, error_log: str, failed_command: str, exit_code: int = 1) -> str:
+        """
+        Use improved error classification system with priority-based detection.
+
+        Args:
+            error_log: The error message from Docker build
+            failed_command: The command that failed
+            exit_code: The exit code from the failed command
+
+        Returns:
+            Error stage classification string
+        """
+        recognizer = ImprovedErrorRecognition()
+        return recognizer.classify_docker_build_error(error_log, failed_command, exit_code)
+
     def _sanitize_error_for_azure(self, error_log: str, max_length: int = 400) -> str:
         """Sanitize error log to avoid Azure content safety filters."""
         # Remove potentially problematic content
@@ -941,9 +987,17 @@ class ParallelEmpiricalTester:
             if docker_result:
                 stage = docker_result.get('stage', 'BUILD')
                 failed_cmd = docker_result.get('failed_command', 'unknown')
+                exit_code = docker_result.get('exit_code', 1)
+
+                # Use improved error classification to override stage
+                improved_stage = self._classify_docker_error_improved(error_log, failed_cmd, exit_code)
+                if improved_stage != stage:
+                    self.log(repo_name, f"Improved classification: {stage} → {improved_stage}", to_console=False)
+                    stage = improved_stage
             else:
                 stage = 'BUILD'
                 failed_cmd = 'unknown'
+                exit_code = 1
 
             # STAGNATION DETECTION: Check if we are stuck on the same base image
             stagnation_prefix = ""
@@ -1019,11 +1073,169 @@ DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
 
 Error: {safe_error}"""
 
+            elif stage == "AGENT_OUTPUT_ERROR":
+                self.log(repo_name, "AGENT_OUTPUT_ERROR detected - regenerating cleanly", to_console=True)
+
+                refinement_query = f"""CRITICAL: Your previous output had format errors!
+
+Problems detected:
+- You included DOCKERFILE_END or DOCKERFILE_START in the actual Dockerfile content
+- OR you used placeholder text like [PATH] or [HASH] instead of real values
+- OR you used shell syntax (||, 2>/dev/null) in COPY commands
+
+**STEP 1**: Read the project structure again
+**STEP 2**: Generate a CLEAN Dockerfile with NO formatting markers
+**STEP 3**: Use REAL image names (e.g., gcc:13, NOT docker.io[PATH]/gcc:13@sha256:[HASH])
+**STEP 4**: COPY commands must use Docker syntax ONLY (no bash operators)
+
+WRONG:
+```dockerfile
+COPY package.json ./ 2>/dev/null || true   ❌ NO shell syntax!
+FROM docker.io[PATH]/gcc:13@sha256:[HASH]  ❌ NO placeholders!
+CMD ["/bin/bash"]
+DOCKERFILE_END   ❌ NO markers!
+```
+
+CORRECT:
+```dockerfile
+FROM gcc:13
+COPY package*.json ./
+CMD ["/bin/bash"]
+```
+
+Read current Dockerfile: {dockerfile_absolute}
+OUTPUT: Complete, clean Dockerfile starting with FROM"""
+
+            elif stage == "EXTERNAL_DOWNLOAD_FAILED":
+                self.log(repo_name, "EXTERNAL_DOWNLOAD_FAILED - use base image instead", to_console=True)
+
+                refinement_query = f"""DOWNLOAD FAILURE - Don't manually install package managers!
+
+You tried to download Maven/Gradle with curl, but it failed (HTTP 404 or similar).
+
+**SOLUTION**: Use the official base image instead!
+
+WRONG:
+```dockerfile
+FROM eclipse-temurin:17-jdk
+RUN curl https://apache.org/.../apache-maven-3.9.6.tar.gz   ❌ Don't do this!
+RUN tar -xzf ...
+```
+
+CORRECT:
+```dockerfile
+FROM maven:3.9-eclipse-temurin-17 AS build  ✅ Use official image!
+```
+
+**STEP 1**: Read current Dockerfile: {dockerfile_absolute}
+**STEP 2**: Replace base image with official Maven/Gradle image
+**STEP 3**: Remove all curl/wget/manual installation commands
+
+Available official images:
+- Maven: maven:3.9-eclipse-temurin-17
+- Gradle: gradle:8-jdk17
+
+OUTPUT: Complete Dockerfile using official base image"""
+
+            elif stage == "BUILD_FAILED":
+                self.log(repo_name, "BUILD_FAILED - actual compilation error", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""BUILD COMMAND FAILED - This is a compilation/build error
+
+The build command itself failed (make, ninja, pnpm run build, etc.)
+This is NOT a missing dependency - tools are installed correctly.
+
+This could be:
+1. Source code incompatibility
+2. Build configuration error
+3. TypeScript/compilation error
+
+**STEP 1**: Read the error log carefully
+**STEP 2**: Use SearchWeb with the specific error message
+**STEP 3**: Try simplifying the build:
+   - Add flags: --skip-tests, --no-verify
+   - Different target: compile instead of package
+   - Ignore errors: || true
+
+Example fixes:
+```dockerfile
+RUN pnpm run build || pnpm run compile  # Try alternative command
+RUN npm run build -- --skip-tests       # Skip tests
+RUN make || true                        # Ignore errors
+```
+
+Read Dockerfile: {dockerfile_absolute}
+Error: {safe_error}
+
+OUTPUT: Modified Dockerfile with adjusted build command"""
+
+            elif stage == "DEPENDENCY_MISSING_LIBRARY":
+                self.log(repo_name, "DEPENDENCY_MISSING_LIBRARY - specific library needed", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
+
+                refinement_query = f"""MISSING SPECIFIC LIBRARY - Meson/CMake can't find a dependency
+
+Meson or CMake is looking for a specific library that's not installed.
+
+**STEP 1**: Read the error - what library is it looking for?
+**STEP 2**: Use SearchWeb with: "debian install [library_name]-dev package"
+**STEP 3**: Add that specific package to RUN apt-get install
+
+Example:
+If error says "Could not find libfoo"
+→ Search: "debian install libfoo-dev"
+→ Add: libfoo-dev to apt-get install command
+
+Read Dockerfile: {dockerfile_absolute}
+Error: {safe_error}
+
+OUTPUT: Dockerfile with the specific missing library added"""
+
             elif stage == "DEPENDENCY_BUILD_TOOLS":
                 self.log(repo_name, f"DEPENDENCY_BUILD_TOOLS error detected", to_console=True)
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
 
-                refinement_query = f"""MISSING BUILD TOOLS ERROR
+                # Check if this is a Python scientific package case
+                is_python_scientific = any(pkg in error_log.lower() or pkg in failed_cmd.lower()
+                                           for pkg in ['numpy', 'pandas', 'scipy', 'scikit-learn', 'sklearn', 'matplotlib'])
+
+                if is_python_scientific:
+                    self.log(repo_name, "Detected Python scientific package - providing direct solution", to_console=True)
+                    refinement_query = f"""PYTHON SCIENTIFIC PACKAGE BUILD ERROR
+
+Python scientific packages (numpy, pandas, scipy, scikit-learn) need C/Fortran compilers and BLAS libraries.
+
+**DIRECT SOLUTION** (no search needed):
+
+**STEP 1:** Read current Dockerfile: {dockerfile_absolute}
+**STEP 2:** Add these packages BEFORE pip install:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential \\
+    gfortran \\
+    libopenblas-dev \\
+    liblapack-dev \\
+    python3-dev \\
+ && rm -rf /var/lib/apt/lists/*
+```
+
+**STEP 3:** Keep existing pip install commands unchanged
+
+This provides:
+- build-essential: gcc, g++, make
+- gfortran: Fortran compiler for scipy/numpy
+- libopenblas-dev: Optimized BLAS library
+- liblapack-dev: Linear algebra library
+- python3-dev: Python headers
+
+DO NOT CHANGE BASE IMAGE!
+Final Answer: ONLY Dockerfile content."""
+
+                else:
+                    # General case - use discovery approach
+                    refinement_query = f"""MISSING BUILD TOOLS ERROR
 
 Native dependencies need build tools (compilers, headers) not in base image.
 
