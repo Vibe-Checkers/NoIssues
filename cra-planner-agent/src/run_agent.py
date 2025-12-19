@@ -900,6 +900,17 @@ Your output: "VERIFIED MODERN BASE IMAGE: FROM maven:3.9-eclipse-temurin-17"
 - ❌ NEVER trust old version numbers from repo configs
 - ❌ NEVER use tags with [!!] marker (incompatible)
 
+**ARCHITECTURE COMPATIBILITY NOTE**:
+If you're selecting an image:
+- The [OK] marker means it supports your system's architecture
+- The [!!] marker means it won't work (wrong architecture)
+- Prefer: -slim or -bookworm variants (better multi-arch support)
+- Be careful with: -alpine variants (sometimes lack ARM64 support)
+
+**VERIFICATION IS MANDATORY**:
+Don't assume an image exists or works - ALWAYS verify with DockerImageSearch before using it.
+This prevents wasting iterations on images that don't exist or aren't compatible.
+
 **Why this matters**: Modern images = faster builds, better security, fewer errors!
 """,
 

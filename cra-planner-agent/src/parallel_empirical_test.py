@@ -32,7 +32,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from improved_error_recognition import ImprovedErrorRecognition
+# Removed: improved_error_recognition - caused more problems than it solved
+# from improved_error_recognition import ImprovedErrorRecognition
 
 # Load environment variables FIRST before any other imports
 print("[STARTUP] Loading environment variables...")
@@ -353,36 +354,8 @@ class ParallelEmpiricalTester:
                         dockerfile_content = f.read()
 
                     if iteration == 0:
-                        # === CLEAN AND VALIDATE INITIAL AGENT OUTPUT ===
-                        recognizer = ImprovedErrorRecognition()
-
-                        # 1. Clean agent output (remove delimiters, placeholders, fix syntax)
-                        original_content = dockerfile_content
-                        dockerfile_content = recognizer.clean_agent_dockerfile_output(dockerfile_content)
-                        if dockerfile_content != original_content:
-                            self.log(repo_name, "✓ Cleaned agent output", to_console=True)
-
-                        # 2. Validate for remaining errors
-                        has_error, error_type = recognizer.detect_output_format_errors(dockerfile_content)
-                        if has_error:
-                            self.log(repo_name, f"⚠️ Output validation warning: {error_type}", to_console=True)
-
-                        # 3. Modernize old base images
-                        dockerfile_content, was_modernized = recognizer.modernize_base_image(dockerfile_content)
-                        if was_modernized:
-                            self.log(repo_name, "🔄 Modernized old base image", to_console=True)
-
-                        # 4. Fix manual package manager installs
-                        dockerfile_content, was_fixed = recognizer.prevent_manual_package_manager_install(dockerfile_content)
-                        if was_fixed:
-                            self.log(repo_name, "🔧 Replaced manual package manager install with base image", to_console=True)
-
-                        # Write cleaned Dockerfile back
-                        if dockerfile_content != original_content:
-                            with open(dockerfile_path, 'w', encoding='utf-8') as f:
-                                f.write(dockerfile_content)
-                            self.log(repo_name, "Dockerfile cleaned and validated", to_console=False)
-
+                        # Trust the agent's Dockerfile generation from improved prompts
+                        # Removed pre-checks that were breaking agent learning feedback loop
                         result["dockerfile_content"] = dockerfile_content
                         self.log(repo_name, f"Testing initial Dockerfile (iteration {iteration})...", to_console=True)
                     else:
@@ -894,20 +867,9 @@ class ParallelEmpiricalTester:
             print(f"[WARNING] Could not strip digest pins: {e}")
             return False
 
-    def _classify_docker_error_improved(self, error_log: str, failed_command: str, exit_code: int = 1) -> str:
-        """
-        Use improved error classification system with priority-based detection.
-
-        Args:
-            error_log: The error message from Docker build
-            failed_command: The command that failed
-            exit_code: The exit code from the failed command
-
-        Returns:
-            Error stage classification string
-        """
-        recognizer = ImprovedErrorRecognition()
-        return recognizer.classify_docker_build_error(error_log, failed_command, exit_code)
+    # Removed: _classify_docker_error_improved - was misclassifying errors
+    # Caused FILE_COPY_MISSING → DEPENDENCY_BUILD_TOOLS (wrong!)
+    # Trust the original Docker build error detection instead
 
     def _sanitize_error_for_azure(self, error_log: str, max_length: int = 400) -> str:
         """Sanitize error log to avoid Azure content safety filters."""
@@ -983,17 +945,12 @@ class ParallelEmpiricalTester:
             # Initialize tools_used for return tracking
             result_tools_used = []
 
-            # Extract stage from docker_result early (needed for error type detection)
+            # Extract stage from docker_result - trust the original classification
             if docker_result:
                 stage = docker_result.get('stage', 'BUILD')
                 failed_cmd = docker_result.get('failed_command', 'unknown')
                 exit_code = docker_result.get('exit_code', 1)
-
-                # Use improved error classification to override stage
-                improved_stage = self._classify_docker_error_improved(error_log, failed_cmd, exit_code)
-                if improved_stage != stage:
-                    self.log(repo_name, f"Improved classification: {stage} → {improved_stage}", to_console=False)
-                    stage = improved_stage
+                # Removed: improved error classification override - was causing misclassifications
             else:
                 stage = 'BUILD'
                 failed_cmd = 'unknown'
@@ -1289,18 +1246,32 @@ Error: {safe_error}"""
                 self.log(repo_name, f"FILE_COPY_MISSING error detected", to_console=True)
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
 
-                refinement_query = f"""FILE COPY MISSING ERROR
+                refinement_query = f"""FILE COPY ERROR - Source Path Doesn't Exist
 
-COPY command references file that doesn't exist in build context.
+Your Dockerfile has a COPY command that references a path which doesn't exist in the repository.
 
-**STEP 1:** Use GrepFiles to find the file in the repository
-**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 3:** Fix COPY path or remove if file doesn't exist
-**STEP 4:** Check if file is in .dockerignore
+**This is a path/directory issue, not an image or dependency problem.**
 
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+**STEP 1 - IDENTIFY THE PROBLEM**: Read Dockerfile at: {dockerfile_absolute}
+   Look for the COPY command that's failing (the error will tell you which one)
 
-Error: {safe_error}"""
+**STEP 2 - SEE WHAT ACTUALLY EXISTS**: Use DirectoryTree to see the repository structure
+   Compare what the Dockerfile expects vs. what's actually there
+
+**STEP 3 - FIX THE COPY COMMAND** (choose the best option):
+   Option A: Fix the path if it's just wrong (e.g., COPY src → COPY source)
+   Option B: Remove the COPY line if the source truly doesn't exist and isn't needed
+   Option C: Use COPY . /app to copy the whole project (if unsure what to copy)
+   Option D: Check .dockerignore if the file exists but is being ignored
+
+**HELPFUL HINTS**:
+- This is about fixing file paths, not changing the Docker image
+- The base image is likely fine - focus on getting the correct source paths
+- If you're unsure which directory to copy, DirectoryTree will show you the actual structure
+
+Error details: {safe_error}
+
+OUTPUT: Fixed Dockerfile with correct COPY paths"""
 
             elif stage == "BUILD_TOOL_MISSING":
                 self.log(repo_name, f"BUILD_TOOL_MISSING error detected", to_console=True)
@@ -1389,27 +1360,41 @@ Error: {safe_error}"""
                 base_image_name = problematic_image.split(':')[0] if problematic_image != "unknown" else "unknown"
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
                 
-                refinement_query = f"""CRITICAL: Platform/Architecture Mismatch Error!
+                refinement_query = f"""Platform/Architecture Compatibility Issue
 
-The base image "{problematic_image}" does NOT support {arch_name} ({arch_devices} / {expected_platform}).
-It was built for a different architecture which is incompatible with this system.
+The Docker image "{problematic_image}" doesn't support your system's architecture.
 
-**STEP 1 - FIND {arch_name} COMPATIBLE IMAGE**: Use DockerImageSearch with "tags:{base_image_name}"
-   Look for tags with multi-arch support, or recent version numbers (2022+)
-   
-**STEP 2 - VERIFY {arch_name} SUPPORT**: Use DockerImageSearch with "{base_image_name}:<tag>"
-   Check the "Architectures" field - must include "{host_docker_arch}" support
+Your system: {arch_name} ({arch_devices} - {expected_platform})
+The problem: This image tag was built for a different architecture and won't work here
+
+**HOW TO FIX THIS**:
+
+**STEP 1 - LIST AVAILABLE TAGS**: Use DockerImageSearch with "tags:{base_image_name}"
+   This will show you all available tags with compatibility markers:
+   - [OK] means compatible with {arch_name}
+   - [!!] means NOT compatible (skip these)
+
+   Look for:
+   - Tags marked [OK] for your architecture
+   - Recent versions (2023+) usually have better multi-arch support
+   - Prefer: -slim, -bookworm variants (better ARM64 support)
+   - Avoid: -alpine variants if you see compatibility issues (sometimes lack ARM64 builds)
+
+**STEP 2 - VERIFY YOUR CHOICE**: Use DockerImageSearch with "{base_image_name}:<your-chosen-tag>"
+   Double-check that "Architectures" field includes: {host_docker_arch}
+   This confirms it will work on your system
 
 **STEP 3 - UPDATE DOCKERFILE**: Read {dockerfile_absolute}
-   Replace the base image with a {arch_name}-compatible version
+   Replace the FROM line with your verified {arch_name}-compatible image
 
-CRITICAL RULES:
-- The image MUST support {expected_platform} architecture
-- Use recent versions (2022+) which typically have multi-arch support
-- Verify with DockerImageSearch before using
-- Final Answer: ONLY Dockerfile content starting with FROM
+**HELPFUL TIPS**:
+- Most official images have multi-arch support in recent versions
+- If the image name includes "alpine", try the "slim" variant instead for better compatibility
+- You can use the same version number, just different variant (e.g., 17-alpine → 17-slim)
 
-Error: {safe_error}"""
+Error details: {safe_error}
+
+OUTPUT: Updated Dockerfile with {arch_name}-compatible base image"""
 
             # Build targeted refinement query based on error type
             elif is_image_pull_error:
