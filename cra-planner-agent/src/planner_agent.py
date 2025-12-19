@@ -2299,9 +2299,54 @@ Thought:{agent_scratchpad}"""
         """Handle parsing errors by providing a clear message to the agent."""
         error_str = str(error)
         logger.warning(f"Parsing error: {error_str}")
+
+        # Check for common parsing errors and provide specific guidance
         if "Could not parse" in error_str or "Missing 'Action:'" in error_str or "Invalid Format" in error_str:
-            return "I made a format error. I MUST write 'Action: <tool_name>' on one line, then 'Action Input: <input>' on the next line. I cannot write free text or markdown code blocks for the Action.\n\nCorrect Example:\nThought: I need to search.\nAction: SearchWeb\nAction Input: query\n\nExample Final Answer:\nThought: I am done.\nFinal Answer: The result is..."
-        return f"Format error: {error_str}. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. If I am done, I must write 'Final Answer:'. Do not use markdown blocks."
+            return """FORMAT ERROR: You wrote something that doesn't follow the required format.
+
+CRITICAL RULES:
+1. Write ONLY ONE of these per turn:
+   - Either an Action (tool call)
+   - OR a Final Answer (when done)
+
+2. NEVER write both in the same turn
+3. NEVER write explanatory text between Action and Action Input
+4. NEVER use markdown code blocks (```) in your response
+
+CORRECT Action Format:
+Thought: I need to search for information.
+Action: SearchWeb
+Action Input: docker build error solutions
+
+CORRECT Final Answer Format:
+Thought: I have all the information I need to provide the Dockerfile.
+Final Answer: FROM python:3.11-slim
+RUN apt-get update && apt-get install -y build-essential
+COPY . /app
+WORKDIR /app
+RUN pip install -r requirements.txt
+CMD ["python", "app.py"]
+
+COMMON MISTAKES TO AVOID:
+- Writing "Final Answer:" then continuing with Actions
+- Writing text after "Action:" but before "Action Input:"
+- Using markdown ```dockerfile blocks (just write the Dockerfile directly)"""
+
+        # Handle specific parsing error for "both final answer and action"
+        if "both a final answer and a parse-able action" in error_str.lower():
+            return """FORMAT ERROR: You wrote BOTH a Final Answer AND an Action in the same response.
+
+You can only do ONE thing per turn:
+- Either call a tool (Action + Action Input)
+- OR provide your final answer (Final Answer)
+
+If you need more information, use an Action.
+If you're ready to answer, use Final Answer.
+NEVER use both at once.
+
+Try again with ONLY ONE of these."""
+
+        return f"Format error. I must write 'Action: <tool_name>' then 'Action Input: <input>' on separate lines. If I am done, I must write 'Final Answer:' followed by my complete answer. Do not use markdown blocks. Error details: {error_str[:200]}"
 
     agent_executor = AgentExecutor(
         agent=agent,
@@ -2311,7 +2356,7 @@ Thought:{agent_scratchpad}"""
         handle_parsing_errors=handle_parsing_error,  # Use the function, not True
         max_iterations=max_iterations,
         max_execution_time=None,  # No time limit
-        early_stopping_method="force",  # Force stop if max iterations reached (generate not supported)
+        early_stopping_method="generate",  # Generate final answer if max iterations reached
         return_intermediate_steps=True  # Enable to track tool usage
     )
 

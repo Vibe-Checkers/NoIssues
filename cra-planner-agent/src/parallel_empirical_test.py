@@ -1705,7 +1705,7 @@ YOU MUST USE 'SearchDockerError' or 'SearchWeb' to understand the error before p
                         "input": stagnation_prefix + tool_warning + refinement_query,
                         "chat_history": f"Repository: {repo_name}. Dockerfile iteration {iteration}. Use tools to investigate."
                     },
-                    max_iterations=10  # Enough iterations to use multiple tools and analyze
+                    max_iterations=15  # Increased from 10 to give agent more attempts to recover from parsing errors
                 )
             except (ValueError, Exception) as e:
                 # Fallback: if agent errors out (early_stopping or iteration limit), try direct LLM call
