@@ -1,498 +1,233 @@
-#!/usr/bin/env python3
-"""
-Zero-Shot Build Agent
-Generated Dockerfiles based ONLY on README.md and a System Prompt.
-Then attempts to build the image immediately.
-"""
-
 import os
 import sys
+import json
 import subprocess
+import argparse
 import shutil
-import time
-import stat
-from pathlib import Path
+from typing import Optional, List, Dict
+from litellm import completion
+import litellm
 from dotenv import load_dotenv
-from langchain_openai import AzureChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
-
-# Load environment variables
-root_dir = Path(__file__).parent.parent
-env_path = root_dir / "cra-planner-agent" / ".env"
-
-if not env_path.exists():
-    # Fallback to current directory or parent
-    env_path = root_dir / ".env"
-
-if env_path.exists():
-    load_dotenv(env_path)
-else:
-    print(f"[WARNING] .env not found at {env_path}")
-
-def setup_llm():
-    """Initialize Azure OpenAI LLM."""
-    api_key = os.getenv("AZURE_OPENAI_API_KEY")
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-
-    if not all([api_key, endpoint, deployment]):
-        print("Error: Missing Azure OpenAI credentials in .env file")
-        sys.exit(1)
-
-    return AzureChatOpenAI(
-        azure_deployment=deployment,
-        api_key=api_key,
-        azure_endpoint=endpoint,
-        api_version=api_version
-    )
-
-
-import traceback
-from typing import Dict, Tuple, Optional
-
-# Global log file path
-LOG_FILE_PATH = None
-
-def logger(message, title=None):
-    """Log to console and file."""
-    if title:
-        formatted_msg = f"\n{'='*20} {title} {'='*20}\n{message}\n{'='*50}"
-    else:
-        formatted_msg = message
-
-    print(formatted_msg)
-    
-    if LOG_FILE_PATH:
-        with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-            f.write(formatted_msg + "\n")
 
 class DockerBuildTester:
-    """Tests generated Dockerfiles by actually building them with Docker."""
+    def __init__(self, repo_path: str):
+        self.repo_path = repo_path
 
-    def __init__(self, timeout: int = 600):
-        """
-        Initialize Docker build tester.
-
-        Args:
-            timeout: Maximum time in seconds to wait for Docker build (default: 10 minutes)
-        """
-        self.timeout = timeout
-        self.docker_available = self._check_docker()
-
-    def _check_docker(self) -> bool:
-        """Check if Docker is installed and accessible."""
+    def run_build(self, dockerfile_path: Optional[str] = None) -> Dict:
+        print(f"--- Starting Docker Build in {self.repo_path} ---")
         try:
-            result = subprocess.run(
-                ["docker", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return False
+            # Use provided dockerfile_path or default to repo_path/Dockerfile
+            if not dockerfile_path:
+                dockerfile_path = os.path.join(self.repo_path, "Dockerfile")
+            
+            if not os.path.exists(dockerfile_path):
+                return {"success": False, "error": f"Dockerfile not found at {dockerfile_path}"}
 
-    def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str) -> Dict:
-        """
-        Build a Dockerfile and return detailed results.
-
-        Args:
-            dockerfile_path: Path to Dockerfile
-            context_path: Path to build context (usually repository root)
-            image_name: Name to tag the built image
-
-        Returns:
-            Dictionary with build results including success status, stage, error details
-        """
-        if not self.docker_available:
-            return {
-                "success": False,
-                "stage": "DOCKER_CHECK",
-                "error_type": "DOCKER_NOT_AVAILABLE",
-                "error_message": "Docker is not installed or not accessible",
-                "exit_code": -1,
-                "duration_seconds": 0
-            }
-
-        if not os.path.exists(dockerfile_path):
-            return {
-                "success": False,
-                "stage": "DOCKERFILE_CHECK",
-                "error_type": "DOCKERFILE_NOT_FOUND",
-                "error_message": f"Dockerfile not found at {dockerfile_path}",
-                "exit_code": -1,
-                "duration_seconds": 0
-            }
-
-        start_time = time.time()
-
-        # Build Docker image
-        try:
-            cmd = [
-                "docker", "build",
-                "-f", dockerfile_path,
-                "-t", image_name,
-                context_path
-            ]
-
-            logger(f"[DOCKER BUILD] Running: {' '.join(cmd)}")
-
-            # Run without text=True to handle decoding manually
-            result = subprocess.run(
+            # Define image name (sanitized)
+            image_name = "zero_shot_build_test"
+            
+            # Run docker build. We use --no-cache to ensure a clean build.
+            # We use -f to specify the generated Dockerfile location.
+            cmd = ["docker", "build", "--no-cache", "-t", image_name, "-f", dockerfile_path, "."]
+            
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
-                text=False,  # Capture raw bytes
-                timeout=self.timeout
+                cwd=self.repo_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
             )
 
-            # Manual decoding with error replacement
-            stdout_str = result.stdout.decode('utf-8', errors='replace') if result.stdout else ""
-            stderr_str = result.stderr.decode('utf-8', errors='replace') if result.stderr else None
+            full_output = []
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                print(line.strip())
+                full_output.append(line)
 
-            duration = time.time() - start_time
+            process.wait()
+            success = process.returncode == 0
             
-            # Log the full build output to file
-            if LOG_FILE_PATH:
-                 with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-                    f.write(f"\n{'='*20} DOCKER BUILD OUTPUT (Combined) {'='*20}\n")
-                    f.write(stdout_str)
-                    if stderr_str:
-                         f.write("\n--- STDERR ---\n")
-                         f.write(stderr_str)
-                    f.write(f"\n{'='*50}\n")
-
-            if result.returncode == 0:
-                return {
-                    "success": True,
-                    "stage": "BUILD_COMPLETE",
-                    "error_type": None,
-                    "error_message": None,
-                    "exit_code": 0,
-                    "duration_seconds": duration,
-                    "stdout": stdout_str[-2000:],  # Last 2000 chars
-                    "stderr": stderr_str[-2000:] if stderr_str else None
-                }
-            else:
-                # Parse error to determine stage
-                full_error = (stderr_str or "") + (stdout_str or "")
-                stage, failed_docker_command = self._parse_docker_error(full_error)
-
-                # Extract a concise error snippet (last error line)
-                error_lines = full_error.strip().split('\n')
-                error_snippet = None
-                for line in reversed(error_lines):
-                    if line.strip() and ('error' in line.lower() or 'failed' in line.lower() or 'fatal' in line.lower()):
-                        error_snippet = line.strip()
-                        break
-                if not error_snippet and error_lines:
-                    error_snippet = error_lines[-1].strip()
-
-                return {
-                    "success": False,
-                    "stage": stage,
-                    "failed_command": failed_docker_command,  # The Docker step that failed
-                    "error_message": full_error,  # Full error for detailed analysis
-                    "error_snippet": error_snippet,  # Concise error line for quick review
-                    "exit_code": result.returncode,
-                    "duration_seconds": duration,
-                    "stdout": stdout_str[-2000:] if stdout_str else "",
-                    "stderr": stderr_str[-2000:] if stderr_str else None
-                }
-
-        except subprocess.TimeoutExpired:
-            duration = time.time() - start_time
-            return {
-                "success": False,
-                "stage": "BUILD_TIMEOUT",
-                "error_type": "TIMEOUT",
-                "error_message": f"Docker build exceeded timeout of {self.timeout} seconds",
-                "exit_code": -1,
-                "duration_seconds": duration
+            result = {
+                "success": success,
+                "exit_code": process.returncode,
+                "output": "".join(full_output)
             }
-
+            
+            with open(os.path.join(self.repo_path, "build.log"), "w") as f:
+                f.write(result["output"])
+                
+            return result
         except Exception as e:
-            duration = time.time() - start_time
-            return {
-                "success": False,
-                "stage": "BUILD_EXCEPTION",
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-                "exit_code": -1,
-                "duration_seconds": duration,
-                "traceback": traceback.format_exc()
-            }
+            return {"success": False, "error": str(e)}
 
-    def _parse_docker_error(self, error_output: str) -> Tuple[str, str]:
-        """
-        Parse Docker error output to determine which Dockerfile step failed.
-        """
-        error_lower = error_output.lower()
+class BaselineAgent:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.one_shot_example = {
+            "readme": "# Sample Python App\nA simple Flask application that serves a hello world message.",
+            "tree": ".\n├── app.py\n├── requirements.txt\n└── README.md",
+            "dockerfile": "FROM python:3.9-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nEXPOSE 5000\nCMD [\"python\", \"app.py\"]"
+        }
 
-        # Extract the failed Docker step from the build output
-        failed_step = self._extract_failed_docker_step(error_output)
+    def get_repo_root(self) -> str:
+        return subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
 
-        # ===================================================================
-        # Simple Stage Detection - High Level Only
-        # ===================================================================
+    def get_readme(self, repo_path: str) -> str:
+        readme_path = os.path.join(repo_path, "README.md")
+        if os.path.exists(readme_path):
+            with open(readme_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return "No README.md found."
 
-        # 1. Docker Daemon Issues
-        if any(x in error_lower for x in ["cannot connect to the docker daemon", "is the docker daemon running", "docker: not found", "docker: command not found"]):
-            return "DOCKER_DAEMON", failed_step or "Docker daemon not accessible"
+    def get_file_tree(self, repo_path: str, max_depth: int = 3) -> str:
+        tree = []
+        for root, dirs, files in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', 'node_modules', '.next', 'venv', 'target', 'build']]
+            level = root.replace(repo_path, '').count(os.sep)
+            if level >= max_depth:
+                continue
+            indent = ' ' * 4 * level
+            tree.append(f"{indent}{os.path.basename(root) or '.'}/")
+            sub_indent = ' ' * 4 * (level + 1)
+            for f in files:
+                if f not in ['Dockerfile', 'build.log', 'docker_build_results.json']:
+                    tree.append(f"{sub_indent}{f}")
+        return "\n".join(tree)
 
-        # 2. Base Image Pull Issues (FROM command)
-        if any(x in error_lower for x in ["failed to resolve", "manifest unknown", "pull access denied", "image not found"]):
-            return "IMAGE_PULL", failed_step or "Failed to pull base image"
-
-        # 3. Dockerfile Syntax
-        if any(x in error_lower for x in ["dockerfile parse error", "unknown instruction"]):
-            return "DOCKERFILE_SYNTAX", failed_step or "Dockerfile syntax error"
-
-        # 4. File Copy/Add (COPY/ADD commands)
-        if any(x in error_lower for x in ["copy failed", "add failed"]) or ("stat" in error_lower and "no such file" in error_lower):
-            return "FILE_COPY", failed_step or "File copy/add failed"
-
-        # 5. Dependency Installation (RUN pip/npm/go/cargo install commands)
-        if any(x in error_lower for x in ["pip install", "pip3 install", "npm install", "yarn install", "go mod download", "go get", "cargo build"]):
-            return "DEPENDENCY_INSTALL", failed_step or "Dependency installation failed"
-
-        # 6. Build/Compilation (RUN build commands)
-        if any(x in error_lower for x in ["compilation error", "build error", "webpack", "tsc"]):
-            return "BUILD_COMPILE", failed_step or "Build/compilation failed"
-
-        # 7. Runtime Execution (CMD/ENTRYPOINT)
-        if any(x in error_lower for x in ["command not found", "exec format error"]):
-            return "RUNTIME_EXEC", failed_step or "Runtime execution failed"
-
-        # 8. Permission/User Issues
-        if "permission denied" in error_lower or "useradd" in error_lower:
-            return "PERMISSION", failed_step or "Permission/user management error"
-
-        # 9. Network Issues
-        if any(x in error_lower for x in ["connection refused", "connection timeout", "network unreachable"]):
-            return "NETWORK", failed_step or "Network connection error"
-
-        # 10. Storage Issues
-        if any(x in error_lower for x in ["no space left", "disk full", "quota exceeded"]):
-            return "STORAGE", failed_step or "Disk space error"
-
-        # Fallback: Return the extracted step or unknown
-        return "UNKNOWN", failed_step or "Unknown error - check full log"
-
-    def _extract_failed_docker_step(self, error_output: str) -> str:
-        """
-        Extract the specific Docker RUN/COPY/FROM command that failed.
-        """
-        import re
-
-        # Pattern 1: ERROR [stage X/Y] COMMAND
-        match = re.search(r'ERROR \[.*?\] (RUN|COPY|ADD|FROM|WORKDIR).*', error_output, re.IGNORECASE)
-        if match:
-            return match.group(0).replace('ERROR ', '').strip()
-
-        # Pattern 2: executor failed running [/bin/sh -c COMMAND]
-        match = re.search(r'executor failed running \[/bin/sh -c ([^\]]+)\]', error_output, re.IGNORECASE)
-        if match:
-            return f"RUN {match.group(1).strip()}"
-
-        # Pattern 3: #N [stage X/Y] COMMAND
-        match = re.search(r'#\d+ \[.*?\] (RUN|COPY|ADD|FROM).*', error_output, re.IGNORECASE)
-        if match:
-            return match.group(0).strip()
-
-        # Return None if we can't extract the step
-        return None
-
-    def cleanup_image(self, image_name: str) -> bool:
-        """Remove Docker image after testing."""
-        try:
-            print(f"[CLEANUP] Removing Docker image {image_name}...")
-            subprocess.run(
-                ["docker", "rmi", "-f", image_name],
-                capture_output=True,
-                timeout=30
-            )
-            return True
-        except Exception:
-            return False
-
-def clone_repository(repo_url, target_dir="./temp_repo"):
-    """Clone repository to a temporary directory."""
-    logger(f"\n[CLONE] Cloning {repo_url}...")
-    
-    if os.path.exists(target_dir):
-        def remove_readonly(func, path, excinfo):
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-            
-        shutil.rmtree(target_dir, onexc=remove_readonly)
+    def _construct_prompt(self, mode: str, readme: str, tree: str) -> List[Dict]:
+        is_one_shot = "one" in mode
+        include_readme = "readme" in mode or "combined" in mode
+        include_tree = "tree" in mode or "combined" in mode
         
-    try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, target_dir],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
+        system_msg = "You are an expert DevOps engineer specializing in Docker containerization."
+        content = []
+
+        if is_one_shot:
+            content.append("### EXAMPLE TASK ###")
+            example_input = []
+            if include_readme: example_input.append(f"README:\n{self.one_shot_example['readme']}")
+            if include_tree: example_input.append(f"FILE TREE:\n{self.one_shot_example['tree']}")
+            content.append("\n".join(example_input))
+            content.append(f"### EXAMPLE OUTPUT DOCKERFILE ###\n{self.one_shot_example['dockerfile']}")
+            content.append("\n--- END OF EXAMPLE ---\n")
+
+        content.append("### ACTUAL TASK ###")
+        actual_input = []
+        if include_readme: actual_input.append(f"PROJECT README:\n{readme}")
+        if include_tree: actual_input.append(f"PROJECT FILE TREE:\n{tree}")
+        content.append("\n".join(actual_input))
+        
+        content.append("\nINSTRUCTIONS: Analyze the project requirements above. First, think step by step about the appropriate base image, necessary dependencies, and the build/run commands. Then, provide the final Dockerfile content starting with '```dockerfile'.")
+        
+        return [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": "\n".join(content)}
+        ]
+
+    def generate_dockerfile(self, mode: str, repo_path: str) -> str:
+        readme = self.get_readme(repo_path)
+        tree = self.get_file_tree(repo_path)
+        
+        messages = self._construct_prompt(mode, readme, tree)
+        
+        print(f"--- Generating Dockerfile using mode: {mode} ---")
+        response = completion(
+            model=self.model_name,
+            messages=messages,
         )
-        logger(f"[OK] Cloned to {target_dir}")
-        return Path(target_dir)
-    except subprocess.CalledProcessError as e:
-        logger(f"[ERROR] Failed to clone repository: {e.stderr}")
-        sys.exit(1)
-
-def get_readme_content(repo_path):
-    """Find and read the README file."""
-    for file in os.listdir(repo_path):
-        if file.lower().startswith("readme"):
-            logger(f"[READ] Found README: {file}")
-            try:
-                # Use errors='replace' to avoid crashing on special characters
-                with open(repo_path / file, 'r', encoding='utf-8', errors='replace') as f:
-                    return f.read()
-            except Exception as e:
-                logger(f"[ERROR] Could not read README: {e}")
-                sys.exit(1)
-    
-    logger("[WARNING] No README found in repository.")
-    return "No README file found in this repository."
-
-def generate_dockerfile(llm, readme_content):
-    """Generate Dockerfile using LLM."""
-    logger("\n[GENERATE] Generating Dockerfile using Zero-Shot prompting...")
-    
-    system_prompt = """You are an expert DevOps engineer. Your task is to create a production-ready Dockerfile for a project based ONLY on its README content.
-
-RULES:
-1. USE BEST PRACTICES: Multi-stage builds, specific versions, non-root users if possible.
-2. INFER DEPENDENCIES: Look for language (Python, Node, Go, etc.) and package managers (pip, npm, go mod, etc.) in the text.
-3. OUTPUT FORMAT: Return ONLY the Dockerfile content. No markdown code blocks, no explanations, no "Here is the file". Just the raw Dockerfile content.
-4. If the README is missing or empty, try to create a generic Dockerfile for the most likely language if detectable, or a safe default.
-"""
-
-    user_message = f"Here is the README content of the project:\n\n{readme_content}\n\nGenerate the Dockerfile now."
-    
-    if LOG_FILE_PATH:
-        # Log purely to file, no print for full prompts
-        with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-            f.write(f"\n{'='*20} SYSTEM PROMPT {'='*20}\n{system_prompt}\n{'='*50}\n")
-            f.write(f"\n{'='*20} USER MESSAGE (Prompt) {'='*20}\n{user_message}\n{'='*50}\n")
-
-    try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_message)
-        ])
         
-        content = response.content.strip()
+        full_response = response.choices[0].message.content
         
-        if LOG_FILE_PATH:
-             with open(LOG_FILE_PATH, 'a', encoding='utf-8') as f:
-                f.write(f"\n{'='*20} LLM RESPONSE {'='*20}\n{content}\n{'='*50}\n")
-
-        # Strip markdown code blocks if the LLM ignores the rule
-        if content.startswith("```"):
-            lines = content.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            content = "\n".join(lines)
+        if "```dockerfile" in full_response:
+            dockerfile_content = full_response.split("```dockerfile")[1].split("```")[0].strip()
+        elif "```" in full_response:
+            dockerfile_content = full_response.split("```")[1].split("```")[0].strip()
+        else:
+            dockerfile_content = full_response.strip()
             
-        logger(f"[OK] Dockerfile generated ({len(content)} chars)")
-        return content
-    except Exception as e:
-        logger(f"[ERROR] LLM generation failed: {e}")
-        sys.exit(1)
+        return dockerfile_content
+
+    def save_dockerfile(self, content: str, repo_path: str):
+        with open(os.path.join(repo_path, "Dockerfile"), "w") as f:
+            f.write(content)
 
 def main():
-    global LOG_FILE_PATH
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    potential_envs = [
+        os.path.join(script_dir, ".env"), 
+        os.path.join(cwd, ".env"),        
+        os.path.join(script_dir, "..", ".env"), 
+        os.path.join(script_dir, "..", "cra-planner-agent", ".env") 
+    ]
+    for env_path in potential_envs:
+        if os.path.exists(env_path):
+            load_dotenv(env_path)
+            print(f"ℹ️ Loaded environment from: {os.path.abspath(env_path)}")
+            break
 
-    if len(sys.argv) < 2:
-        print("Usage: python zero_shot_agent.py <repo_url>")
+    if os.getenv("AZURE_OPENAI_ENDPOINT") and not os.getenv("AZURE_OPENAI_API_BASE"):
+        os.environ["AZURE_OPENAI_API_BASE"] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    
+    default_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    default_model = f"azure/{default_deployment}" if default_deployment else "azure/gpt-4o"
+    
+    parser = argparse.ArgumentParser(description="Run Baseline Docker Build Agent")
+    parser.add_argument("--mode", choices=["readme_zero", "readme_one", "tree_zero", "tree_one", "combined_zero", "combined_one"], required=True)
+    parser.add_argument("--model", default=default_model)
+    parser.add_argument("--repo-path", help="Path to the repository to analyze.")
+    parser.add_argument("--output-dir", help="Directory to save the generated Dockerfile and build results.")
+    args = parser.parse_args()
+
+    if args.model.startswith("azure/"):
+        base = os.getenv("AZURE_OPENAI_API_BASE")
+        key = os.getenv("AZURE_OPENAI_API_KEY")
+        if not base or not key:
+            print(f"❌ Error: Missing Azure environment variables.")
+            sys.exit(1)
+        litellm.api_base = base
+        litellm.api_key = key
+
+    agent = BaselineAgent(model_name=args.model)
+    repo_path = args.repo_path if args.repo_path else agent.get_repo_root()
+    
+    if not os.path.isdir(repo_path):
+        print(f"❌ Error: {repo_path} is not a valid directory.")
         sys.exit(1)
-        
-    repo_url = sys.argv[1]
-    repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
-    
-    # Create working directory
-    script_dir = Path(__file__).parent
-    work_dir = script_dir / "temp" / repo_name
-    work_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Init log file
-    LOG_FILE_PATH = script_dir / f"{repo_name}_agent.log"
-    # Clear previous log
-    with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
-        f.write(f"Zero-Shot Build Agent Log - {repo_name}\n")
-        f.write(f"Date: {time.ctime()}\n")
 
-    logger(f"[INFO] Logging to {LOG_FILE_PATH}")
-    
-    # Execution Flow
-    repo_path = clone_repository(repo_url, target_dir=work_dir)
-    readme_content = get_readme_content(repo_path)
-    
-    llm = setup_llm()
-    dockerfile_content = generate_dockerfile(llm, readme_content)
-    
-    # Save Dockerfile BEFORE build
-    with open(script_dir / f"{repo_name}_Dockerfile", 'w', encoding='utf-8') as f:
-        f.write(dockerfile_content)
-    logger(f"\n[INFO] Saved Dockerfile to {repo_name}_Dockerfile")
+    # Determine where to save results
+    output_dir = args.output_dir if args.output_dir else repo_path
+    os.makedirs(output_dir, exist_ok=True)
 
-    # TEST DOCKER BUILD using ported logic
-    image_tag = f"zero-shot-{repo_name.lower()}:latest"
-    tester = DockerBuildTester(timeout=600)
+    # 1. Generate
+    dockerfile = agent.generate_dockerfile(args.mode, repo_path)
+    agent.save_dockerfile(dockerfile, output_dir)
     
-    dockerfile_path = script_dir / f"{repo_name}_Dockerfile"
-    # Note: Using repo_path as context, but referencing the saved Dockerfile
-    # Ideally we should move Dockerfile to repo_path or point to it
-    # The build_dockerfile argument expects a path to the file
+    # 2. Build & Test
+    # We still need to build IN the repo_path, but we can save logs to output_dir
+    tester = DockerBuildTester(repo_path)
+    generated_dockerfile_path = os.path.join(output_dir, "Dockerfile")
+    result = tester.run_build(dockerfile_path=generated_dockerfile_path)
     
-    logger("\n[BUILD] Attempting to build Docker image...")
-    build_result = tester.build_dockerfile(str(dockerfile_path), str(repo_path), image_tag)
+    # 3. Report Results
+    result_path = os.path.join(output_dir, "docker_build_results.json")
+    with open(result_path, "w") as f:
+        summary = {k: v for k, v in result.items() if k != "output"}
+        summary["mode"] = args.mode
+        summary["model"] = args.model
+        summary["repo_path"] = repo_path
+        json.dump(summary, f, indent=4)
     
-    if build_result["success"]:
-        logger(f"[SUCCESS] Docker build completed in {build_result['duration_seconds']:.2f}s")
-        logger(f"[INFO] Image tag: {image_tag}")
-        tester.cleanup_image(image_tag)
+    # Save build log to output_dir specifically
+    with open(os.path.join(output_dir, "build.log"), "w") as f:
+        f.write(result.get("output", ""))
+    
+    if result["success"]:
+        print(f"\n✅ Dockerfile generated and built successfully! (Results in {output_dir})")
     else:
-        logger(f"[FAILURE] Docker build failed (Exit Code: {build_result['exit_code']})")
-        logger(f"  Stage: {build_result.get('stage', 'UNKNOWN')}")
-        logger(f"  Command: {build_result.get('failed_command', 'Unknown')}")
-        logger(f"  Error Snippet: {build_result.get('error_snippet', 'No snippet')}")
-        
-        # Save error summary
-        error_summary_file = script_dir / f"{repo_name}_docker_build_error_summary.txt"
-        with open(error_summary_file, 'w', encoding='utf-8') as f:
-            f.write("="*80 + "\n")
-            f.write("DOCKER BUILD ERROR SUMMARY\n")
-            f.write("="*80 + "\n\n")
-            f.write(f"Repository: {repo_name}\n")
-            f.write(f"URL: {repo_url}\n")
-            f.write(f"Timestamp: {time.ctime()}\n\n")
-            f.write(f"Failure Stage: {build_result.get('stage', 'UNKNOWN')}\n")
-            f.write(f"Failed Docker Command: {build_result.get('failed_command', 'Unknown')}\n")
-            f.write(f"Exit Code: {build_result.get('exit_code', -1)}\n\n")
-            if build_result.get('error_snippet'):
-                f.write(f"Error Snippet (last error line):\n{'-'*80}\n")
-                f.write(f"{build_result['error_snippet']}\n")
-                f.write(f"{'-'*80}\n\n")
-            f.write(f"See full Docker output in: {repo_name}_agent.log\n")
-        logger(f"[INFO] Saved error summary to {error_summary_file.name}")
-
-    # Cleanup
-    if os.getenv("KEEP_TEMP", "false").lower() != "true":
-         try:
-            def remove_readonly(func, path, excinfo):
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            shutil.rmtree(work_dir, onexc=remove_readonly)
-            logger("[CLEANUP] Temporary directory removed")
-         except Exception as e:
-            logger(f"[WARNING] Cleanup failed: {e}")
+        print(f"\n❌ Docker build failed. (Logs in {output_dir})")
 
 if __name__ == "__main__":
     main()
