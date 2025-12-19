@@ -2300,6 +2300,43 @@ Thought:{agent_scratchpad}"""
         error_str = str(error)
         logger.warning(f"Parsing error: {error_str}")
 
+        # Special case: If error mentions DOCKERFILE_START or delimiters, agent is trying to provide Dockerfile
+        if "DOCKERFILE_START" in error_str or "DOCKERIGNORE_START" in error_str or "`DOCKERFILE" in error_str:
+            return """FORMAT ERROR: You're trying to provide the Dockerfile but missing the "Final Answer:" prefix!
+
+CRITICAL: You MUST start with "Final Answer:" before the delimiters!
+CRITICAL: Remove ALL backticks (```) and markdown formatting!
+
+CORRECT Final Answer Format (NO backticks, NO markdown):
+Thought: I will now provide the Dockerfile.
+Final Answer:
+DOCKERFILE_START
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "app.py"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+__pycache__
+*.pyc
+.env
+DOCKERIGNORE_END
+
+WRONG (what you just did):
+DOCKERFILE_START  ❌ Missing "Final Answer:" prefix!
+FROM ...
+
+```dockerfile      ❌ NO backticks/markdown!
+FROM ...
+```
+
+Just write "Final Answer:" on a new line after your Thought, then your delimiters and content.
+"""
+
         # Check for common parsing errors and provide specific guidance
         if "Could not parse" in error_str or "Missing 'Action:'" in error_str or "Invalid Format" in error_str:
             return """FORMAT ERROR: You wrote something that doesn't follow the required format.
