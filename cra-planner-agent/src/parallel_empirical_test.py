@@ -128,6 +128,307 @@ def compute_token_cost(token_usage: Dict) -> Dict[str, float]:
     }
 
 
+class ErrorPatternDetector:
+    """
+    Detects build error patterns instead of package names.
+
+    This enables general-purpose error detection that works for ANY package
+    exhibiting the same error signature, rather than hardcoding specific package names.
+    """
+
+    ERROR_SIGNATURES = {
+        'fortran_compiler_needed': [
+            'gfortran not found',
+            'fortran compiler',
+            'f77', 'f90', 'f95',
+            'numpy.distutils.fcompiler',
+            'cannot find -lgfortran',
+            'fortran: command not found'
+        ],
+        'blas_library_needed': [
+            'cannot find -lblas',
+            'cannot find -llapack',
+            'cblas.h: no such file',
+            'lapacke.h: no such file',
+            'openblas',
+            'libatlas',
+            'blas/lapack not found'
+        ],
+        'python_dev_headers': [
+            'python.h: no such file',
+            'python3-dev',
+            'pyconfig.h',
+            'error: command.*gcc.*failed with exit (code|status) 1',
+            'building.*extension modules',
+            'fatal error: python.h'
+        ],
+        'c_compiler_needed': [
+            'gcc: command not found',
+            'cc: command not found',
+            'make: command not found',
+            'build-essential',
+            'compiler not found'
+        ],
+        'cpp_compiler_needed': [
+            'g++: command not found',
+            'c++ compiler',
+            'cxx compiler',
+            'c++: command not found'
+        ]
+    }
+
+    @staticmethod
+    def detect_patterns(error_log: str, failed_cmd: str = "") -> list:
+        """
+        Returns list of detected pattern types from error logs.
+
+        Args:
+            error_log: The error output from build
+            failed_cmd: The command that failed (optional)
+
+        Returns:
+            List of pattern types detected (e.g., ['fortran_compiler_needed', 'blas_library_needed'])
+        """
+        combined_text = f"{error_log} {failed_cmd}".lower()
+        detected = []
+
+        for pattern_type, indicators in ErrorPatternDetector.ERROR_SIGNATURES.items():
+            for indicator in indicators:
+                if indicator.lower() in combined_text:
+                    detected.append(pattern_type)
+                    break
+
+        return list(set(detected))  # Remove duplicates
+
+    @staticmethod
+    def detect_base_os(dockerfile_content: str) -> str:
+        """
+        Detect OS from Dockerfile FROM statement.
+
+        Args:
+            dockerfile_content: Contents of the Dockerfile
+
+        Returns:
+            OS type: 'alpine', 'debian', or 'redhat'
+        """
+        import re
+        from_match = re.search(r'FROM\s+([^\s:]+)', dockerfile_content, re.IGNORECASE)
+        if not from_match:
+            return 'debian'  # Safe default
+
+        image_name = from_match.group(1).lower()
+
+        # OS detection map
+        if 'alpine' in image_name:
+            return 'alpine'
+        elif 'ubuntu' in image_name or 'debian' in image_name:
+            return 'debian'
+        elif 'centos' in image_name or 'rhel' in image_name or 'fedora' in image_name or 'rocky' in image_name:
+            return 'redhat'
+        elif 'node' in image_name or 'python' in image_name or 'ruby' in image_name:
+            return 'debian'  # Most official images are Debian-based
+        else:
+            return 'debian'  # Conservative default
+
+    @staticmethod
+    def get_package_manager(base_os: str) -> str:
+        """
+        Map OS to its package manager.
+
+        Args:
+            base_os: OS type ('alpine', 'debian', 'redhat')
+
+        Returns:
+            Package manager command ('apk', 'apt-get', 'yum')
+        """
+        os_to_pm = {
+            'alpine': 'apk',
+            'debian': 'apt-get',
+            'redhat': 'yum'
+        }
+        return os_to_pm.get(base_os, 'apt-get')
+
+
+class PackageManagerDetector:
+    """
+    Detects package manager and generates appropriate search queries.
+
+    Uses a registry pattern for extensibility - new package managers can be added
+    without changing the detection logic.
+    """
+
+    PACKAGE_MANAGERS = {
+        # Node.js ecosystem
+        'npm': {
+            'indicators': ['npm err!', 'npm error', 'npm install'],
+            'error_patterns': {
+                'enoent': 'docker npm ENOENT missing file',
+                'gyp': 'docker node-gyp build failed python make gcc',
+                'permission': 'docker npm permission denied unsafe-perm',
+            },
+            'default_query': 'docker npm install error'
+        },
+        'pnpm': {
+            'indicators': ['pnpm err', 'pnpm error', 'pnpm install'],
+            'error_patterns': {
+                'frozen lockfile': 'docker pnpm frozen-lockfile mismatch',
+            },
+            'default_query': 'docker pnpm install failed'
+        },
+        'yarn': {
+            'indicators': ['yarn error', 'yarn install'],
+            'error_patterns': {},
+            'default_query': 'docker yarn install failed'
+        },
+
+        # Python ecosystem
+        'pip': {
+            'indicators': ['pip error', 'pip install', 'pip failed'],
+            'error_patterns': {
+                'gcc': 'docker pip install gcc compilation failed build-essential',
+                'wheel': 'docker pip wheel build failed',
+            },
+            'default_query': 'docker pip install failed'
+        },
+        'poetry': {
+            'indicators': ['poetry error', 'poetry install'],
+            'error_patterns': {},
+            'default_query': 'docker poetry install failed'
+        },
+        'pipenv': {
+            'indicators': ['pipenv error', 'pipenv install'],
+            'error_patterns': {},
+            'default_query': 'docker pipenv install failed'
+        },
+        'uv': {
+            'indicators': ['uv error', 'uv pip', 'uv sync'],
+            'error_patterns': {},
+            'default_query': 'docker uv install failed'
+        },
+
+        # Rust
+        'cargo': {
+            'indicators': ['cargo error', 'cargo build'],
+            'error_patterns': {},
+            'default_query': 'docker cargo build failed rust dependencies'
+        },
+
+        # Java ecosystem
+        'maven': {
+            'indicators': ['maven error', 'mvn error', '[error]'],
+            'error_patterns': {},
+            'default_query': 'docker maven build failed'
+        },
+        'gradle': {
+            'indicators': ['gradle error', './gradlew'],
+            'error_patterns': {},
+            'default_query': 'docker gradle build failed'
+        },
+        'sbt': {
+            'indicators': ['sbt error', '[error]'],
+            'error_patterns': {},
+            'default_query': 'docker sbt build failed'
+        },
+
+        # Ruby
+        'bundler': {
+            'indicators': ['bundler error', 'bundle install'],
+            'error_patterns': {},
+            'default_query': 'docker bundler install failed'
+        },
+
+        # PHP
+        'composer': {
+            'indicators': ['composer error', 'composer install'],
+            'error_patterns': {},
+            'default_query': 'docker composer install failed'
+        },
+
+        # Go
+        'go': {
+            'indicators': ['go: error', 'go build', 'go get'],
+            'error_patterns': {},
+            'default_query': 'docker go build failed'
+        },
+
+        # System package managers
+        'apt': {
+            'indicators': ['apt error', 'apt-get', 'unable to locate package'],
+            'error_patterns': {
+                'unable to locate package': 'docker apt unable to locate package'
+            },
+            'default_query': 'docker apt-get install failed'
+        },
+        'apk': {
+            'indicators': ['apk error', 'apk add'],
+            'error_patterns': {},
+            'default_query': 'docker apk add failed alpine'
+        },
+        'yum': {
+            'indicators': ['yum error', 'no package'],
+            'error_patterns': {},
+            'default_query': 'docker yum install failed'
+        }
+    }
+
+    @staticmethod
+    def detect_package_manager(error_log: str) -> tuple:
+        """
+        Detect package manager from error log and return appropriate search query.
+
+        Args:
+            error_log: The error output from build
+
+        Returns:
+            Tuple of (package_manager_name, error_keywords) for search
+        """
+        error_log_lower = error_log.lower()
+
+        # Try to detect package manager
+        for pm_name, pm_config in PackageManagerDetector.PACKAGE_MANAGERS.items():
+            # Check if any indicator matches
+            if any(indicator.lower() in error_log_lower for indicator in pm_config['indicators']):
+                # Found package manager, now check for specific error patterns
+                for pattern, query in pm_config['error_patterns'].items():
+                    if pattern.lower() in error_log_lower:
+                        return (pm_name, query)
+
+                # No specific pattern, use default
+                return (pm_name, pm_config['default_query'])
+
+        # No package manager detected
+        return (None, "docker dependency install failed")
+
+    @staticmethod
+    def extract_package_name(error_log: str, package_manager: str) -> str:
+        """
+        Extract failing package name from error log.
+
+        Args:
+            error_log: The error output
+            package_manager: Detected package manager name
+
+        Returns:
+            Package name if found, empty string otherwise
+        """
+        import re
+
+        # Common patterns across package managers
+        patterns = [
+            r'unable to locate package\s+(\S+)',  # apt
+            r'error:\s+package\s+[\'"](\S+)[\'"]',  # generic
+            r'failed to (?:install|build)\s+(\S+)',  # generic
+            r'npm err!\s+(?:404|enoent).*?(\S+)',  # npm
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, error_log, re.IGNORECASE)
+            if match:
+                return match.group(1)
+
+        return ""
+
+
 class ParallelEmpiricalTester:
     """Parallel empirical tester with unified logging."""
 
@@ -1153,45 +1454,62 @@ OUTPUT: Dockerfile with the specific missing library added"""
                 self.log(repo_name, f"DEPENDENCY_BUILD_TOOLS error detected", to_console=True)
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
 
-                # Check if this is a Python scientific package case
-                is_python_scientific = any(pkg in error_log.lower() or pkg in failed_cmd.lower()
-                                           for pkg in ['numpy', 'pandas', 'scipy', 'scikit-learn', 'sklearn', 'matplotlib'])
+                # Detect error patterns instead of hardcoded package names
+                patterns = ErrorPatternDetector.detect_patterns(error_log, failed_cmd)
 
-                if is_python_scientific:
-                    self.log(repo_name, "Detected Python scientific package - providing direct solution", to_console=True)
-                    refinement_query = f"""PYTHON SCIENTIFIC PACKAGE BUILD ERROR
+                if patterns:
+                    # Read current Dockerfile to detect OS
+                    try:
+                        with open(dockerfile_absolute, 'r') as f:
+                            current_dockerfile = f.read()
+                        base_os = ErrorPatternDetector.detect_base_os(current_dockerfile)
+                    except:
+                        base_os = 'debian'
 
-Python scientific packages (numpy, pandas, scipy, scikit-learn) need C/Fortran compilers and BLAS libraries.
+                    pkg_manager = ErrorPatternDetector.get_package_manager(base_os)
 
-**DIRECT SOLUTION** (no search needed):
+                    self.log(repo_name, f"Detected build tool error patterns: {patterns} on {base_os}", to_console=True)
+
+                    # Build search query based on detected patterns
+                    pattern_descriptions = {
+                        'fortran_compiler_needed': 'fortran compiler gfortran',
+                        'blas_library_needed': 'BLAS LAPACK linear algebra libraries',
+                        'python_dev_headers': 'python development headers',
+                        'c_compiler_needed': 'gcc C compiler build-essential',
+                        'cpp_compiler_needed': 'g++ C++ compiler'
+                    }
+
+                    search_terms = ' '.join([pattern_descriptions.get(p, p) for p in patterns])
+
+                    refinement_query = f"""MISSING BUILD TOOLS ERROR - Pattern-Based Discovery
+
+Detected missing: {', '.join(patterns)}
+Base OS: {base_os}
+Package Manager: {pkg_manager}
+
+**DISCOVERY APPROACH** (DO NOT GUESS):
 
 **STEP 1:** Read current Dockerfile: {dockerfile_absolute}
-**STEP 2:** Add these packages BEFORE pip install:
+**STEP 2:** Use SearchWeb with query: "docker {base_os} {pkg_manager} install {search_terms}"
+**STEP 3:** Based on search results, add RUN command BEFORE dependency install
 
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    build-essential \\
-    gfortran \\
-    libopenblas-dev \\
-    liblapack-dev \\
-    python3-dev \\
- && rm -rf /var/lib/apt/lists/*
-```
+EXAMPLES of what SearchWeb might find:
+- For Alpine (apk): apk add --no-cache build-base gfortran openblas-dev
+- For Debian (apt-get): apt-get install build-essential gfortran libopenblas-dev
+- For RedHat (yum): yum install gcc-gfortran blas-devel lapack-devel
 
-**STEP 3:** Keep existing pip install commands unchanged
+CRITICAL RULES:
+- USE SearchWeb to discover the correct package names for {base_os}
+- Add packages BEFORE the failing command
+- DO NOT change base image
+- DO NOT use hardcoded package names without verifying via SearchWeb
 
-This provides:
-- build-essential: gcc, g++, make
-- gfortran: Fortran compiler for scipy/numpy
-- libopenblas-dev: Optimized BLAS library
-- liblapack-dev: Linear algebra library
-- python3-dev: Python headers
+Error context: {safe_error}
 
-DO NOT CHANGE BASE IMAGE!
 Final Answer: ONLY Dockerfile content."""
 
                 else:
-                    # General case - use discovery approach
+                    # No patterns detected - use general discovery approach
                     refinement_query = f"""MISSING BUILD TOOLS ERROR
 
 Native dependencies need build tools (compilers, headers) not in base image.
@@ -1484,74 +1802,18 @@ Error: {safe_error}"""
                 # Sanitize error for Azure
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
                 
-                # Extract SPECIFIC error context for better search - not just generic keywords
-                error_keywords = "dependency install failed docker"
-                specific_error = ""
-                
-                # Extract the actual failing package or error message
-                for line in error_log.split('\n'):
-                    line_lower = line.lower()
-                    # npm specific errors
-                    if "npm err!" in line_lower or "npm error" in line_lower:
-                        # Extract package name if present
-                        if "enoent" in line_lower or "no such file" in line_lower:
-                            specific_error = "npm ENOENT file not found"
-                            error_keywords = f"docker npm ENOENT missing file {specific_error}"
-                        elif "gyp" in line_lower or "node-gyp" in line_lower:
-                            specific_error = "node-gyp build failed"
-                            error_keywords = "docker node-gyp build failed python make gcc"
-                        elif "permission" in line_lower:
-                            specific_error = "npm permission denied"
-                            error_keywords = "docker npm permission denied unsafe-perm"
-                        else:
-                            error_keywords = f"docker npm install error {line[:50]}"
-                        break
-                    # pip specific errors
-                    elif "pip" in line_lower and ("error" in line_lower or "failed" in line_lower):
-                        if "gcc" in line_lower or "compilation" in line_lower:
-                            specific_error = "pip compilation failed missing gcc"
-                            error_keywords = "docker pip install gcc compilation failed build-essential"
-                        elif "wheel" in line_lower:
-                            specific_error = "pip wheel build failed"
-                            error_keywords = "docker pip wheel build failed"
-                        else:
-                            error_keywords = f"docker pip install failed {line[:40]}"
-                        break
-                    # apt/apk specific errors
-                    elif "unable to locate package" in line_lower:
-                        # Extract package name
-                        parts = line.split()
-                        for i, p in enumerate(parts):
-                            if p.lower() == "package" and i + 1 < len(parts):
-                                pkg = parts[i + 1]
-                                error_keywords = f"docker apt unable to locate package {pkg}"
-                                specific_error = f"package {pkg} not found"
-                                break
-                        break
-                    # pnpm specific
-                    elif "pnpm" in line_lower and ("err" in line_lower or "error" in line_lower):
-                        if "frozen lockfile" in line_lower:
-                            error_keywords = "docker pnpm frozen-lockfile mismatch"
-                        else:
-                            error_keywords = "docker pnpm install failed"
-                        break
-                
-                # If no specific error found, use generic but descriptive search
-                if not specific_error:
-                    if "npm" in error_log_lower:
-                        error_keywords = "docker npm install failed missing dependencies"
-                    elif "pip" in error_log_lower:
-                        error_keywords = "docker pip install failed build dependencies"
-                    elif "pnpm" in error_log_lower:
-                        error_keywords = "docker pnpm install failed"
-                    elif "yarn" in error_log_lower:
-                        error_keywords = "docker yarn install failed"
-                    elif "cargo" in error_log_lower:
-                        error_keywords = "docker cargo build failed rust dependencies"
-                    elif "maven" in error_log_lower or "mvn" in error_log_lower:
-                        error_keywords = "docker maven build failed"
-                    elif "apt" in error_log_lower or "apt-get" in error_log_lower:
-                        error_keywords = "docker apt-get install failed package not found"
+                # Use PackageManagerDetector for general-purpose detection
+                pm_name, error_keywords = PackageManagerDetector.detect_package_manager(error_log)
+                pkg_name = PackageManagerDetector.extract_package_name(error_log, pm_name) if pm_name else ""
+
+                if pm_name:
+                    self.log(repo_name, f"Detected package manager: {pm_name}", to_console=True)
+
+                    # Enhance query with package name if found
+                    if pkg_name:
+                        error_keywords = f"{error_keywords} {pkg_name}"
+                else:
+                    self.log(repo_name, f"No specific package manager detected, using generic approach", to_console=True)
                 
                 refinement_query = f"""DOCKERFILE DEPENDENCY ERROR - Package installation failed!
 
@@ -1559,7 +1821,7 @@ IMPORTANT: This is NOT an image problem - DO NOT change the base image!
 
 **STEP 1:** Use SearchDockerError with "{error_keywords}" to find solutions
 **STEP 2:** Read the current Dockerfile at: {dockerfile_absolute}
-**STEP 3:** Read the project dependency files (package.json, requirements.txt, pom.xml, etc.)
+**STEP 3:** Read the project dependency files (package.json, requirements.txt, pom.xml, pyproject.toml, Gemfile, composer.json, go.mod, Cargo.toml, etc.)
 **STEP 4:** **CHECK FOR NATIVE DEPENDENCIES**:
    - Look at the dependency file for packages that might need C/C++ compilation
    - Use SearchWeb with: "[package_name] docker build dependencies" to check if it needs native tools
