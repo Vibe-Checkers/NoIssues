@@ -2393,7 +2393,7 @@ Try again with ONLY ONE of these."""
         handle_parsing_errors=handle_parsing_error,  # Use the function, not True
         max_iterations=max_iterations,
         max_execution_time=None,  # No time limit
-        early_stopping_method="generate",  # Generate final answer if max iterations reached
+        early_stopping_method="force",  # Force stop at max iterations (generate not supported by create_react_agent)
         return_intermediate_steps=True  # Enable to track tool usage
     )
 
