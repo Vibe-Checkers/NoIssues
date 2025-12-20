@@ -174,6 +174,52 @@ class ErrorPatternDetector:
             'c++ compiler',
             'cxx compiler',
             'c++: command not found'
+        ],
+        'npm_lifecycle_hooks_error': [
+            'husky install',
+            "husky - can't create hook",
+            '.husky directory doesn\'t exist',
+            'prepare:hooks',
+            'husky - git command not found'
+        ],
+        'apt_package_not_found': [
+            'unable to locate package',
+            'has no installation candidate',
+            'package .* has no installation candidate',
+            'e: package',
+            'couldn\'t find any package by regex'
+        ],
+        'npm_invalid_config': [
+            'is not a valid npm option',
+            'unknown option',
+            'invalid config key',
+            'npm error unknown',
+            'err! config'
+        ],
+        'vendored_build_system': [
+            'vendored-meson',
+            'could not find the specified meson',
+            'vendored build',
+            'custom build backend',
+            'meson-python: error: could not find'
+        ],
+        'git_required_but_missing': [
+            'git: command not found',
+            'fatal: not a git repository',
+            'git repository required',
+            'needs git',
+            'requires git to be installed'
+        ],
+        'cmake_needed': [
+            'cmake: command not found',
+            'cmake not found',
+            'could not find cmake',
+            'cmake is required'
+        ],
+        'pkg_config_needed': [
+            'pkg-config: command not found',
+            'pkg-config not found',
+            'no package .*pc found'
         ]
     }
 
@@ -1457,7 +1503,191 @@ OUTPUT: Dockerfile with the specific missing library added"""
                 # Detect error patterns instead of hardcoded package names
                 patterns = ErrorPatternDetector.detect_patterns(error_log, failed_cmd)
 
-                if patterns:
+                # Handle specific high-priority patterns first
+                if 'npm_lifecycle_hooks_error' in patterns:
+                    self.log(repo_name, "NPM lifecycle hooks error (Husky/Git hooks) - need to skip scripts", to_console=True)
+                    refinement_query = f"""NPM GIT HOOKS ERROR (Husky) - Not a missing package!
+
+The npm install is failing because lifecycle scripts try to setup Git hooks (like Husky).
+These hooks are for development only and should be SKIPPED in Docker builds.
+
+**ROOT CAUSE**: npm runs "prepare" or "postinstall" scripts that execute "husky install"
+**SOLUTION**: Skip lifecycle scripts during npm install
+
+**STEP 1:** Read current Dockerfile: {dockerfile_absolute}
+**STEP 2:** Find the npm install command (npm ci, npm install, etc.)
+**STEP 3:** Add --ignore-scripts flag OR set HUSKY=0 environment variable
+
+CHOOSE ONE SOLUTION:
+
+Option A (Recommended - Skip all scripts):
+WRONG: RUN npm ci
+CORRECT: RUN npm ci --ignore-scripts
+
+Option B (Skip only Husky):
+WRONG: RUN npm ci
+CORRECT: RUN HUSKY=0 npm ci
+
+Option C (Skip dev dependencies and scripts):
+WRONG: RUN npm ci
+CORRECT: RUN npm ci --omit=dev --ignore-scripts
+
+**CRITICAL RULES:**
+- DO NOT add git to the Docker image
+- DO NOT try to initialize git repository
+- DO NOT remove .husky directory
+- JUST add --ignore-scripts to the npm command
+- DO NOT change the base image
+- Keep everything else the same
+
+Error: {safe_error}
+
+Final Answer: ONLY Dockerfile content."""
+
+                elif 'apt_package_not_found' in patterns:
+                    self.log(repo_name, "APT package not found - need version-specific package name", to_console=True)
+
+                    # Try to extract package name from error
+                    import re
+                    pkg_match = re.search(r'Unable to locate package ([a-z0-9-]+)', error_log, re.IGNORECASE)
+                    if not pkg_match:
+                        pkg_match = re.search(r'Package \'?([a-z0-9-]+)\'? has no installation candidate', error_log, re.IGNORECASE)
+                    problem_pkg = pkg_match.group(1) if pkg_match else "unknown"
+
+                    refinement_query = f"""APT PACKAGE NAME INCORRECT FOR THIS OS VERSION
+
+Package "{problem_pkg}" doesn't exist in this version of Ubuntu/Debian.
+Package names change between OS versions (libwebp6 vs libwebp7, libjpeg8 vs libjpeg-turbo8-dev, etc.)
+
+**ROOT CAUSE**: The package name that works in one OS version doesn't exist in another
+
+**STEP 1 - IDENTIFY OS VERSION:**
+Read Dockerfile: {dockerfile_absolute}
+Extract EXACT base image and version:
+- ubuntu:22.04 = "jammy"
+- ubuntu:20.04 = "focal"
+- debian:bookworm-slim = "bookworm"
+- debian:bullseye = "bullseye"
+
+**STEP 2 - SEARCH WITH OS VERSION:**
+Use SearchWeb with VERSION-SPECIFIC query:
+"ubuntu [VERSION_NAME] {problem_pkg} alternative package"
+
+Examples:
+- "ubuntu jammy libwebp alternative package" (will find libwebp7, not libwebp6)
+- "debian bookworm libjpeg package name" (will find correct version)
+- "ubuntu 22.04 {problem_pkg} install" (searches with specific version)
+
+**STEP 3 - IF SEARCH UNCLEAR, SEARCH FOR LIBRARY PURPOSE:**
+If you don't find exact package name, search what the library does:
+- "ubuntu jammy webp image library install" instead of exact package
+- "debian bookworm jpeg development headers"
+
+**STEP 4 - UPDATE DOCKERFILE:**
+Replace "{problem_pkg}" with the correct package name for that OS version
+
+**CRITICAL:**
+- ALWAYS include OS version in search (jammy, focal, bookworm, bullseye)
+- Package names are DIFFERENT between Ubuntu 20.04 and 22.04
+- DO NOT guess - search for the specific OS version
+- DO NOT change base image - fix the package name
+
+Error: {safe_error}
+
+Final Answer: ONLY Dockerfile content."""
+
+                elif 'npm_invalid_config' in patterns:
+                    self.log(repo_name, "NPM invalid config option detected", to_console=True)
+
+                    refinement_query = f"""NPM INVALID CONFIG ERROR
+
+npm config command is using an option that doesn't exist in this npm version.
+
+**STEP 1:** Read Dockerfile: {dockerfile_absolute}
+**STEP 2:** Find npm config commands (npm config set ...)
+**STEP 3:** Remove ALL npm config set commands - they're not needed for building
+
+Common invalid configs to remove:
+- npm config set pool-size (doesn't exist)
+- npm config set fetch-retries (rarely needed)
+- npm config set registry (use --registry flag instead)
+
+WRONG:
+```dockerfile
+RUN npm config set pool-size 1 && npm ci
+```
+
+CORRECT:
+```dockerfile
+RUN npm ci
+```
+
+If you need specific npm behavior, use flags instead of config:
+- npm ci --loglevel=error
+- npm install --legacy-peer-deps
+
+**DO NOT change base image**
+**JUST remove invalid npm config commands**
+
+Error: {safe_error}
+
+Final Answer: ONLY Dockerfile content."""
+
+                elif 'vendored_build_system' in patterns:
+                    self.log(repo_name, "Vendored build system detected (like vendored-meson)", to_console=True)
+
+                    refinement_query = f"""VENDORED BUILD SYSTEM ERROR
+
+This project uses a vendored/custom build system (like vendored-meson in NumPy).
+When copying source files, the vendored build tools directory is missing or incomplete.
+
+**ROOT CAUSE**:
+- Project has custom build backend in a vendored directory
+- COPY commands don't copy everything needed
+- pip install fails because it can't find the vendored build tool
+
+**SOLUTIONS** (try in order):
+
+**Solution 1 - Copy entire source including vendored tools:**
+Read Dockerfile: {dockerfile_absolute}
+Change from selective COPY to full copy:
+
+WRONG:
+```dockerfile
+COPY pyproject.toml setup.py ./
+COPY src ./src
+RUN pip install .
+```
+
+CORRECT:
+```dockerfile
+COPY . .
+RUN pip install .
+```
+
+**Solution 2 - Install system version of the build tool:**
+If project uses vendored-meson, install system meson:
+
+```dockerfile
+RUN apt-get update && apt-get install -y meson ninja-build
+RUN pip install meson-python
+RUN pip install . --no-build-isolation
+```
+
+**Solution 3 - Use pip install with git (keeps .git metadata):**
+```dockerfile
+RUN pip install git+file:///workspace
+```
+
+**STEP 1:** Read Dockerfile: {dockerfile_absolute}
+**STEP 2:** Try Solution 1 first (simplest - copy everything)
+**STEP 3:** If that doesn't work conceptually, try Solution 2
+
+Error: {safe_error}
+
+Final Answer: ONLY Dockerfile content."""
+
+                elif patterns:
                     # Read current Dockerfile to detect OS
                     try:
                         with open(dockerfile_absolute, 'r') as f:
@@ -1476,7 +1706,14 @@ OUTPUT: Dockerfile with the specific missing library added"""
                         'blas_library_needed': 'BLAS LAPACK linear algebra libraries',
                         'python_dev_headers': 'python development headers',
                         'c_compiler_needed': 'gcc C compiler build-essential',
-                        'cpp_compiler_needed': 'g++ C++ compiler'
+                        'cpp_compiler_needed': 'g++ C++ compiler',
+                        'npm_lifecycle_hooks_error': 'npm git hooks husky',
+                        'apt_package_not_found': 'apt package not found',
+                        'npm_invalid_config': 'npm config error',
+                        'vendored_build_system': 'vendored build system',
+                        'git_required_but_missing': 'git version control',
+                        'cmake_needed': 'cmake build system',
+                        'pkg_config_needed': 'pkg-config'
                     }
 
                     search_terms = ' '.join([pattern_descriptions.get(p, p) for p in patterns])
@@ -1487,22 +1724,55 @@ Detected missing: {', '.join(patterns)}
 Base OS: {base_os}
 Package Manager: {pkg_manager}
 
-**DISCOVERY APPROACH** (DO NOT GUESS):
+**VERSION-AWARE DISCOVERY APPROACH** (CRITICAL):
 
-**STEP 1:** Read current Dockerfile: {dockerfile_absolute}
-**STEP 2:** Use SearchWeb with query: "docker {base_os} {pkg_manager} install {search_terms}"
-**STEP 3:** Based on search results, add RUN command BEFORE dependency install
+**STEP 1 - IDENTIFY EXACT OS VERSION:**
+Read Dockerfile: {dockerfile_absolute}
+Extract base image with VERSION:
+- FROM ubuntu:22.04 → OS is "ubuntu" VERSION is "jammy" (22.04)
+- FROM ubuntu:20.04 → OS is "ubuntu" VERSION is "focal" (20.04)
+- FROM debian:bookworm-slim → OS is "debian" VERSION is "bookworm"
+- FROM debian:bullseye → OS is "debian" VERSION is "bullseye"
+- FROM node:18-bullseye → OS is "debian" VERSION is "bullseye"
+- FROM python:3.11-slim → OS is "debian" VERSION is "bookworm" (check base)
 
-EXAMPLES of what SearchWeb might find:
-- For Alpine (apk): apk add --no-cache build-base gfortran openblas-dev
-- For Debian (apt-get): apt-get install build-essential gfortran libopenblas-dev
-- For RedHat (yum): yum install gcc-gfortran blas-devel lapack-devel
+**STEP 2 - VERSION-SPECIFIC SEARCH:**
+Use SearchWeb with OS VERSION in query:
+"docker {base_os} [VERSION] {pkg_manager} install {search_terms}"
+
+Examples:
+- "docker ubuntu jammy apt-get install gfortran openblas" (for Ubuntu 22.04)
+- "docker debian bookworm install build-essential python3-dev" (for Debian 12)
+- "docker ubuntu focal install cmake pkg-config" (for Ubuntu 20.04)
+
+**STEP 3 - VERIFY PACKAGE NAMES:**
+Package names vary by version! If search suggests "libfoo6":
+- Search again: "{base_os} [VERSION] libfoo6 available"
+- This confirms the package exists in that specific version
+
+**STEP 4 - ADD TO DOCKERFILE:**
+Add RUN command BEFORE the failing dependency install command
+
+WHY VERSION MATTERS:
+- Ubuntu 20.04 (focal): libwebp6, libjpeg8
+- Ubuntu 22.04 (jammy): libwebp7, libjpeg-turbo8-dev
+- Debian 11 (bullseye): python3.9-dev
+- Debian 12 (bookworm): python3.11-dev
+
+EXAMPLES of what SearchWeb might find (VERSION-SPECIFIC):
+- For Ubuntu 22.04 (jammy): apt-get install build-essential gfortran libopenblas-dev
+- For Ubuntu 20.04 (focal): apt-get install build-essential gfortran libopenblas-dev (same!)
+- For Alpine 3.18: apk add --no-cache build-base gfortran openblas-dev
+- For Debian bookworm: apt-get install build-essential gfortran libopenblas-dev
 
 CRITICAL RULES:
-- USE SearchWeb to discover the correct package names for {base_os}
+- ALWAYS include OS VERSION in SearchWeb query
+- NEVER assume package names - they change between versions
+- If search result unclear, try: "{base_os} [VERSION] [package_purpose]"
+  Example: "ubuntu jammy webp library" instead of "libwebp"
 - Add packages BEFORE the failing command
 - DO NOT change base image
-- DO NOT use hardcoded package names without verifying via SearchWeb
+- DO NOT use examples without verifying via SearchWeb
 
 Error context: {safe_error}
 
@@ -1514,25 +1784,66 @@ Final Answer: ONLY Dockerfile content."""
 
 Native dependencies need build tools (compilers, headers) not in base image.
 
-**STEP 1:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 2:** Extract the base image OS and programming language from Dockerfile
-**STEP 3:** Read dependency files (package.json, requirements.txt, Cargo.toml, pom.xml) to identify packages
-**STEP 4:** Analyze error log to find specific missing commands or libraries
-**STEP 5:** Use SearchWeb with specific query based on what you found:
-   - Format: "docker [OS] install build tools for [language] [failing_package_or_command]"
-   - Example: "docker alpine install build tools for python when gcc missing"
-   - Example: "docker debian install dependencies for node-gyp"
-   - Example: "docker ubuntu install libssl-dev for rust openssl"
-**STEP 6:** Based on search results, add RUN command BEFORE dependency install
+**STEP 1 - READ AND IDENTIFY:**
+Read current Dockerfile: {dockerfile_absolute}
+Extract:
+- Base image with FULL VERSION (e.g., ubuntu:22.04, node:18-bullseye, python:3.11-slim)
+- Programming language
+- Failing package or command from error
 
-DISCOVERY APPROACH:
-1. Be SPECIFIC in your search query - include OS, language, and the failing package/command
-2. Look for official documentation in search results
-3. If first search doesn't help, try a different query with more context from the error
-4. Check error log for library names (libssl, libpq, libffi, etc.) and search for those specifically
+**STEP 2 - DETERMINE OS VERSION:**
+From base image, determine OS and VERSION:
+- ubuntu:22.04 → "ubuntu jammy"
+- debian:bookworm-slim → "debian bookworm"
+- node:18-bullseye → "debian bullseye" (Node images based on Debian)
+- python:3.11-slim → "debian bookworm" (Python 3.11 uses Debian 12)
+- alpine:3.18 → "alpine 3.18"
+
+**STEP 3 - READ DEPENDENCY FILES:**
+Read package.json, requirements.txt, Cargo.toml, or pom.xml to identify what's being built
+
+**STEP 4 - ANALYZE ERROR FOR SPECIFICS:**
+Look in error log for:
+- Missing commands (gcc, g++, make, cmake, pkg-config)
+- Missing libraries (libssl, libpq, libffi, libxml2)
+- Missing headers (.h files)
+- Failing package name
+
+**STEP 5 - VERSION-SPECIFIC SEARCH:**
+Use SearchWeb with SPECIFIC query including OS VERSION:
+Format: "docker [OS] [VERSION] install [what's_missing] for [language]"
+
+Examples:
+- "docker ubuntu jammy install build tools for python gcc missing"
+- "docker debian bookworm install dependencies for node-gyp"
+- "docker ubuntu focal install libssl-dev for rust openssl"
+- "docker alpine 3.18 install python3-dev gcc musl-dev"
+
+**STEP 6 - IF UNCLEAR, SEARCH PURPOSE:**
+If you don't find exact package names, search for what the missing thing does:
+- "ubuntu jammy ssl development library" instead of guessing "libssl-dev"
+- "debian bookworm webp image library" instead of guessing "libwebp7"
+
+**STEP 7 - ADD TO DOCKERFILE:**
+Based on search results, add RUN command BEFORE dependency install
+
+CRITICAL DISCOVERY RULES:
+1. ALWAYS include OS VERSION in search query (jammy, focal, bookworm, bullseye)
+2. NEVER assume package names work across OS versions
+3. Be SPECIFIC - include language, failing package, and what's missing
+4. Look for official documentation in search results
+5. If first search doesn't help, try different query with more error context
+6. Verify package exists: search "[OS] [VERSION] [package_name] available"
+
+WHY THIS MATTERS:
+Package names and versions change between OS releases!
+- Ubuntu 20.04: python3.8-dev, libssl1.1
+- Ubuntu 22.04: python3.10-dev, libssl3
+- Debian 11: cmake 3.18
+- Debian 12: cmake 3.25
 
 DO NOT GUESS OR USE HARDCODED EXAMPLES!
-USE SEARCHWEB TO DISCOVER THE CORRECT SOLUTION!
+USE SEARCHWEB WITH OS VERSION TO DISCOVER THE CORRECT SOLUTION!
 DO NOT CHANGE BASE IMAGE!
 
 Final Answer: ONLY Dockerfile content.

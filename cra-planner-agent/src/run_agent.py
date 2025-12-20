@@ -884,32 +884,76 @@ Your output: "VERIFIED MODERN BASE IMAGE: FROM maven:3.9-eclipse-temurin-17"
 ## YOUR TASK (MANDATORY STEPS)
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. **Identify language/framework** from previous queries
-2. **If repository config has old version** → Recognize it's deprecated
-3. **Call DockerImageSearch with `tags:<base_image>`** (REQUIRED - NO SHORTCUTS!)
-4. **Analyze results** using selection rules above
-5. **Call DockerImageSearch with `<image>:<selected_tag>`** to verify (REQUIRED!)
-6. **Output**: "VERIFIED MODERN BASE IMAGE: FROM <image>:<tag>"
+**⚠️ CRITICAL: YOU MUST CALL TOOLS AND WAIT FOR THEIR OUTPUT ⚠️**
+
+DO NOT write explanations like "I will call DockerImageSearch" and then skip to Final Answer.
+DO NOT say "I need the tool results" - ACTUALLY CALL THE TOOL AND WAIT!
+Each tool call returns output that you MUST read and use.
+
+**STEP-BY-STEP PROCESS (FOLLOW EXACTLY)**:
+
+**STEP 1:** Identify language/framework from previous queries (Java/Maven, Python, Node.js, etc.)
+
+**STEP 2:** Call DockerImageSearch with `tags:<base_image>`
+   - Example: Action: DockerImageSearch, Action Input: tags:maven
+   - **WAIT FOR OBSERVATION** - The tool will return a list of available tags
+   - DO NOT skip to Final Answer yet!
+
+**STEP 3:** Read the Observation from Step 2
+   - Look for tags with [OK] marker
+   - Prefer tags updated in 2024/2025
+   - Select a MAJOR.MINOR tag (e.g., 3.9-eclipse-temurin-17, not 3.9.6-jdk-17)
+
+**STEP 4:** Call DockerImageSearch with `<image>:<selected_tag>` to verify
+   - Example: Action: DockerImageSearch, Action Input: maven:3.9-eclipse-temurin-17
+   - **WAIT FOR OBSERVATION** - The tool will verify the tag exists
+   - DO NOT skip to Final Answer yet!
+
+**STEP 5:** Read the Observation from Step 4
+   - Confirm it says "VERIFIED" or "EXISTS"
+   - Check architecture compatibility
+
+**STEP 6:** Provide Final Answer with the verified image
+   - Format: "VERIFIED MODERN BASE IMAGE: FROM <image>:<tag>"
+
+**EXECUTION FORMAT (YOU MUST FOLLOW THIS)**:
+
+Thought: I need to find modern Maven tags
+Action: DockerImageSearch
+Action Input: tags:maven
+
+[WAIT FOR OBSERVATION - DO NOT WRITE ANYTHING ELSE YET]
+
+After getting observation:
+Thought: I see maven:3.9-eclipse-temurin-17 is compatible, let me verify it
+Action: DockerImageSearch
+Action Input: maven:3.9-eclipse-temurin-17
+
+[WAIT FOR OBSERVATION - DO NOT WRITE ANYTHING ELSE YET]
+
+After getting observation:
+Thought: Verified, now I can provide final answer
+Final Answer: VERIFIED MODERN BASE IMAGE: FROM maven:3.9-eclipse-temurin-17
 
 **CRITICAL RULES**:
-- ✅ MUST use DockerImageSearch tool (can't skip!)
+- ✅ MUST actually call DockerImageSearch tool TWICE (list tags, then verify)
+- ✅ MUST wait for Observation after EACH tool call
+- ✅ NEVER skip directly to Final Answer without calling tools
+- ✅ NEVER write explanations instead of tool calls
 - ✅ MUST pick tags with [OK] marker (architecture compatible)
 - ✅ MUST prefer recently updated tags (2024 > 2023 > 2022)
 - ✅ MUST prefer MAJOR.MINOR over MAJOR.MINOR.PATCH
 - ❌ NEVER use tags with "Last updated" before 2022
 - ❌ NEVER trust old version numbers from repo configs
 - ❌ NEVER use tags with [!!] marker (incompatible)
+- ❌ NEVER say "I will call X" without actually calling it
+- ❌ NEVER say "I need tool results" - just call the tool!
 
 **ARCHITECTURE COMPATIBILITY NOTE**:
-If you're selecting an image:
 - The [OK] marker means it supports your system's architecture
 - The [!!] marker means it won't work (wrong architecture)
 - Prefer: -slim or -bookworm variants (better multi-arch support)
 - Be careful with: -alpine variants (sometimes lack ARM64 support)
-
-**VERIFICATION IS MANDATORY**:
-Don't assume an image exists or works - ALWAYS verify with DockerImageSearch before using it.
-This prevents wasting iterations on images that don't exist or aren't compatible.
 
 **Why this matters**: Modern images = faster builds, better security, fewer errors!
 """,
