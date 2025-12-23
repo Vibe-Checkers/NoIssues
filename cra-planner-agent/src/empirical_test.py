@@ -88,7 +88,7 @@ class DockerBuildTester:
 
         start_time = time.time()
 
-        # Build Docker image
+        # Build Docker image with BuildKit enabled
         try:
             cmd = ["docker", "build"]
 
@@ -102,14 +102,19 @@ class DockerBuildTester:
                 context_path
             ])
 
+            # Enable BuildKit for modern Dockerfile features (--mount, --secret, etc.)
+            env = os.environ.copy()
+            env["DOCKER_BUILDKIT"] = "1"
+
             platform_info = f" (platform: {self.platform})" if self.platform else ""
-            print(f"[DOCKER BUILD] Running: {' '.join(cmd)}{platform_info}")
+            print(f"[DOCKER BUILD] Running with BuildKit: {' '.join(cmd)}{platform_info}")
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout
+                timeout=self.timeout,
+                env=env
             )
 
             duration = time.time() - start_time
