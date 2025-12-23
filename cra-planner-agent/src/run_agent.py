@@ -1059,7 +1059,7 @@ Now generate the Final Answer with both files in the specified format.
 
                 # Special handling for final query (Query 4 - Dockerfile generation)
                 # Use smart retry with max_iterations control to prevent endless tool calls
-                max_iterations_for_final = 5  # Allow up to 5 tool calls for Docker image verification
+                max_iterations_for_final = 15  # Increased from 5 to 15 to allow proper image verification and Dockerfile generation
                 
                 if i == len(queries):
                     # For final query, limit iterations to prevent endless searches
@@ -1126,17 +1126,20 @@ Now generate the Final Answer with both files in the specified format.
                     # Parse the output for Dockerfile and .dockerignore
                     dockerfile_content = None
                     # dockerignore_content is already initialized outside loop
-                    
+
+                    # Clean output first - remove backticks that may wrap delimiters
+                    cleaned_output = output.replace('`', '')
+
                     # Try to parse with new format
-                    if "DOCKERFILE_START" in output and "DOCKERFILE_END" in output:
+                    if "DOCKERFILE_START" in cleaned_output and "DOCKERFILE_END" in cleaned_output:
                         try:
-                            dockerfile_content = output.split("DOCKERFILE_START")[1].split("DOCKERFILE_END")[0].strip()
+                            dockerfile_content = cleaned_output.split("DOCKERFILE_START")[1].split("DOCKERFILE_END")[0].strip()
                         except IndexError:
                             pass
-                    
-                    if "DOCKERIGNORE_START" in output and "DOCKERIGNORE_END" in output:
+
+                    if "DOCKERIGNORE_START" in cleaned_output and "DOCKERIGNORE_END" in cleaned_output:
                         try:
-                            dockerignore_content = output.split("DOCKERIGNORE_START")[1].split("DOCKERIGNORE_END")[0].strip()
+                            dockerignore_content = cleaned_output.split("DOCKERIGNORE_START")[1].split("DOCKERIGNORE_END")[0].strip()
                         except IndexError:
                             pass
                     
@@ -1308,17 +1311,9 @@ Provide ONLY the Final Answer in this format. No tool calls."""
                     # Final validation and messaging
                     if not dockerfile_content or not _has_dockerfile(dockerfile_content):
                         print(f"\n[ERROR] Failed to generate Dockerfile after {max_retries + 1} attempts + fallback extraction")
-                        # Create a minimal placeholder Dockerfile to avoid complete failure
-                        # This will fail to build but allows the system to record it was attempted
-                        dockerfile_content = """FROM alpine:latest
-# ERROR: Agent failed to generate proper Dockerfile
-# This is a placeholder to prevent 'not generated' errors
-# Manual review required
-WORKDIR /app
-COPY . .
-CMD ["sh"]
-"""
-                        print(f"[FALLBACK] Created placeholder Dockerfile to prevent 'not generated' error")
+                        print(f"[ERROR] No placeholder will be created - this is a genuine failure")
+                        # DO NOT create placeholder - let the failure be properly recorded
+                        dockerfile_content = None
                     else:
                         print(f"\n[SUCCESS] Dockerfile generated successfully!")
 
