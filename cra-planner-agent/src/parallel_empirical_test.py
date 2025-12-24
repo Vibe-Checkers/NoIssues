@@ -1377,6 +1377,115 @@ DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
 
 Error: {safe_error}"""
 
+            elif stage == "IMAGE_DEPRECATED":
+                self.log(repo_name, f"IMAGE_DEPRECATED error detected - ancient Docker Manifest V1 image", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+
+                # Extract current image
+                current_image = "unknown"
+                try:
+                    with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip().upper().startswith('FROM '):
+                                current_image = line.strip().split()[1].split(':')[0]  # Get base image name
+                                break
+                except:
+                    pass
+
+                refinement_query = f"""{stagnation_prefix}
+CRITICAL: DEPRECATED DOCKER IMAGE - Uses unsupported Manifest V1!
+
+Current image: {current_image}
+Problem: This image uses Docker Image Format v1 or Manifest v2 Schema 1 (deprecated in 2017).
+Modern Docker no longer supports these ancient image formats.
+
+**YOU MUST FIND A MODERN REPLACEMENT**:
+
+**STEP 1:** Use DockerImageSearch with "tags:{current_image}" to list available tags
+**STEP 2:** Look for tags with "Last updated" in 2024 or 2025 (NOT 2015-2017)
+**STEP 3:** Pick a modern tag with [OK] marker (architecture compatible)
+**STEP 4:** Verify with DockerImageSearch: "{current_image}:<modern_tag>"
+**STEP 5:** Read Dockerfile: {dockerfile_absolute}
+**STEP 6:** Update FROM line with the VERIFIED modern image
+
+CRITICAL BLOCKLIST (DO NOT USE):
+- maven:3.3.1-jdk-7 (2015)
+- openjdk:9-b130-jdk (2017)
+- gcc:4.6.4 (2012)
+- alpine:2.6 (2012)
+
+RECOMMENDED MODERN ALTERNATIVES:
+- For Maven/Java: maven:3.9-eclipse-temurin-17 or maven:3.9-eclipse-temurin-21
+- For OpenJDK: eclipse-temurin:17-jdk or eclipse-temurin:21-jdk
+- For GCC: gcc:13 or gcc:14
+- For Alpine: alpine:3.18 or alpine:3.19
+
+Final Answer: ONLY Dockerfile with modern base image
+Error: {safe_error}"""
+
+            elif stage == "EOL_DISTRO":
+                self.log(repo_name, f"EOL_DISTRO error detected - End-of-Life OS distribution", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+
+                refinement_query = f"""{stagnation_prefix}
+CRITICAL: END-OF-LIFE OS DISTRIBUTION - Package repositories deleted!
+
+Problem: The base image's OS distribution reached End-of-Life.
+Package repositories (apt, yum) have been removed from the internet.
+
+Common errors:
+- "apt-get update: exit code 100"
+- "Release file expired"
+- "404 Not Found: archive.ubuntu.com"
+
+**YOU MUST SWITCH TO A MAINTAINED OS VERSION**:
+
+**STEP 1:** Identify current OS in FROM line
+**STEP 2:** Use DockerImageSearch to find modern version
+**STEP 3:** Read Dockerfile: {dockerfile_absolute}
+**STEP 4:** Update to modern OS
+
+EXAMPLES:
+Wrong: ubuntu:14.04 (EOL 2019) → Correct: ubuntu:22.04 or ubuntu:24.04
+Wrong: debian:8 (EOL 2020) → Correct: debian:11 or debian:12
+Wrong: python:3.6 → Correct: python:3.12-slim or python:3.13-slim
+Wrong: node:14 (EOL 2023) → Correct: node:20-slim or node:22-alpine
+
+Final Answer: ONLY Dockerfile with modern OS base
+Error: {safe_error}"""
+
+            elif stage == "PLATFORM_INCOMPATIBLE":
+                self.log(repo_name, f"PLATFORM_INCOMPATIBLE error detected - ARM64/AMD64 mismatch", to_console=True)
+                safe_error = self._sanitize_error_for_azure(error_log, max_length=300)
+
+                refinement_query = f"""{stagnation_prefix}
+PLATFORM INCOMPATIBILITY ERROR - Architecture mismatch!
+
+Problem: The Docker image doesn't support your system's architecture.
+Errors like: "exec format error", "platform does not match", "linux/amd64 vs linux/arm64"
+
+**SOLUTION**: Find a multi-architecture image:
+
+**STEP 1:** Use DockerImageSearch with "tags:<current_base_image>"
+**STEP 2:** Look for tags with [OK] marker (architecture compatible)
+**STEP 3:** Prefer tags ending in: -slim, -bookworm, -alpine (better multi-arch support)
+**STEP 4:** AVOID tags with specific arch suffixes: -amd64, -arm64, -x86_64
+**STEP 5:** Read Dockerfile: {dockerfile_absolute}
+**STEP 6:** Update FROM with multi-arch compatible tag
+
+GOOD EXAMPLES (multi-arch):
+- python:3.12-slim
+- node:20-alpine
+- maven:3.9-eclipse-temurin-17
+- rust:1.83-slim
+
+BAD EXAMPLES (platform-specific):
+- eclipse-temurin:17_35-jdk-alpine (specific version, limited arch)
+- Old numbered tags: maven:3.3.1-jdk-7
+
+Final Answer: ONLY Dockerfile with architecture-compatible image
+Error: {safe_error}"""
+
             elif stage == "AGENT_OUTPUT_ERROR":
                 self.log(repo_name, "AGENT_OUTPUT_ERROR detected - regenerating cleanly", to_console=True)
 

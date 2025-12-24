@@ -11,10 +11,7 @@ venv/
 env/
 
 # Test results and generated files
-parallel_empirical_results/
-analysis_reports/
-*.log
-logs/
+
 
 # Cloned repositories (from testing)
 repos/

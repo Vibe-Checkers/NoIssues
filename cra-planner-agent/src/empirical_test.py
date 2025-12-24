@@ -213,15 +213,28 @@ class DockerBuildTester:
             return "INFRASTRUCTURE_CORRUPTION", failed_step or "Docker BuildKit cache corrupted - requires prune"
 
         # 3. Platform/Architecture Incompatibility (ARM vs x86)
-        # This is a special case of image pull - the image exists but for wrong architecture
-        if any(x in error_lower for x in [
-            "invalidbaseimageplatform", "platform", "linux/amd64", "linux/arm64",
-            "was pulled with platform", "expected \"linux/", "does not match"
-        ]) and any(x in error_lower for x in ["amd64", "arm64", "architecture", "platform"]):
+        # STRICT detection to avoid false positives (e.g., matching "platform" in dependency names)
+        # Must match specific Docker error phrases or "exec format error"
+        is_platform_mismatch = (
+            "exec format error" in error_lower or
+            ("image" in error_lower and "platform" in error_lower and "does not match" in error_lower) or
+            ("invalidbaseimageplatform" in error_lower) or
+            ("requested image's platform" in error_lower)
+        )
+        if is_platform_mismatch:
             return "PLATFORM_INCOMPATIBLE", failed_step or "Base image platform mismatch (amd64 vs arm64)"
 
-        # 4. Base Image Pull Issues (FROM command)
-        # 4a. Image Validation Failures (corrupted/deprecated manifest)
+        # 4. Base Image Issues
+        # 4a. Deprecated V1 Manifest (Ancient Images)
+        if "docker image format v1" in error_lower or "manifest version 2, schema 1" in error_lower:
+            return "IMAGE_DEPRECATED", failed_step or "Image uses deprecated Schema V1 (unsupported by modern Docker)"
+
+        # 4b. EOL Distribution (Apt Repositories Gone)
+        if (("release check failed" in error_lower or "release file" in error_lower) and "expired" in error_lower) or \
+           (("archive.ubuntu.com" in error_lower or "security.debian.org" in error_lower) and "404" in error_lower and "apt-get" in error_lower):
+            return "EOL_DISTRO", failed_step or "OS distribution is End-of-Life (package repositories removed)"
+
+        # 4c. Image Validation Failures
         if any(x in error_lower for x in ["failed validation", "failed to load cache key"]):
             return "IMAGE_VALIDATION_FAILED", failed_step or "Docker image failed validation (likely deprecated/corrupted manifest)"
 

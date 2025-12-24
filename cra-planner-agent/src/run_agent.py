@@ -462,54 +462,102 @@ def _ensure_patched():
 def detect_project_language(repo_path: str) -> str:
     """
     Detect the primary programming language of a repository.
-    
+    PRIORITIZES build system files over source files to avoid confusion from test/example code.
+
     Args:
         repo_path: Path to the repository
-        
+
     Returns:
         Detected language name (e.g., "Python", "JavaScript", "Go", "Rust")
     """
     import os
-    
-    # Common file patterns that indicate language
-    language_indicators = {
-        "Python": ["*.py", "requirements.txt", "setup.py", "pyproject.toml", "Pipfile"],
-        "JavaScript": ["package.json", "*.js", "*.ts", "yarn.lock", "package-lock.json"],
-        "TypeScript": ["tsconfig.json", "*.ts", "*.tsx"],
-        "Go": ["go.mod", "go.sum", "*.go"],
-        "Rust": ["Cargo.toml", "Cargo.lock", "*.rs"],
-        "Java": ["pom.xml", "build.gradle", "*.java"],
-        "C++": ["CMakeLists.txt", "Makefile", "*.cpp", "*.hpp"],
-        "C": ["Makefile", "*.c", "*.h"],
-        "Ruby": ["Gemfile", "*.rb", "Rakefile"],
-        "PHP": ["composer.json", "*.php"],
-        "C#": ["*.csproj", "*.sln", "*.cs"],
-        "Swift": ["Package.swift", "*.swift"],
-        "Kotlin": ["build.gradle.kts", "*.kt"],
+
+    # PRIORITY 1: Build system files (highest confidence - check root only)
+    # These are definitive indicators of the primary language
+    build_system_files = {
+        "Java": ["pom.xml", "build.gradle", "build.gradle.kts"],
+        "JavaScript": ["package.json"],
+        "TypeScript": ["tsconfig.json"],  # Check before package.json
+        "Python": ["setup.py", "pyproject.toml"],
+        "Go": ["go.mod", "go.sum"],
+        "Rust": ["Cargo.toml", "Cargo.lock"],
+        "C": ["configure", "configure.ac", "autogen.sh"],
+        "C++": ["CMakeLists.txt"],
+        "Ruby": ["Gemfile"],
+        "PHP": ["composer.json"],
     }
-    
-    # Count matches for each language
+
+    # Check root directory only for build files (avoids test/example pollution)
+    try:
+        root_files = os.listdir(repo_path)
+
+        # Priority order: TypeScript > JavaScript (TypeScript projects have package.json too)
+        for lang in ["TypeScript", "Java", "Python", "Go", "Rust", "C++", "C", "JavaScript", "Ruby", "PHP"]:
+            if lang in build_system_files:
+                for build_file in build_system_files[lang]:
+                    if build_file in root_files:
+                        print(f"[LANGUAGE DETECTION] Found {build_file} in root → {lang}")
+                        return lang
+    except Exception as e:
+        print(f"[LANGUAGE DETECTION] Error checking root: {e}")
+
+    # PRIORITY 2: Secondary config files (moderate confidence)
+    secondary_indicators = {
+        "Python": ["requirements.txt", "Pipfile"],
+        "JavaScript": ["yarn.lock", "package-lock.json", ".npmrc"],
+        "C": ["Makefile"],  # Makefiles are common but not definitive
+    }
+
+    try:
+        for lang, files in secondary_indicators.items():
+            for file in files:
+                if file in root_files:
+                    print(f"[LANGUAGE DETECTION] Found {file} in root → {lang}")
+                    return lang
+    except:
+        pass
+
+    # PRIORITY 3: Count source files (lower confidence - full tree walk)
+    # Only used as fallback when no build system detected
+    source_patterns = {
+        "Python": ["*.py"],
+        "JavaScript": ["*.js", "*.jsx"],
+        "TypeScript": ["*.ts", "*.tsx"],
+        "Go": ["*.go"],
+        "Rust": ["*.rs"],
+        "Java": ["*.java"],
+        "C++": ["*.cpp", "*.hpp", "*.cc", "*.hh"],
+        "C": ["*.c", "*.h"],
+        "Ruby": ["*.rb"],
+        "PHP": ["*.php"],
+        "C#": ["*.cs"],
+        "Swift": ["*.swift"],
+        "Kotlin": ["*.kt"],
+    }
+
     language_scores = {}
-    
+
     for root, dirs, files in os.walk(repo_path):
-        # Skip hidden directories
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
-        
+        # Skip hidden directories and common test/example dirs
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['test', 'tests', 'examples', 'example', 'docs', 'doc']]
+
         for file in files:
-            for lang, patterns in language_indicators.items():
+            for lang, patterns in source_patterns.items():
                 for pattern in patterns:
-                    if file == pattern or file.endswith(pattern.replace('*', '')):
+                    if file.endswith(pattern.replace('*', '')):
                         language_scores[lang] = language_scores.get(lang, 0) + 1
                         break
-    
+
     # Return the language with highest score, or "Unknown" if none found
     if language_scores:
         detected = max(language_scores.items(), key=lambda x: x[1])[0]
+        print(f"[LANGUAGE DETECTION] Source file count → {detected} ({language_scores[detected]} files)")
         # Special case: TypeScript often comes with JavaScript
         if detected == "TypeScript" and "JavaScript" in language_scores:
             return "TypeScript"
         return detected
-    
+
+    print("[LANGUAGE DETECTION] No language detected → Unknown")
     return "Unknown"
 
 
