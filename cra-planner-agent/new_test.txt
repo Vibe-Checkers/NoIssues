@@ -1,6 +1,0 @@
-https://github.com/ccache/ccache
-https://github.com/apache/commons-csv
-https://github.com/apache/dubbo
-https://github.com/facebook/folly
-https://github.com/google/guava
-https://github.com/stleaACry/JSON-java

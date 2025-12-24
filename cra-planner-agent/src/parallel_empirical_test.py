@@ -687,10 +687,12 @@ class ParallelEmpiricalTester:
                 max_refinement_iterations = 15  # Increased from 10 to 15 based on empirical data
                 iteration_success = False
 
-                # Initialize state for refinement tracking
+                # Initialize state for refinement tracking (EXPANDED for better stagnation detection)
                 previous_from_lines = []
                 previous_tools_used = []
                 consecutive_validation_errors = 0  # Track repeated validation failures
+                previous_error_stages = []  # Track error stage history
+                previous_copy_commands = []  # Track COPY command history to detect stagnation
 
                 # Iterative refinement loop
                 for iteration in range(max_refinement_iterations + 1):  # 0 = initial, 1-15 = refinements
@@ -945,22 +947,45 @@ class ParallelEmpiricalTester:
                             refinement_success, tools_used = self._refine_dockerfile_with_error_feedback(
                                 agent, dockerfile_path, raw_error_file, repo_path, repo_name,
                                 iteration + 1, docker_result, previous_from_lines, previous_tools_used,
-                                consecutive_validation_errors
+                                consecutive_validation_errors, previous_error_stages, previous_copy_commands
                             )
                             refinement_duration = time.time() - refinement_start
                             
-                            # Update state for next iteration
+                            # Update state for next iteration (EXPANDED tracking)
                             if tools_used:
                                 previous_tools_used = tools_used
-                            
-                            # Track FROM line changes
+
+                            # Track error stage history
+                            previous_error_stages.append(stage)
+
+                            # Track FROM line and COPY commands
                             try:
                                 with open(dockerfile_path, 'r', encoding='utf-8') as f:
                                     current_content = f.read()
+
+                                # Track FROM line
                                 for line in current_content.split('\n'):
                                     if line.strip().upper().startswith('FROM '):
                                         previous_from_lines.append(line.strip())
                                         break
+
+                                # Track COPY commands (for FILE_COPY error stagnation detection)
+                                copy_cmds = []
+                                for line in current_content.split('\n'):
+                                    line_stripped = line.strip().upper()
+                                    if line_stripped.startswith('COPY '):
+                                        # Robust COPY parsing - skip --flags, extract all sources
+                                        parts = line.strip().split()
+                                        if len(parts) >= 3:
+                                            # Skip all --flags
+                                            source_idx = 1
+                                            while source_idx < len(parts) and parts[source_idx].startswith('--'):
+                                                source_idx += 1
+                                            # Extract sources (all but last which is dest)
+                                            if source_idx < len(parts) - 1:
+                                                sources = parts[source_idx:-1]
+                                                copy_cmds.extend(sources)
+                                previous_copy_commands.append(copy_cmds)
                             except:
                                 pass
 
@@ -1257,7 +1282,8 @@ class ParallelEmpiricalTester:
         self, agent, dockerfile_path: Path, error_log_path: Path,
         repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None,
         previous_from_lines: List[str] = None, previous_tools_used: List[str] = None,
-        consecutive_validation_errors: int = 0
+        consecutive_validation_errors: int = 0, previous_error_stages: List[str] = None,
+        previous_copy_commands: List[List[str]] = None
     ) -> Tuple[bool, List[str]]:
         """
         Refine Dockerfile based on build error feedback with enhanced analysis.
@@ -1303,23 +1329,76 @@ class ParallelEmpiricalTester:
                 failed_cmd = 'unknown'
                 exit_code = 1
 
-            # STAGNATION DETECTION: Check if we are stuck on the same base image
+            # EXPANDED STAGNATION DETECTION: Check multiple dimensions
             stagnation_prefix = ""
+            stagnation_detected = False
+            stagnation_reasons = []
+
+            # Extract current state
             current_from = ""
+            current_copy_commands = []
             for line in current_dockerfile.split('\n'):
-                if line.strip().upper().startswith('FROM '):
+                line_stripped = line.strip().upper()
+                if line_stripped.startswith('FROM '):
                     current_from = line.strip()
-                    break
-            
-            if previous_from_lines and len(previous_from_lines) >= 2 and current_from:
-                # Check last 2 iterations
-                if previous_from_lines[-1] == current_from and previous_from_lines[-2] == current_from:
-                    self.log(repo_name, "STAGNATION DETECTED: Base image hasn't changed for 3 attempts despite failures!", to_console=True)
-                    stagnation_prefix = f"""CRITICAL - STAGNATION DETECTED!
-You have tried the base image '{current_from}' multiple times and it keeps failing.
-STOP TRYING THE SAME IMAGE. YOU MUST CHANGE THE BASE IMAGE TO SOMETHING ELSE.
-Use `DockerImageSearch` to find a completely different tag or base image.
-DO NOT use the same tag again.
+                elif line_stripped.startswith('COPY '):
+                    # Extract source paths from COPY command (robust parsing)
+                    # Handles: COPY src dest, COPY --from=X src dest, COPY --chown=u:g src dest
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        # Skip all --flags to find the source path
+                        source_idx = 1
+                        while source_idx < len(parts) and parts[source_idx].startswith('--'):
+                            source_idx += 1
+
+                        # Extract all sources (COPY can have multiple: COPY src1 src2 dest)
+                        # Last argument is destination, everything before (after flags) is source
+                        if source_idx < len(parts) - 1:  # At least one source and one dest
+                            sources = parts[source_idx:-1]  # All but the last (dest)
+                            current_copy_commands.extend(sources)
+
+            # Stagnation Check 1: Same base image for 5+ iterations (increased threshold)
+            if previous_from_lines and len(previous_from_lines) >= 4 and current_from:
+                # Check last 4 iterations all match current
+                if all(prev == current_from for prev in previous_from_lines[-4:]):
+                    stagnation_detected = True
+                    stagnation_reasons.append(f"base image '{current_from}' repeated 5+ times")
+                    self.log(repo_name, "STAGNATION: Base image hasn't changed for 5 attempts!", to_console=True)
+
+            # Stagnation Check 2: Same error stage 5+ consecutive times
+            # EXCLUDE: FILE_COPY errors (these legitimately need multiple iterations)
+            if previous_error_stages and len(previous_error_stages) >= 4:
+                # Exclude FILE_COPY stages from this check
+                if stage not in ['FILE_COPY_MISSING', 'FILE_COPY', 'FILE_PERMISSION']:
+                    # Check last 4 iterations all match current stage
+                    if all(prev == stage for prev in previous_error_stages[-4:]):
+                        stagnation_detected = True
+                        stagnation_reasons.append(f"error stage '{stage}' repeated 5+ times")
+                        self.log(repo_name, f"STAGNATION: Same error stage '{stage}' for 5 attempts!", to_console=True)
+
+            # Stagnation Check 3: Same COPY commands for 5+ iterations (only check if FILE_COPY error)
+            if stage in ['FILE_COPY_MISSING', 'FILE_COPY'] and current_copy_commands:
+                if previous_copy_commands and len(previous_copy_commands) >= 4:
+                    # Compare current with last 4 iterations - all must match
+                    if all(prev == current_copy_commands for prev in previous_copy_commands[-4:]):
+                        stagnation_detected = True
+                        stagnation_reasons.append(f"COPY commands unchanged for 5+ iterations despite FILE_COPY error")
+                        self.log(repo_name, "STAGNATION: COPY commands haven't changed for 5 attempts!", to_console=True)
+
+            # Generate stagnation warning if detected
+            if stagnation_detected:
+                reasons_text = "\n".join(f"- {r}" for r in stagnation_reasons)
+                stagnation_prefix = f"""CRITICAL - STAGNATION DETECTED!
+
+You are stuck in a loop! The following haven't changed despite repeated failures:
+{reasons_text}
+
+**YOU MUST TRY SOMETHING DIFFERENT**:
+1. If base image is stuck: Use DockerImageSearch to find a COMPLETELY different image/tag
+2. If error stage is stuck: Use SearchDockerError or WebSearch to research the problem
+3. If COPY commands are stuck: Use ListDirectory to see what files ACTUALLY exist, then update paths
+
+DO NOT REPEAT THE SAME APPROACH AGAIN. TRY A DIFFERENT SOLUTION.
 """
 
             # Detect error type for targeted guidance
@@ -1359,21 +1438,25 @@ DO NOT use the same tag again.
                 self.log(repo_name, f"DEPENDENCY_FILE_MISSING error detected", to_console=True)
                 safe_error = self._sanitize_error_for_azure(error_log, max_length=400)
 
-                refinement_query = f"""DEPENDENCY FILE NOT FOUND ERROR
+                refinement_query = f"""{stagnation_prefix}
+DEPENDENCY FILE NOT FOUND ERROR - Files being copied don't exist!
 
 The Dockerfile is trying to COPY a dependency file that doesn't exist at the expected location.
 
-**STEP 1:** Use GrepFiles to search for dependency files (package.json, requirements.txt, pom.xml) in the repository
-**STEP 2:** Read current Dockerfile at: {dockerfile_absolute}
-**STEP 3:** Fix COPY commands to use correct paths
-**STEP 4:** Ensure files are copied BEFORE running install commands
+**MANDATORY STEPS - YOU MUST USE TOOLS**:
+**STEP 1 (REQUIRED):** Call ListDirectory tool on repository root to see what files exist
+**STEP 2 (REQUIRED):** Call SearchFiles tool to find dependency files (package.json, requirements.txt, pom.xml, etc.)
+**STEP 3:** Read current Dockerfile at: {dockerfile_absolute}
+**STEP 4:** Update COPY commands to use ACTUAL paths found in steps 1-2
 
-COMMON FIXES:
-- Files in subdirectory: COPY ./subdir/package.json ./
+⚠️ YOU MUST USE LISTDIRECTORY AND SEARCHFILES TOOLS. DO NOT GUESS FILE PATHS.
+
+COMMON PATTERNS AFTER FINDING FILES:
+- File in subdirectory: COPY ./subdir/package.json ./
 - Monorepo: COPY entire workspace first
-- Wrong file name: Check actual file names in repo
+- Different name: Use actual filename from search
 
-DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content.
+DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content with verified paths.
 
 Error: {safe_error}"""
 

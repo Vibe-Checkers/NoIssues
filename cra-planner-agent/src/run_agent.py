@@ -459,6 +459,230 @@ def _ensure_patched():
             _stderr_patched = True
 
 
+def get_dockerfile_format_example(language: str) -> str:
+    """
+    Return concrete Dockerfile example for the detected language.
+    NO PLACEHOLDERS - only real, working examples.
+    """
+    examples = {
+        "Java": """
+Final Answer:
+DOCKERFILE_START
+FROM maven:3.9-eclipse-temurin-17
+WORKDIR /app
+COPY pom.xml ./
+RUN mvn dependency:go-offline
+COPY src ./src
+RUN mvn package -DskipTests
+EXPOSE 8080
+CMD ["java", "-jar", "target/app.jar"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+target
+*.class
+.mvn
+.idea
+*.iml
+DOCKERIGNORE_END
+""",
+        "Python": """
+Final Answer:
+DOCKERFILE_START
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 5000
+CMD ["python", "app.py"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+__pycache__
+*.pyc
+.venv
+.env
+*.egg-info
+dist
+DOCKERIGNORE_END
+""",
+        "JavaScript": """
+Final Answer:
+DOCKERFILE_START
+FROM node:20-slim
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 3000
+CMD ["node", "index.js"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+node_modules
+npm-debug.log
+.env
+.next
+dist
+DOCKERIGNORE_END
+""",
+        "TypeScript": """
+Final Answer:
+DOCKERFILE_START
+FROM node:20-slim
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+node_modules
+npm-debug.log
+.env
+dist
+DOCKERIGNORE_END
+""",
+        "Go": """
+Final Answer:
+DOCKERFILE_START
+FROM golang:1.22-alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o app .
+FROM alpine:latest
+WORKDIR /app
+COPY --from=build /app/app .
+EXPOSE 8080
+CMD ["./app"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+vendor
+*.log
+.env
+DOCKERIGNORE_END
+""",
+        "Rust": """
+Final Answer:
+DOCKERFILE_START
+FROM rust:1.83-slim AS build
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+COPY . .
+RUN cargo build --release
+FROM debian:bookworm-slim
+WORKDIR /app
+COPY --from=build /app/target/release/app .
+EXPOSE 8080
+CMD ["./app"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+target
+Cargo.lock
+.env
+DOCKERIGNORE_END
+""",
+        "C++": """
+Final Answer:
+DOCKERFILE_START
+FROM gcc:13
+WORKDIR /app
+COPY . .
+RUN g++ -o app main.cpp
+CMD ["./app"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+*.o
+*.out
+build
+.vscode
+DOCKERIGNORE_END
+""",
+        "C": """
+Final Answer:
+DOCKERFILE_START
+FROM gcc:13
+WORKDIR /app
+COPY . .
+RUN gcc -o app main.c
+CMD ["./app"]
+DOCKERFILE_END
+
+DOCKERIGNORE_START
+.git
+*.o
+*.out
+build
+DOCKERIGNORE_END
+"""
+    }
+
+    return examples.get(language, examples["Python"])
+
+
+def validate_dockerfile_output(output: str) -> tuple[bool, str]:
+    """
+    Validate Dockerfile output for common placeholder and syntax errors.
+    Returns (is_valid, error_message)
+    """
+    import re
+
+    issues = []
+
+    # Check for placeholder syntax
+    angle_brackets = re.findall(r'<([^>]+)>', output)
+    if angle_brackets:
+        issues.append(f"Found angle bracket placeholders: {', '.join(set(angle_brackets))}")
+
+    square_brackets = re.findall(r'\[([A-Z_]+)\]', output)
+    if square_brackets:
+        issues.append(f"Found square bracket placeholders: {', '.join(set(square_brackets))}")
+
+    # Check for shell syntax in COPY commands (not in RUN)
+    copy_lines = re.findall(r'COPY[^\n]*', output, re.IGNORECASE)
+    for line in copy_lines:
+        if '||' in line:
+            issues.append(f"Found shell || operator in COPY: {line.strip()}")
+        if '2>/dev/null' in line or '2>&1' in line:
+            issues.append(f"Found stderr redirect in COPY: {line.strip()}")
+        if '&&' in line:
+            issues.append(f"Found && operator in COPY: {line.strip()}")
+
+    # Check for real image tags in FROM
+    from_matches = re.findall(r'FROM\s+(\S+)', output, re.IGNORECASE)
+    for image in from_matches:
+        if '<' in image or '[' in image or '{' in image:
+            issues.append(f"FROM line has placeholder: {image}")
+        if image.endswith(':latest'):
+            issues.append(f"Warning: Using :latest tag is not recommended: {image}")
+
+    # Check for curl/wget installing package managers
+    if re.search(r'curl.*maven|wget.*maven|curl.*gradle|wget.*gradle', output, re.IGNORECASE):
+        issues.append("Found manual Maven/Gradle installation via curl/wget - use official base image instead")
+
+    if issues:
+        return False, "Dockerfile validation failed:\n" + '\n'.join(f"  - {i}" for i in issues)
+
+    return True, "Valid"
+
+
 def detect_project_language(repo_path: str) -> str:
     """
     Detect the primary programming language of a repository.
@@ -517,8 +741,10 @@ def detect_project_language(repo_path: str) -> str:
     except:
         pass
 
-    # PRIORITY 3: Count source files (lower confidence - full tree walk)
+    # PRIORITY 3: Count source file LINES (not just files) - fixes scipy false detection
     # Only used as fallback when no build system detected
+    # Using line count instead of file count handles mixed-language repos correctly
+    # (e.g., scipy has Python code + some Java test files)
     source_patterns = {
         "Python": ["*.py"],
         "JavaScript": ["*.js", "*.jsx"],
@@ -526,7 +752,7 @@ def detect_project_language(repo_path: str) -> str:
         "Go": ["*.go"],
         "Rust": ["*.rs"],
         "Java": ["*.java"],
-        "C++": ["*.cpp", "*.hpp", "*.cc", "*.hh"],
+        "C++": ["*.cpp", "*.hpp", "*.cc", "*.hh", "*.cxx"],
         "C": ["*.c", "*.h"],
         "Ruby": ["*.rb"],
         "PHP": ["*.php"],
@@ -535,25 +761,48 @@ def detect_project_language(repo_path: str) -> str:
         "Kotlin": ["*.kt"],
     }
 
-    language_scores = {}
+    language_line_counts = {}  # Changed from language_scores (file counts)
 
     for root, dirs, files in os.walk(repo_path):
         # Skip hidden directories and common test/example dirs
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['test', 'tests', 'examples', 'example', 'docs', 'doc']]
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in [
+            'test', 'tests', 'examples', 'example', 'docs', 'doc', 'node_modules', '__pycache__', '.git'
+        ]]
 
         for file in files:
+            # Determine language from extension
             for lang, patterns in source_patterns.items():
                 for pattern in patterns:
-                    if file.endswith(pattern.replace('*', '')):
-                        language_scores[lang] = language_scores.get(lang, 0) + 1
+                    ext = pattern.replace('*', '')  # e.g., "*.py" → ".py"
+                    if file.endswith(ext):
+                        # Count lines in this file
+                        file_path = Path(root) / file
+                        try:
+                            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                line_count = len(f.readlines())
+                                language_line_counts[lang] = language_line_counts.get(lang, 0) + line_count
+                        except:
+                            # If can't read file, count it as 100 lines (rough estimate)
+                            language_line_counts[lang] = language_line_counts.get(lang, 0) + 100
                         break
 
-    # Return the language with highest score, or "Unknown" if none found
-    if language_scores:
-        detected = max(language_scores.items(), key=lambda x: x[1])[0]
-        print(f"[LANGUAGE DETECTION] Source file count → {detected} ({language_scores[detected]} files)")
+    # Return the language with most lines of code
+    if language_line_counts:
+        detected = max(language_line_counts.items(), key=lambda x: x[1])[0]
+        total_lines = sum(language_line_counts.values())
+        percentage = (language_line_counts[detected] / total_lines * 100) if total_lines > 0 else 0
+
+        print(f"[LANGUAGE DETECTION] Line count → {detected} ({language_line_counts[detected]:,} lines, {percentage:.1f}%)")
+
+        # Show runner-up if close (helps diagnose mixed repos)
+        sorted_langs = sorted(language_line_counts.items(), key=lambda x: x[1], reverse=True)
+        if len(sorted_langs) > 1:
+            runner_up_lang, runner_up_lines = sorted_langs[1]
+            runner_up_pct = (runner_up_lines / total_lines * 100) if total_lines > 0 else 0
+            print(f"[LANGUAGE DETECTION] Runner-up: {runner_up_lang} ({runner_up_lines:,} lines, {runner_up_pct:.1f}%)")
+
         # Special case: TypeScript often comes with JavaScript
-        if detected == "TypeScript" and "JavaScript" in language_scores:
+        if detected == "TypeScript" and "JavaScript" in language_line_counts:
             return "TypeScript"
         return detected
 
@@ -566,6 +815,142 @@ def _has_dockerfile(output: str) -> bool:
     if not output or not output.strip():
         return False
     return "FROM" in output.upper()
+
+
+def _validate_dockerfile(dockerfile_content: str, repo_path: str = None) -> tuple[bool, list[str]]:
+    """
+    Validate Dockerfile quality BEFORE proceeding to Docker build (language-agnostic).
+
+    Checks:
+    1. Has FROM statement
+    2. No placeholder text ([PATH], [HASH], DOCKERFILE_END markers)
+    3. No shell operators in COPY commands
+    4. Basic syntax validity
+
+    This saves 100+ seconds by catching broken Dockerfiles early instead of during build.
+
+    Args:
+        dockerfile_content: The generated Dockerfile
+        repo_path: Path to repository (optional, for COPY validation)
+
+    Returns:
+        (is_valid, list_of_errors)
+    """
+    import os
+    import re
+
+    errors = []
+
+    if not dockerfile_content:
+        errors.append("Dockerfile is empty")
+        return False, errors
+
+    # Check 1: Must have FROM statement
+    if not _has_dockerfile(dockerfile_content):
+        errors.append("Missing FROM statement")
+        return False, errors
+
+    # Check 2: No placeholder text (agent didn't finish substituting values)
+    placeholders = ['[PATH]', '[HASH]', '[IMAGE]', '[TAG]', '[VERSION]', '[PORT]',
+                   'DOCKERFILE_END', 'DOCKERFILE_START', 'DOCKERIGNORE_START', 'DOCKERIGNORE_END',
+                   '<image>', '<tag>', '<hash>', '<version>', '<port>', '<command>',
+                   'TODO', 'FIXME', 'PLACEHOLDER']
+
+    found_placeholders = []
+    for p in placeholders:
+        if p in dockerfile_content:
+            found_placeholders.append(p)
+
+    if found_placeholders:
+        errors.append(f"Contains unsubstituted placeholders: {', '.join(found_placeholders[:5])}")
+
+    # Check 3: No shell operators in COPY/ADD commands (common mistake)
+    copy_add_lines = [line.strip() for line in dockerfile_content.split('\n')
+                     if line.strip().upper().startswith(('COPY ', 'ADD '))]
+
+    for line in copy_add_lines:
+        # Check for shell operators that don't belong in Dockerfile
+        if any(op in line for op in ['||', '&&', '2>/dev/null', '2>&1', '>/dev/null', ' | ']):
+            errors.append(f"COPY/ADD contains shell operators (not valid): {line[:70]}")
+            break  # One example is enough
+
+    # Check 4: Basic syntax - lines should start with valid commands or continuations
+    valid_commands = ['FROM', 'RUN', 'COPY', 'ADD', 'WORKDIR', 'EXPOSE', 'CMD', 'ENTRYPOINT',
+                     'ENV', 'ARG', 'LABEL', 'USER', 'VOLUME', 'HEALTHCHECK', 'SHELL',
+                     'ONBUILD', 'STOPSIGNAL', 'MAINTAINER']
+
+    lines = dockerfile_content.split('\n')
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith('#'):
+            continue
+
+        # Check if it's a continuation line
+        if i > 1 and lines[i-2].rstrip().endswith('\\'):
+            continue  # Continuation of previous command
+
+        # Check if starts with valid command
+        starts_with_valid_cmd = any(stripped.upper().startswith(cmd) for cmd in valid_commands)
+
+        if not starts_with_valid_cmd:
+            # Could be malformed or non-Dockerfile content leaked in
+            errors.append(f"Line {i} doesn't start with valid Dockerfile instruction: '{stripped[:60]}'")
+            break  # One error is enough to indicate problems
+
+    # Check 5: FROM line should reference a real image (not localhost paths or weird formats)
+    from_lines = [line.strip() for line in lines if line.strip().upper().startswith('FROM ')]
+    if from_lines:
+        first_from = from_lines[0]
+        # Extract image name (everything after FROM and before AS)
+        from_parts = first_from.split()
+        if len(from_parts) >= 2:
+            image = from_parts[1]
+
+            # Check for obviously wrong formats
+            if image.startswith(('/', '\\', './', '../')):
+                errors.append(f"FROM references local path instead of Docker image: {image}")
+            elif image.startswith('docker.io[PATH]') or '[PATH]' in image:
+                errors.append(f"FROM contains placeholder: {image}")
+
+    # Check 6: Multi-stage build validation (fixes imgui, xgboost failures)
+    # Extract all FROM lines with optional AS clauses
+    # Pattern: FROM image:tag [AS name]
+    from_pattern = r'FROM\s+(\S+)(?:\s+AS\s+(\S+))?'
+    from_matches = re.findall(from_pattern, dockerfile_content, re.IGNORECASE)
+
+    # Collect all defined stage names
+    defined_stages = set()
+    for image, stage_name in from_matches:
+        if stage_name:  # If AS clause exists
+            defined_stages.add(stage_name.lower())
+
+    # Find all COPY --from=<stage> references
+    copy_from_pattern = r'COPY\s+--from=(\S+)'
+    copy_from_refs = re.findall(copy_from_pattern, dockerfile_content, re.IGNORECASE)
+
+    # Validate each reference
+    for ref in copy_from_refs:
+        ref_lower = ref.lower()
+
+        # Skip numeric references (COPY --from=0 is valid)
+        if ref.isdigit():
+            continue
+
+        # Check if stage is defined
+        if ref_lower not in defined_stages:
+            errors.append(
+                f"COPY --from={ref} references undefined stage. "
+                f"Available stages: {sorted(defined_stages) if defined_stages else 'none'}"
+            )
+            errors.append(
+                f"FIX: Add 'AS {ref}' to the FROM line, or use stage index (--from=0)"
+            )
+
+    # Return validation result
+    is_valid = len(errors) == 0
+    return is_valid, errors
 
 
 def _invoke_agent_with_iteration_limit(agent, inputs: dict, max_iterations: int = None):
@@ -1014,68 +1399,57 @@ Final Answer: VERIFIED MODERN BASE IMAGE: FROM maven:3.9-eclipse-temurin-17
 
 **YOUR TASK**: Generate the Dockerfile and .dockerignore.
 
-**CRITICAL OUTPUT FORMAT RULES**:
-❌ **NEVER include DOCKERFILE_START, DOCKERFILE_END, DOCKERIGNORE_START, DOCKERIGNORE_END inside the actual file content!**
-❌ **NEVER use placeholder text like [PATH], [HASH], [VERSION] - use real values!**
-❌ **NEVER use shell syntax (||, 2>/dev/null, &&) in COPY commands - Docker syntax only!**
-❌ **NEVER manually install package managers (curl Maven/Gradle) - use official base images!**
+**BANNED SYNTAX** (These will cause build failures):
+❌ **NO angle bracket placeholders: <image>, <tag>, <path>, <command>**
+❌ **NO square bracket placeholders: [PATH], [HASH], [VERSION]**
+❌ **NO curly brace placeholders: {variable}, {command}**
+❌ **NO shell operators in COPY: ||, 2>/dev/null, &&**
+❌ **NO manual package manager installation: curl maven, wget gradle**
+❌ **NO delimiters inside file content (they're only format markers)**
 
-**WRONG OUTPUT EXAMPLES**:
-```dockerfile
-FROM gcc:13
-COPY . .
-CMD ["/bin/bash"]
-DOCKERFILE_END   ❌ NO! This is a delimiter, not content!
-```
+**CORRECT OUTPUT FORMAT** (adapt this example for your project's language):
 
-```dockerfile
-FROM docker.io[PATH]/gcc:13@sha256:[HASH]   ❌ NO placeholders!
-COPY package.json ./ 2>/dev/null || true     ❌ NO shell syntax!
-RUN curl https://apache.org/.../maven.tar.gz ❌ Don't curl package managers!
-```
-
-**CORRECT OUTPUT EXAMPLES**:
-```dockerfile
-FROM gcc:13
-COPY . .
-CMD ["/bin/bash"]
-```
-
-```dockerfile
-FROM maven:3.9-eclipse-temurin-17 AS build  ✅ Use official image!
-COPY package*.json ./                        ✅ Docker glob syntax!
-WORKDIR /app
-CMD ["java", "-jar", "app.jar"]
-```
-
-**OPTIONAL**: You MAY use DockerImageSearch ONLY if you need to verify a base image tag exists. Otherwise, provide the Final Answer immediately.
-
-**OUTPUT FORMAT** (Your Final Answer MUST use this EXACT format):
-
+Final Answer:
 DOCKERFILE_START
-<Dockerfile content>
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 5000
+CMD ["python", "app.py"]
 DOCKERFILE_END
 
 DOCKERIGNORE_START
-<.dockerignore content>
+.git
+__pycache__
+*.pyc
+.venv
+.env
 DOCKERIGNORE_END
 
-**DOCKERFILE REQUIREMENTS**:
-- Use appropriate base image for the detected language/framework
-- Install dependencies (npm install, pip install, cargo build, etc.)
-- Set WORKDIR /app
-- COPY application files
-- EXPOSE the correct port (from previous queries)
-- Define CMD or ENTRYPOINT to start the application
+**CRITICAL RULES**:
+✅ Use REAL image tags: python:3.12-slim, node:20-slim, maven:3.9-eclipse-temurin-17
+✅ Use REAL paths: ./src, /app, target/app.jar
+✅ Use REAL commands: npm install, mvn package, cargo build
+✅ Must start with "Final Answer:" on its own line
+✅ Use verified image from Query 4 (if provided)
 
-**DOCKERIGNORE REQUIREMENTS** (MUST include):
+**ADAPTATION GUIDE**:
+- For Java/Maven: FROM maven:3.9-eclipse-temurin-17, RUN mvn package, CMD java -jar target/app.jar
+- For Python: FROM python:3.12-slim, RUN pip install -r requirements.txt, CMD python app.py
+- For Node.js: FROM node:20-slim, RUN npm ci, CMD node index.js
+- For Rust: FROM rust:1.83-slim, RUN cargo build --release, CMD ./target/release/app
+- For Go: FROM golang:1.22-alpine, RUN go build, CMD ./app
+
+**DOCKERIGNORE MUST INCLUDE**:
 - .git (CRITICAL - always exclude)
-- Language-specific: node_modules, __pycache__, *.pyc, target, .venv
+- Language-specific: node_modules, __pycache__, *.pyc, target, .venv, vendor
 - Build artifacts: build, dist, .next, out
 - Environment: .env, .env.local
-- Version control: .git, .gitignore, .github
+- IDE: .vscode, .idea, *.iml
 
-Now generate the Final Answer with both files in the specified format.
+Now generate the Final Answer with both files using REAL values for your specific project.
 """
         ]
 
@@ -1190,10 +1564,30 @@ Now generate the Final Answer with both files in the specified format.
                             dockerignore_content = cleaned_output.split("DOCKERIGNORE_START")[1].split("DOCKERIGNORE_END")[0].strip()
                         except IndexError:
                             pass
-                    
+
+                    # Validate Dockerfile for placeholder and syntax errors
+                    if dockerfile_content:
+                        is_valid, validation_error = validate_dockerfile_output(dockerfile_content)
+                        if not is_valid:
+                            print(f"\n[VALIDATION ERROR] {validation_error}")
+                            print(f"[INFO] Will attempt to retry with corrected instructions...")
+                            # Clear dockerfile_content to trigger retry with validation feedback
+                            invalid_dockerfile = dockerfile_content
+                            dockerfile_content = None
+
                     # Fallback: Check if output contains Dockerfile directly (old behavior)
                     if not dockerfile_content and _has_dockerfile(output):
                         dockerfile_content = output
+                        # Remove delimiters if present (safety check for validation)
+                        # This handles cases where agent included delimiters in the content
+                        if "DOCKERFILE_START" in dockerfile_content:
+                            dockerfile_content = re.sub(r'DOCKERFILE_START|DOCKERFILE_END|DOCKERIGNORE_START|DOCKERIGNORE_END', '', dockerfile_content).strip()
+
+                        # Validate again
+                        is_valid, validation_error = validate_dockerfile_output(dockerfile_content)
+                        if not is_valid:
+                            print(f"\n[VALIDATION ERROR] {validation_error}")
+                            dockerfile_content = None
                     
                     # Smart retry logic if Dockerfile is missing
                     max_retries = 2  # Reduced from 3 to 2 for efficiency
@@ -1215,23 +1609,39 @@ Now generate the Final Answer with both files in the specified format.
                             print(f"\n[WARNING] Retry {retry_attempt + 1}/{max_retries} still didn't produce valid Dockerfile. Retrying again...")
                         
                         # Build retry query with progressively stricter instructions
+                        # Check if we have validation errors to include
+                        validation_feedback = ""
+                        if 'invalid_dockerfile' in locals() and invalid_dockerfile:
+                            validation_feedback = f"""
+YOUR PREVIOUS OUTPUT HAD THESE ERRORS:
+{validation_error}
+
+FIX THESE ISSUES:
+- Use REAL values: python:3.12-slim NOT <image>:<tag>
+- Use REAL paths: ./src NOT <path>
+- Use REAL commands: npm install NOT <command>
+- NO angle brackets, square brackets, or curly braces
+"""
+
                         if is_stuck_searching or retry_attempt > 0:
                             # Force immediate answer - NO tool calls
                             retry_query = f"""CRITICAL: You MUST provide the Final Answer NOW using the information already available from previous queries (Query 1, 2, 3).
 
 DO NOT use any tools. DO NOT search. DO NOT read files. Just generate the Dockerfile and .dockerignore using the context you already have.
-
+{validation_feedback}
 PREVIOUS CONTEXT SUMMARY:
 {formatted_history[-1000:] if formatted_history else "See chat history"}
 
-OUTPUT FORMAT (REQUIRED):
+OUTPUT FORMAT (REQUIRED - adapt for your language this is an real example):
+Final Answer:
 DOCKERFILE_START
-FROM <base-image>
+FROM python:3.12-slim
 WORKDIR /app
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
 COPY . .
-RUN <install-commands>
-EXPOSE <port>
-CMD <start-command>
+EXPOSE 5000
+CMD ["python", "app.py"]
 DOCKERFILE_END
 
 DOCKERIGNORE_START
@@ -1241,6 +1651,11 @@ __pycache__
 *.pyc
 .env
 DOCKERIGNORE_END
+
+Use REAL image tags (python:3.12-slim, node:20-slim, maven:3.9-eclipse-temurin-17).
+Use REAL paths (./src, /app, requirements.txt).
+Use REAL commands (pip install, npm ci, mvn package).
+NO placeholders of any kind.
 
 Provide ONLY the Final Answer in this format. No tool calls."""
                             
@@ -1364,6 +1779,80 @@ Provide ONLY the Final Answer in this format. No tool calls."""
                         dockerfile_content = None
                     else:
                         print(f"\n[SUCCESS] Dockerfile generated successfully!")
+
+                        # CRITICAL: Validate Dockerfile quality BEFORE proceeding to Docker build
+                        # This catches broken Dockerfiles early (saves 100+ seconds per iteration)
+                        is_valid, validation_errors = _validate_dockerfile(dockerfile_content, repo_path)
+
+                        if not is_valid:
+                            print(f"\n[VALIDATION FAILED] Dockerfile has {len(validation_errors)} quality issues:")
+                            for err in validation_errors:
+                                print(f"  - {err}")
+
+                            # Give agent ONE chance to fix validation errors immediately
+                            print(f"\n[VALIDATION] Requesting immediate fix from agent...")
+
+                            validation_fix_query = f"""CRITICAL VALIDATION ERRORS in your Dockerfile!
+
+Your Dockerfile has the following issues that will cause build failures:
+{chr(10).join(f"- {err}" for err in validation_errors)}
+
+**CURRENT DOCKERFILE** (with problems):
+```dockerfile
+{dockerfile_content}
+```
+
+**REQUIRED FIX**:
+1. Read the errors above carefully
+2. Generate a CORRECTED Dockerfile that fixes ALL issues
+3. DO NOT use placeholder text like [PATH], [HASH], TODO, etc.
+4. DO NOT use shell operators in COPY commands (no ||, &&, 2>/dev/null)
+5. Ensure all lines start with valid Dockerfile instructions
+
+**OUTPUT FORMAT** (REQUIRED):
+DOCKERFILE_START
+FROM <actual-image-name-and-tag>
+... corrected Dockerfile ...
+DOCKERFILE_END
+
+Provide ONLY the corrected Dockerfile. No tool calls needed - just fix the issues listed above."""
+
+                            # Force immediate answer (no tool calls)
+                            validation_retry = _invoke_agent_with_iteration_limit(
+                                agent,
+                                {
+                                    "input": validation_fix_query,
+                                    "chat_history": formatted_history or "No previous context."
+                                },
+                                max_iterations=1  # Force immediate answer
+                            )
+
+                            retry_output = validation_retry.get('output', '')
+
+                            # Try to extract fixed Dockerfile
+                            fixed_dockerfile = None
+                            if "DOCKERFILE_START" in retry_output and "DOCKERFILE_END" in retry_output:
+                                try:
+                                    fixed_dockerfile = retry_output.split("DOCKERFILE_START")[1].split("DOCKERFILE_END")[0].strip()
+                                except IndexError:
+                                    pass
+
+                            if not fixed_dockerfile and _has_dockerfile(retry_output):
+                                fixed_dockerfile = retry_output
+
+                            # Re-validate
+                            if fixed_dockerfile:
+                                is_valid_retry, retry_errors = _validate_dockerfile(fixed_dockerfile, repo_path)
+                                if is_valid_retry:
+                                    print(f"[VALIDATION] ✓ Agent fixed all issues! Using corrected Dockerfile.")
+                                    dockerfile_content = fixed_dockerfile
+                                else:
+                                    print(f"[VALIDATION] ✗ Agent's fix still has {len(retry_errors)} errors. Using original (refinement will fix later).")
+                                    # Keep original - let refinement loop handle it
+                            else:
+                                print(f"[VALIDATION] Agent didn't provide valid fix. Using original (refinement will fix later).")
+                        else:
+                            print(f"[VALIDATION] ✓ Dockerfile passed all quality checks!")
 
                     final_instructions = dockerfile_content
                     

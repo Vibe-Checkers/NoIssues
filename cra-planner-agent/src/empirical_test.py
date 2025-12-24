@@ -28,12 +28,13 @@ print("[STARTUP] All imports loaded successfully!")
 class DockerBuildTester:
     """Tests generated Dockerfiles by actually building them with Docker."""
 
-    def __init__(self, timeout: int = 600, platform: str = None):
+    def __init__(self, timeout: int = 1200, platform: str = None):
         """
         Initialize Docker build tester.
 
         Args:
-            timeout: Maximum time in seconds to wait for Docker build (default: 10 minutes)
+            timeout: Maximum time in seconds to wait for Docker build (default: 20 minutes)
+                     Increased from 10 to 20 minutes to support large C++/Java projects (guava, opencv)
             platform: Optional platform to build for (e.g., "linux/amd64", "linux/arm64")
                      Use None for native platform. Useful for cross-platform testing.
         """
@@ -467,7 +468,7 @@ class EmpiricalTester:
         self.reports_dir.mkdir(exist_ok=True)
         self.logs_dir.mkdir(exist_ok=True)
 
-        self.docker_tester = DockerBuildTester(timeout=600)
+        self.docker_tester = DockerBuildTester(timeout=1200)  # 20 minutes for large projects
 
         # Initialize results storage
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
