@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
 Test Agent Script
-Simple test script for testing the planner agent with basic queries.
+Simple test script for testing the Learner Agent with basic queries.
 Use this for quick testing and validation.
 """
 
-from planner_agent import create_planner_agent
+import sys
+sys.path.insert(0, 'src')
+
+from agent.core import create_learner_agent
 
 
 def main():
     """Run simple test queries on the agent."""
     print("="*70)
-    print("Planner Agent - Simple Test Script")
+    print("Learner Agent - Simple Test Script")
     print("="*70)
     print("\nInitializing agent...\n")
 
     try:
         # Create the agent
-        agent = create_planner_agent(max_iterations=10, verbose=True)
+        agent, handler = create_learner_agent(
+            max_iterations=10, 
+            verbose=True,
+            repository_path="."
+        )
         print("[OK] Agent initialized successfully!\n")
 
-        # Test queries demonstrating new capabilities
+        # Test queries demonstrating capabilities
         queries = [
-            "Show me a directory tree of the current directory with depth 2",
-            "Find all Python files in the current directory",
-            "Search for the word 'agent' in all Python files"
+            "List the contents of the current directory",
+            "Search for 'import' in Python files",
         ]
 
         print(f"Running {len(queries)} test queries...\n")
