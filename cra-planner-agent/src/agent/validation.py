@@ -57,30 +57,35 @@ class DockerBuildTester:
     def prune_buildkit_cache(self) -> bool:
         """
         Prune Docker BuildKit cache to recover from corruption.
-        
-        Uses a lock to prevent multiple workers from pruning simultaneously.
-        
+
+        Acquires BOTH build lock and prune lock to pause all builds during prune.
+        This prevents race conditions where builds run during cache cleanup.
+
         Returns:
             True if prune succeeded, False otherwise
         """
-        with _buildkit_prune_lock:
-            try:
-                logger.warning("[DOCKER] Pruning BuildKit cache to recover from corruption...")
-                result = subprocess.run(
-                    ["docker", "builder", "prune", "--all", "--force"],
-                    capture_output=True,
-                    text=True,
-                    timeout=120
-                )
-                if result.returncode == 0:
-                    logger.info("[DOCKER] BuildKit cache pruned successfully")
-                    return True
-                else:
-                    logger.error(f"[DOCKER] Prune failed: {result.stderr}")
+        # Acquire build lock first to pause all builds
+        with _docker_build_lock:
+            with _buildkit_prune_lock:
+                try:
+                    logger.warning("[DOCKER] Pruning BuildKit cache (all builds paused)...")
+                    result = subprocess.run(
+                        ["docker", "builder", "prune", "--all", "--force"],
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+                    if result.returncode == 0:
+                        logger.info("[DOCKER] BuildKit cache pruned successfully")
+                        # Wait for Docker daemon to stabilize
+                        time.sleep(2)
+                        return True
+                    else:
+                        logger.error(f"[DOCKER] Prune failed: {result.stderr}")
+                        return False
+                except Exception as e:
+                    logger.error(f"[DOCKER] Prune exception: {e}")
                     return False
-            except Exception as e:
-                logger.error(f"[DOCKER] Prune exception: {e}")
-                return False
 
     def _is_cache_corruption_error(self, error_output: str) -> bool:
         """Check if the error is a BuildKit cache corruption error."""
@@ -161,6 +166,7 @@ class DockerBuildTester:
             retry_info = " [RETRY after cache prune]" if _is_retry else ""
             print(f"[DOCKER BUILD]{retry_info} Running: {' '.join(cmd)}{platform_info}")
 
+            # Execute build
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -168,23 +174,38 @@ class DockerBuildTester:
                 timeout=self.timeout,
                 env=env
             )
+            
+            # Transient Network Error Retry Logic
+            # Detects: apt/pip timeouts, temporary DNS issues, registry 503s
+            if result.returncode != 0 and not _is_retry:
+                err_lower = (result.stderr or "").lower() + (result.stdout or "").lower()
+                transient_keywords = [
+                    "temporary failure resolving", "name resolution temporarily failed",
+                    "connection timed out", "readpoolerror", "net/http: request canceled",
+                    "failed to fetch", "503 service unavailable", "504 gateway time-out",
+                    "eai_again", "unable to connect"
+                ]
+                
+                is_transient = any(k in err_lower for k in transient_keywords)
+                
+                if is_transient:
+                    logger.warning("[DOCKER] Detected transient network error. Retrying build in 5s...")
+                    time.sleep(5)
+                    # Retry cleanly
+                    return self._do_build(dockerfile_path, context_path, image_name, 
+                                        retry_on_cache_error=retry_on_cache_error, _is_retry=True)
 
             duration = time.time() - start_time
 
             if result.returncode == 0:
+                print(f"[DOCKER BUILD] Success! Duration: {duration:.2f}s")
                 return {
                     "success": True,
-                    "stage": "BUILD_COMPLETE",
-                    "error_type": None,
-                    "error_message": None,
-                    "exit_code": 0,
-                    "duration_seconds": duration,
-                    "stdout": result.stdout[-2000:] if result.stdout else "",
-                    "stderr": result.stderr[-2000:] if result.stderr else None,
-                    "was_retry": _is_retry
+                    "image_name": image_name,
+                    "duration_seconds": duration
                 }
             else:
-                # Parse error to determine stage
+                # Same error analysis as before...
                 full_error = result.stderr or result.stdout or "Unknown error"
                 
                 # Check for cache corruption and auto-recover
@@ -245,6 +266,75 @@ class DockerBuildTester:
                 "exit_code": -1,
                 "duration_seconds": duration,
                 "traceback": traceback.format_exc()
+            }
+
+    def run_container(self, image_name: str, command: str, timeout: int = 20) -> Dict:
+        """
+        Run a command inside the container to verify functionality (Smoke Test).
+        
+        Args:
+            image_name: Name of the Docker image to run
+            command: Shell command to execute
+            timeout: Max execution time in seconds (default 20s to prevent hangs)
+            
+        Returns:
+            Dict w/ success, output, etc.
+        """
+        import subprocess
+        
+        # Verify image exists first
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image_name],
+            capture_output=True
+        )
+        if inspect.returncode != 0:
+            return {
+                "success": False,
+                "error": f"Image {image_name} not found locally.",
+                "output": ""
+            }
+
+        print(f"[DOCKER RUN] Executing: {command} (timeout={timeout}s)")
+        
+        # Run container ephemerally (--rm)
+        # We override entrypoint to ensure we can run our specific command
+        cmd = [
+            "docker", "run", "--rm", 
+            "--entrypoint", "", # Reset entrypoint
+            image_name, 
+            "sh", "-c", command 
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            
+            output = (result.stdout + "\n" + result.stderr).strip()
+            return {
+                "success": result.returncode == 0,
+                "exit_code": result.returncode,
+                "output": output,
+                "timeout": False
+            }
+            
+        except subprocess.TimeoutExpired as e:
+            output = (e.stdout or "") + "\n" + (e.stderr or "")
+            return {
+                "success": False, 
+                "error": "Execution timed out",
+                "output": output.strip() + "\n[KILLED DUE TO TIMEOUT]",
+                "timeout": True
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "output": "",
+                "timeout": False
             }
 
     def _parse_docker_error(self, error_output: str) -> Tuple[str, str]:

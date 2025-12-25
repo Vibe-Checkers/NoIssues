@@ -32,8 +32,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-# Removed: improved_error_recognition - caused more problems than it solved
-# from improved_error_recognition import ImprovedErrorRecognition
+
 
 # Load environment variables FIRST before any other imports
 print("[STARTUP] Loading environment variables...")
@@ -55,12 +54,14 @@ else:
     print("[WARNING] AZURE_OPENAI_ENDPOINT not found in environment!")
 
 print("[STARTUP] Loading agent and testing modules...")
-# Removed legacy imports
-# from run_agent import clone_repository, detect_project_language, analyze_repository
-# from planner_agent import create_planner_agent
-from agent.core import _get_host_platform
+# Legacy imports removed
 
-from agent.validation import DockerBuildTester
+from .agent.core import _get_host_platform
+from langchain_openai import AzureChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+
+
+from .agent.validation import DockerBuildTester
 
 print("[STARTUP] All imports loaded successfully!")
 
@@ -131,351 +132,199 @@ def compute_token_cost(token_usage: Dict) -> Dict[str, float]:
     }
 
 
-class ErrorPatternDetector:
+class LLMFunctionalVerifier:
     """
-    Detects build error patterns instead of package names.
-
-    This enables general-purpose error detection that works for ANY package
-    exhibiting the same error signature, rather than hardcoding specific package names.
+    Generates and analyzes functional smoke tests for containers.
     """
+    def __init__(self):
+        self.llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+        )
 
-    ERROR_SIGNATURES = {
-        'fortran_compiler_needed': [
-            'gfortran not found',
-            'fortran compiler',
-            'f77', 'f90', 'f95',
-            'numpy.distutils.fcompiler',
-            'cannot find -lgfortran',
-            'fortran: command not found'
-        ],
-        'blas_library_needed': [
-            'cannot find -lblas',
-            'cannot find -llapack',
-            'cblas.h: no such file',
-            'lapacke.h: no such file',
-            'openblas',
-            'libatlas',
-            'blas/lapack not found'
-        ],
-        'python_dev_headers': [
-            'python.h: no such file',
-            'python3-dev',
-            'pyconfig.h',
-            'error: command.*gcc.*failed with exit (code|status) 1',
-            'building.*extension modules',
-            'fatal error: python.h'
-        ],
-        'c_compiler_needed': [
-            'gcc: command not found',
-            'cc: command not found',
-            'make: command not found',
-            'build-essential',
-            'compiler not found'
-        ],
-        'cpp_compiler_needed': [
-            'g++: command not found',
-            'c++ compiler',
-            'cxx compiler',
-            'c++: command not found'
-        ],
-        'npm_lifecycle_hooks_error': [
-            'husky install',
-            "husky - can't create hook",
-            '.husky directory doesn\'t exist',
-            'prepare:hooks',
-            'husky - git command not found'
-        ],
-        'apt_package_not_found': [
-            'unable to locate package',
-            'has no installation candidate',
-            'package .* has no installation candidate',
-            'e: package',
-            'couldn\'t find any package by regex'
-        ],
-        'npm_invalid_config': [
-            'is not a valid npm option',
-            'unknown option',
-            'invalid config key',
-            'npm error unknown',
-            'err! config'
-        ],
-        'vendored_build_system': [
-            'vendored-meson',
-            'could not find the specified meson',
-            'vendored build',
-            'custom build backend',
-            'meson-python: error: could not find'
-        ],
-        'git_required_but_missing': [
-            'git: command not found',
-            'fatal: not a git repository',
-            'git repository required',
-            'needs git',
-            'requires git to be installed'
-        ],
-        'cmake_needed': [
-            'cmake: command not found',
-            'cmake not found',
-            'could not find cmake',
-            'cmake is required'
-        ],
-        'pkg_config_needed': [
-            'pkg-config: command not found',
-            'pkg-config not found',
-            'no package .*pc found'
-        ]
-    }
-
-    @staticmethod
-    def detect_patterns(error_log: str, failed_cmd: str = "") -> list:
+    def generate_verification_command(self, dockerfile_content: str, repo_name: str) -> Tuple[str, Dict]:
         """
-        Returns list of detected pattern types from error logs.
-
-        Args:
-            error_log: The error output from build
-            failed_cmd: The command that failed (optional)
-
-        Returns:
-            List of pattern types detected (e.g., ['fortran_compiler_needed', 'blas_library_needed'])
+        Ask LLM to suggest a safe, non-interactive smoke test command.
+        Returns: (command_string, log_data)
         """
-        combined_text = f"{error_log} {failed_cmd}".lower()
-        detected = []
+        prompt = f"""You are a QA Engineer. Suggest a SINGLE, ONE-LINE shell command to verify that this application container is working correctly.
 
-        for pattern_type, indicators in ErrorPatternDetector.ERROR_SIGNATURES.items():
-            for indicator in indicators:
-                if indicator.lower() in combined_text:
-                    detected.append(pattern_type)
-                    break
+CONTEXT: This command will run INSIDE the Docker container using "docker run --rm <image> sh -c <YOUR_COMMAND>".
+Your job is to provide the command that runs INSIDE the container, NOT to run Docker itself.
 
-        return list(set(detected))  # Remove duplicates
+REPO NAME: {repo_name}
+DOCKERFILE:
+{dockerfile_content[:1500]}...
 
-    @staticmethod
-    def detect_base_os(dockerfile_content: str) -> str:
-        """
-        Detect OS from Dockerfile FROM statement.
+Rules:
+1. NEVER suggest "docker run" or any Docker commands - those run on the HOST, not inside the container
+2. Command must be non-interactive (no user input)
+3. Command must return exit code 0 on success
+4. Prefer version checks or help commands: 'python --version', 'flask --version', 'npm --version', 'node --version'
+5. For applications, try: 'python -c "import myapp; print(myapp.__version__)"'
+6. For web frameworks, try: 'flask --help' or 'python app.py --help'
+7. If it's a CLI tool, try: '<toolname> --version' or '<toolname> --help'
+8. DO NOT try to curl localhost or start servers
+9. Return ONLY the command string, no markdown, no quotes, no explanations
 
-        Args:
-            dockerfile_content: Contents of the Dockerfile
+GOOD EXAMPLES:
+- flask --version
+- python -c "import requests; print(requests.__version__)"
+- node --version
+- java -version
 
-        Returns:
-            OS type: 'alpine', 'debian', or 'redhat'
-        """
-        import re
-        from_match = re.search(r'FROM\s+([^\s:]+)', dockerfile_content, re.IGNORECASE)
-        if not from_match:
-            return 'debian'  # Safe default
-
-        image_name = from_match.group(1).lower()
-
-        # OS detection map
-        if 'alpine' in image_name:
-            return 'alpine'
-        elif 'ubuntu' in image_name or 'debian' in image_name:
-            return 'debian'
-        elif 'centos' in image_name or 'rhel' in image_name or 'fedora' in image_name or 'rocky' in image_name:
-            return 'redhat'
-        elif 'node' in image_name or 'python' in image_name or 'ruby' in image_name:
-            return 'debian'  # Most official images are Debian-based
-        else:
-            return 'debian'  # Conservative default
-
-    @staticmethod
-    def get_package_manager(base_os: str) -> str:
-        """
-        Map OS to its package manager.
-
-        Args:
-            base_os: OS type ('alpine', 'debian', 'redhat')
-
-        Returns:
-            Package manager command ('apk', 'apt-get', 'yum')
-        """
-        os_to_pm = {
-            'alpine': 'apk',
-            'debian': 'apt-get',
-            'redhat': 'yum'
+BAD EXAMPLES (DO NOT DO THIS):
+- docker run --rm myapp (this runs on host, not in container!)
+- curl http://localhost:8080 (container may not have curl or network)
+- python -m pytest (requires test files which may be excluded)
+"""
+        log_entry = {
+            "component": "LLMFunctionalVerifier",
+            "method": "generate_verification_command",
+            "prompt": prompt,
+            "timestamp": datetime.now().isoformat()
         }
-        return os_to_pm.get(base_os, 'apt-get')
+        
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            log_entry["response"] = response.content
+            if hasattr(response, 'response_metadata'):
+                log_entry["token_usage"] = response.response_metadata.get("token_usage", {})
+            
+            return response.content.strip().replace('`', '').strip(), log_entry
+        except Exception as e:
+            print(f"[Verifier] LLM generation failed: {e}")
+            log_entry["error"] = str(e)
+            return "true", log_entry # Fallback: always pass
 
+    def verify_output(self, command: str, output: str, exit_code: int) -> Tuple[Dict, Dict]:
+        """
+        Ask LLM if the command output indicates success.
+        Returns: (result_dict, log_data)
+        """
+        if exit_code != 0:
+            return {
+                "success": False,
+                "reason": f"Command returned exit code {exit_code}",
+                "analysis": "Exit code non-zero indicates failure."
+            }, {}
 
-class PackageManagerDetector:
-    """
-    Detects package manager and generates appropriate search queries.
+        prompt = f"""You are analyzing the output of a smoke test command run inside a Docker container.
 
-    Uses a registry pattern for extensibility - new package managers can be added
-    without changing the detection logic.
-    """
+COMMAND: {command}
+EXIT CODE: {exit_code}
+OUTPUT:
+{output[:2000]}
 
-    PACKAGE_MANAGERS = {
-        # Node.js ecosystem
-        'npm': {
-            'indicators': ['npm err!', 'npm error', 'npm install'],
-            'error_patterns': {
-                'enoent': 'docker npm ENOENT missing file',
-                'gyp': 'docker node-gyp build failed python make gcc',
-                'permission': 'docker npm permission denied unsafe-perm',
-            },
-            'default_query': 'docker npm install error'
-        },
-        'pnpm': {
-            'indicators': ['pnpm err', 'pnpm error', 'pnpm install'],
-            'error_patterns': {
-                'frozen lockfile': 'docker pnpm frozen-lockfile mismatch',
-            },
-            'default_query': 'docker pnpm install failed'
-        },
-        'yarn': {
-            'indicators': ['yarn error', 'yarn install'],
-            'error_patterns': {},
-            'default_query': 'docker yarn install failed'
-        },
+Did this command succeed? 
+- It succeeded if it printed help text, version info, or expected program output.
+- It failed if it printed a traceback, error message, or nothing (if output was expected).
 
-        # Python ecosystem
-        'pip': {
-            'indicators': ['pip error', 'pip install', 'pip failed'],
-            'error_patterns': {
-                'gcc': 'docker pip install gcc compilation failed build-essential',
-                'wheel': 'docker pip wheel build failed',
-            },
-            'default_query': 'docker pip install failed'
-        },
-        'poetry': {
-            'indicators': ['poetry error', 'poetry install'],
-            'error_patterns': {},
-            'default_query': 'docker poetry install failed'
-        },
-        'pipenv': {
-            'indicators': ['pipenv error', 'pipenv install'],
-            'error_patterns': {},
-            'default_query': 'docker pipenv install failed'
-        },
-        'uv': {
-            'indicators': ['uv error', 'uv pip', 'uv sync'],
-            'error_patterns': {},
-            'default_query': 'docker uv install failed'
-        },
-
-        # Rust
-        'cargo': {
-            'indicators': ['cargo error', 'cargo build'],
-            'error_patterns': {},
-            'default_query': 'docker cargo build failed rust dependencies'
-        },
-
-        # Java ecosystem
-        'maven': {
-            'indicators': ['maven error', 'mvn error', '[error]'],
-            'error_patterns': {},
-            'default_query': 'docker maven build failed'
-        },
-        'gradle': {
-            'indicators': ['gradle error', './gradlew'],
-            'error_patterns': {},
-            'default_query': 'docker gradle build failed'
-        },
-        'sbt': {
-            'indicators': ['sbt error', '[error]'],
-            'error_patterns': {},
-            'default_query': 'docker sbt build failed'
-        },
-
-        # Ruby
-        'bundler': {
-            'indicators': ['bundler error', 'bundle install'],
-            'error_patterns': {},
-            'default_query': 'docker bundler install failed'
-        },
-
-        # PHP
-        'composer': {
-            'indicators': ['composer error', 'composer install'],
-            'error_patterns': {},
-            'default_query': 'docker composer install failed'
-        },
-
-        # Go
-        'go': {
-            'indicators': ['go: error', 'go build', 'go get'],
-            'error_patterns': {},
-            'default_query': 'docker go build failed'
-        },
-
-        # System package managers
-        'apt': {
-            'indicators': ['apt error', 'apt-get', 'unable to locate package'],
-            'error_patterns': {
-                'unable to locate package': 'docker apt unable to locate package'
-            },
-            'default_query': 'docker apt-get install failed'
-        },
-        'apk': {
-            'indicators': ['apk error', 'apk add'],
-            'error_patterns': {},
-            'default_query': 'docker apk add failed alpine'
-        },
-        'yum': {
-            'indicators': ['yum error', 'no package'],
-            'error_patterns': {},
-            'default_query': 'docker yum install failed'
+Return strictly JSON:
+{{
+    "success": true/false,
+    "reason": "Short explanation"
+}}
+"""
+        log_entry = {
+            "component": "LLMFunctionalVerifier",
+            "method": "verify_output",
+            "prompt": prompt,
+            "timestamp": datetime.now().isoformat()
         }
-    }
 
-    @staticmethod
-    def detect_package_manager(error_log: str) -> tuple:
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            log_entry["response"] = response.content
+            if hasattr(response, 'response_metadata'):
+                log_entry["token_usage"] = response.response_metadata.get("token_usage", {})
+                
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            return json.loads(content), log_entry
+        except Exception as e:
+            log_entry["error"] = str(e)
+            return {"success": True, "reason": "LLM verification failed, assuming success based on exit code 0."}, log_entry
+
+
+class LLMErrorAnalyzer:
+    """
+    Analyzes build errors using an LLM to provide structured, intelligent feedback.
+    Replaces static regex matching with semantic understanding.
+    """
+    def __init__(self):
+        self.llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+        )
+
+    def analyze_error(self, error_log: str, failed_command: str) -> Tuple[Dict, Dict]:
         """
-        Detect package manager from error log and return appropriate search query.
-
-        Args:
-            error_log: The error output from build
-
-        Returns:
-            Tuple of (package_manager_name, error_keywords) for search
+        Analyze a build error and return structured diagnosis.
+        Returns: (analysis_dict, log_data)
         """
-        error_log_lower = error_log.lower()
+        system_prompt = """You are a Docker Build Expert and Linux System Administrator.
+Your goal is to analyze a failed Docker build log and identify the EXACT valid fix.
 
-        # Try to detect package manager
-        for pm_name, pm_config in PackageManagerDetector.PACKAGE_MANAGERS.items():
-            # Check if any indicator matches
-            if any(indicator.lower() in error_log_lower for indicator in pm_config['indicators']):
-                # Found package manager, now check for specific error patterns
-                for pattern, query in pm_config['error_patterns'].items():
-                    if pattern.lower() in error_log_lower:
-                        return (pm_name, query)
+Output must be valid JSON with this structure:
+{
+    "cause": "Concise explanation of what went wrong (e.g. 'Missing compiled extension dependencies')",
+    "missing_packages": ["list", "of", "likely", "missing", "linux", "packages"],
+    "suggested_fix": "Concrete, single-line command to fix the issue (e.g. 'RUN apt-get update && apt-get install -y libxml2-dev')",
+    "search_keywords": "Optimized keywords for web search if the fix is uncertain"
+}
 
-                # No specific pattern, use default
-                return (pm_name, pm_config['default_query'])
+Rules:
+1. If the error is a missing file (e.g. 'requirements.txt not found'), suggest checking file locations.
+2. If it's a network error, suggest a retry or check proxies.
+3. Be specific with package names (e.g. 'python3-dev' instead of just 'dev headers').
+4. Do NOT hallucinate packages. If unsure, assume a web search is needed.
+"""
+        
+        user_prompt = f"""FAILED COMMAND: {failed_command}
+        
+ERROR LOG TAIL:
+{error_log}
 
-        # No package manager detected
-        return (None, "docker dependency install failed")
+Analyze this error and determine the fix."""
 
-    @staticmethod
-    def extract_package_name(error_log: str, package_manager: str) -> str:
-        """
-        Extract failing package name from error log.
+        log_entry = {
+            "component": "LLMErrorAnalyzer",
+            "method": "analyze_error",
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "timestamp": datetime.now().isoformat()
+        }
 
-        Args:
-            error_log: The error output
-            package_manager: Detected package manager name
-
-        Returns:
-            Package name if found, empty string otherwise
-        """
-        import re
-
-        # Common patterns across package managers
-        patterns = [
-            r'unable to locate package\s+(\S+)',  # apt
-            r'error:\s+package\s+[\'"](\S+)[\'"]',  # generic
-            r'failed to (?:install|build)\s+(\S+)',  # generic
-            r'npm err!\s+(?:404|enoent).*?(\S+)',  # npm
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, error_log, re.IGNORECASE)
-            if match:
-                return match.group(1)
-
-        return ""
+        try:
+            response = self.llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ])
+            log_entry["response"] = response.content
+            if hasattr(response, 'response_metadata'):
+                log_entry["token_usage"] = response.response_metadata.get("token_usage", {})
+            
+            # Parse JSON from content (handle potential markdown fences)
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+                
+            return json.loads(content), log_entry
+        except Exception as e:
+            print(f"[LLM Analyzer] Failed to analyze error: {e}")
+            log_entry["error"] = str(e)
+            return {
+                "cause": "LLM Analysis Failed",
+                "missing_packages": [],
+                "suggested_fix": "Please analyze the error log manually and try to search for the specific error message.",
+                "search_keywords": f"docker build error {failed_command}"
+            }, log_entry
 
 
 class ParallelEmpiricalTester:
@@ -493,18 +342,18 @@ class ParallelEmpiricalTester:
         self.results_dir.mkdir(exist_ok=True)
         self.max_workers = max_workers
 
-        # Create subdirectories
+        # Create subdirectories with clear organization
         self.repos_dir = self.results_dir / "repositories"
-        self.reports_dir = self.results_dir / "analysis_reports"
-        self.logs_dir = self.results_dir / "logs"
-        self.docker_errors_dir = self.results_dir / "docker_errors"
+        self.transcripts_dir = self.results_dir / "agent_transcripts"  # Full agent conversation logs
+        self.artifacts_dir = self.results_dir / "artifacts"  # Dockerfiles and build artifacts
+        self.structured_logs_dir = self.results_dir / "structured_logs"  # JSON structured logs
 
         self.repos_dir.mkdir(exist_ok=True)
-        self.reports_dir.mkdir(exist_ok=True)
-        self.logs_dir.mkdir(exist_ok=True)
-        self.docker_errors_dir.mkdir(exist_ok=True)
+        self.transcripts_dir.mkdir(exist_ok=True)
+        self.artifacts_dir.mkdir(exist_ok=True)
+        self.structured_logs_dir.mkdir(exist_ok=True)
 
-        self.docker_tester = DockerBuildTester(timeout=600)
+        self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=True)
 
         # Thread-safe console output
         self.console_lock = threading.Lock()
@@ -515,10 +364,16 @@ class ParallelEmpiricalTester:
         self.results_json_file = self.results_dir / f"results_{self.timestamp}.json"   # Final snapshot
         self.summary_file = self.results_dir / f"summary_{self.timestamp}.txt"
         self.master_log_file = self.results_dir / f"master_log_{self.timestamp}.txt"
+        self.progress_file = self.results_dir / f"progress_{self.timestamp}.txt"  # NEW: Real-time progress
 
         # Open master log
         self.master_log = open(self.master_log_file, 'w', encoding='utf-8')
         self.master_log_lock = threading.Lock()
+
+        # Progress tracking
+        self.progress_lock = threading.Lock()
+        self.completed_count = 0
+        self.total_count = 0
 
         self.results = []
         self.results_lock = threading.Lock()
@@ -537,6 +392,59 @@ class ParallelEmpiricalTester:
         if to_console:
             with self.console_lock:
                 print(formatted_msg)
+
+    def update_progress(self, repo_name: str, status: str):
+        """Update progress file with current status."""
+        with self.progress_lock:
+            self.completed_count += 1
+            progress_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {self.completed_count}/{self.total_count} - {repo_name}: {status}\n"
+
+            try:
+                with open(self.progress_file, 'a', encoding='utf-8') as f:
+                    f.write(progress_msg)
+                    f.flush()
+            except Exception as e:
+                print(f"[WARNING] Failed to write progress: {e}")
+
+    def save_artifacts(self, slug: str, repo_path: str, result: Dict):
+        """Save all artifacts (Dockerfile, .dockerignore, build logs) to artifacts directory."""
+        try:
+            artifact_dir = self.artifacts_dir / slug
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save Dockerfile
+            dockerfile_src = Path(repo_path) / "Dockerfile"
+            if dockerfile_src.exists():
+                dockerfile_dst = artifact_dir / "Dockerfile"
+                shutil.copy2(dockerfile_src, dockerfile_dst)
+                self.log(slug, f"Saved Dockerfile to {dockerfile_dst}", to_console=False)
+
+            # Save .dockerignore
+            dockerignore_src = Path(repo_path) / ".dockerignore"
+            if dockerignore_src.exists():
+                dockerignore_dst = artifact_dir / ".dockerignore"
+                shutil.copy2(dockerignore_src, dockerignore_dst)
+                self.log(slug, f"Saved .dockerignore to {dockerignore_dst}", to_console=False)
+
+            # Save result metadata as JSON
+            metadata_file = artifact_dir / "metadata.json"
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "repo_url": result.get("repo_url"),
+                    "repo_name": result.get("repo_name"),
+                    "detected_language": result.get("detected_language"),
+                    "success": result.get("success"),
+                    "timestamp": result.get("timestamp"),
+                    "total_duration": result.get("total_duration_seconds"),
+                    "token_usage": result.get("token_usage"),
+                    "cost": result.get("cost")
+                }, f, indent=2)
+
+            return str(artifact_dir)
+
+        except Exception as e:
+            self.log(slug, f"Failed to save artifacts: {e}", to_console=False)
+            return None
 
     def test_single_repository(self, repo_url: str, worker_id: int) -> Dict:
         """
@@ -562,21 +470,7 @@ class ParallelEmpiricalTester:
             # Step 1: Clone
             self.log(repo_name, "Cloning repository...", to_console=True)
             clone_start = time.time()
-            try:
-                from run_agent import clone_repository # Import strictly if needed, or assume it's moved
-                # Wait, I removed clone_repository from run_agent.py? 
-                # Yes, I made run_agent.py minimal.
-                # Use the local clone helper if I kept it? 
-                # I need to restore clone_repository or define it here.
-                # Actually, parallel_empirical_test.py imported it from run_agent.
-                # I MUST DEFINE IT HERE or import from somewhere.
-                # Ideally, I should have put it in tools/utils.
-                # I'll implement a simple clone here to be safe.
-                pass 
-            except ImportError:
-                 pass
-
-            # Define simple clone wrapper since I removed it from run_agent
+            # Define simple clone wrapper
             def _clone(url, target_base):
                 import subprocess
                 slug = repo_slug(url)
@@ -585,7 +479,7 @@ class ParallelEmpiricalTester:
                     import shutil
                     shutil.rmtree(target)
                 target.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["git", "clone", "--depth", "1", url, str(target)], check=True, capture_output=True)
+                subprocess.run(["git", "clone", "--depth", "1", "--recursive", url, str(target)], check=True, capture_output=True)
                 return str(target)
 
             try:
@@ -601,30 +495,45 @@ class ParallelEmpiricalTester:
             from agent.workflow import run_learner_agent
             from agent.tools import FormattedOutputHandler
 
+            # Setup per-repo logging
+            transcript_file = self.transcripts_dir / f"{slug}.log"
+            structured_log_file = self.structured_logs_dir / f"{slug}.json"
+
             def validation_callback(path):
                 """Callback for agent to verify its own work via Docker build."""
                 dockerfile_path = Path(path) / "Dockerfile"
                 if not dockerfile_path.exists():
+                    self.log(repo_name, "Validation: Dockerfile not found", to_console=False)
                     return {"success": False, "error": "Dockerfile not found at root of repository"}
-                
+
+                self.log(repo_name, "Validation: Building Docker image...", to_console=False)
                 image_name = f"learner-{slug}:latest"
                 build_res = self.docker_tester.build_dockerfile(
-                    str(dockerfile_path), 
-                    path, 
+                    str(dockerfile_path),
+                    path,
                     image_name
                 )
-                
+
                 if build_res["success"]:
+                    self.log(repo_name, "Validation: Build succeeded", to_console=False)
                     self.docker_tester.cleanup_image(image_name)
                     return {"success": True}
                 else:
+                    self.log(repo_name, f"Validation: Build failed at stage {build_res.get('stage')}", to_console=False)
+
+                    # Check for multi-stage hallucinations
+                    multistage_errors = self._validate_multistage_references(dockerfile_path)
+                    extra_feedback = ""
+                    if multistage_errors['invalid_refs']:
+                        extra_feedback = f"\n\nCRITICAL: You are COPYing from stage(s) {multistage_errors['invalid_refs']} which DO NOT EXIST. Defined stages are: {multistage_errors['defined_stages']}. FIX THIS!"
+
                     # Provide detailed feedback for the refinement loop
                     error_snippet = build_res.get('error_snippet', 'Unknown error')
                     error_stage = build_res.get('stage', 'UNKNOWN')
                     full_error = build_res.get('error_message', '')[:500]  # Truncate for prompt
                     return {
-                        "success": False, 
-                        "error": f"Stage: {error_stage}\nError: {error_snippet}\nDetails: {full_error}"
+                        "success": False,
+                        "error": f"Stage: {error_stage}\nError: {error_snippet}\nDetails: {full_error}{extra_feedback}"
                     }
 
             self.log(repo_name, "Running Learner Agent...", to_console=True)
@@ -632,35 +541,158 @@ class ParallelEmpiricalTester:
             
             # Define Verification Tool for the Agent
             from langchain_core.tools import Tool
-            
+
             def verify_build_tool_func(input_str: str) -> str:
                 """
                 Verifies the Dockerfile by attempting a build.
+                Returns compact JSON structure instead of full logs.
+
                 Input is ignored (it looks for 'Dockerfile' in the root).
                 """
-                # The agent writes to repo_path/Dockerfile, so we check there.
-                # The `report_dir_result` variable is not defined here, so we assume
-                # the Dockerfile is always in repo_path.
+                self.log(repo_name, "[VerifyBuild] Starting Docker build verification", to_console=False)
+
                 dockerfile_path = Path(repo_path) / "Dockerfile"
-                
+
                 if not dockerfile_path.exists():
-                    return "Error: Dockerfile not found. You must write the file first."
-                
-                # Use a specific tag for verification
+                    self.log(repo_name, "[VerifyBuild] Dockerfile not found", to_console=False)
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Dockerfile not found. You must create it first using WriteToFile."
+                    }, indent=2)
+
+                # 1. Pre-build Hygiene Checks (Fail Fast)
+                self.log(repo_name, "[VerifyBuild] Running pre-build validation", to_console=False)
+                # Check for multi-stage hallucinations (referencing non-existent stages)
+                multistage_errors = self._validate_multistage_references(dockerfile_path)
+                if multistage_errors['invalid_refs']:
+                    defined = ", ".join(multistage_errors['defined_stages']) if multistage_errors['defined_stages'] else "None"
+                    self.log(repo_name, f"[VerifyBuild] Invalid stage references: {multistage_errors['invalid_refs']}", to_console=False)
+                    return json.dumps({
+                        "status": "failed",
+                        "stage": "PRE_BUILD_CHECK",
+                        "error_type": "INVALID_STAGE_REFERENCE",
+                        "message": f"CRITICAL: You are COPYing from stage(s) {multistage_errors['invalid_refs']} which DO NOT EXIST. Defined stages are: {defined}. You must fix this before building."
+                    }, indent=2)
+
+                self.log(repo_name, "[VerifyBuild] Pre-build validation passed", to_console=False)
+
                 verify_slug = f"verify-{slug}"
                 verify_image = f"verify-{verify_slug}:latest"
-                
+
+                # Capture auxiliary logs from LLM helpers
+                aux_logs = []
+
+                self.log(repo_name, "[VerifyBuild] Building Docker image", to_console=False)
                 result = self.docker_tester.build_dockerfile(
                     str(dockerfile_path),
                     repo_path,
                     verify_image
                 )
-                
+
                 if result.get("success"):
-                    self.docker_tester.cleanup_image(verify_image)
-                    return "SUCCESS: Built successfully."
+                    self.log(repo_name, "[VerifyBuild] Docker build succeeded, running smoke test", to_console=False)
+                    # Phase 2: Functional Verification (Smoke Test)
+                    try:
+                        verifier = LLMFunctionalVerifier()
+
+                        # Read Dockerfile for context
+                        with open(dockerfile_path, 'r') as f:
+                            df_content = f.read()
+
+                        # 1. Generate Command
+                        self.log(repo_name, "[VerifyBuild] Generating smoke test command via LLM", to_console=False)
+                        test_cmd, cmd_log = verifier.generate_verification_command(df_content, repo_path.split('/')[-1])
+                        aux_logs.append(cmd_log)
+                        self.log(repo_name, f"[VerifyBuild] Generated test command: {test_cmd}", to_console=False)
+
+                        # 2. Run Container
+                        self.log(repo_name, f"[VerifyBuild] Running container with test command", to_console=False)
+                        run_result = self.docker_tester.run_container(verify_image, test_cmd, timeout=20)
+
+                        # 3. Analyze Output
+                        self.log(repo_name, "[VerifyBuild] Analyzing smoke test output via LLM", to_console=False)
+                        verification, verify_log = verifier.verify_output(test_cmd, run_result.get("output", ""), run_result.get("exit_code", -1))
+                        if verify_log: aux_logs.append(verify_log)
+                        
+                        if verification.get("success"):
+                             self.log(repo_name, "[VerifyBuild] ✓ Smoke test PASSED", to_console=False)
+                             self.docker_tester.cleanup_image(verify_image)
+                             return json.dumps({
+                                "status": "success",
+                                "message": f"✓ Build AND Smoke Test passed!\nTest Command: '{test_cmd}'\nOutput: {run_result.get('output', '')[:200]}...",
+                                "functional_check": "passed",
+                                "auxiliary_logs": aux_logs
+                            }, indent=2)
+                        else:
+                            self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
+                            # Build passed, but runtime failed
+                            return json.dumps({
+                                "status": "failed",
+                                "stage": "RUNTIME_CHECK",
+                                "error_type": "SMOKE_TEST_FAILED",
+                                "message": f"Build succeeded, but the container crashed during smoke test.",
+                                "failed_command": test_cmd,
+                                "tail_lines": run_result.get("output", "") + "\n" + verification.get("reason", ""),
+                                "next_steps": "Check your ENTRYPOINT or runtime dependencies.",
+                                "auxiliary_logs": aux_logs
+                            }, indent=2)
+
+                    except Exception as e:
+                        # Fallback if verification infra fails
+                        self.log(repo_name, f"[VerifyBuild] Smoke test error: {e}", to_console=False)
+                        print(f"[Warning] Functional verification failed: {e}")
+                        self.docker_tester.cleanup_image(verify_image)
+                        return json.dumps({
+                            "status": "success",
+                            "message": "✓ Docker build succeeded! (Functional check skipped due to error)",
+                            "functional_check": "skipped",
+                            "error": str(e),
+                            "auxiliary_logs": aux_logs
+                        }, indent=2)
+
                 else:
-                    return f"BUILD FAILED at stage {result.get('stage')}: {result.get('error_snippet')}\nFull Error:\n{result.get('error_message')}"
+                    self.log(repo_name, f"[VerifyBuild] ✗ Docker build FAILED at stage: {result.get('stage')}", to_console=False)
+
+                    # Cleanup verify image on build failure
+                    try:
+                        self.docker_tester.cleanup_image(verify_image)
+                    except:
+                        pass
+
+                    # Extract compact error info
+                    error_msg = result.get('error_message', '')
+                    error_lines = error_msg.split('\n') if error_msg else []
+
+                    # Get last 40 lines only (tail)
+                    tail_lines = '\n'.join(error_lines[-40:]) if len(error_lines) > 40 else error_msg
+
+                    # LLM-Based Error Analysis
+                    self.log(repo_name, "[VerifyBuild] Running LLM error analysis", to_console=False)
+                    analyzer = LLMErrorAnalyzer()
+                    analysis, analysis_log = analyzer.analyze_error(tail_lines, result.get('failed_command', ''))
+                    aux_logs.append(analysis_log)
+                    self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
+
+                    # Build structured error features from LLM analysis
+                    error_features = {
+                        "cause": analysis.get("cause"),
+                        "suggested_fix": analysis.get("suggested_fix"),
+                        "missing_packages": analysis.get("missing_packages", []),
+                    }
+
+                    # Build compact response
+                    compact_error = {
+                        "status": "failed",
+                        "stage": result.get('stage', 'UNKNOWN'),
+                        "failed_command": result.get('failed_command', 'Unknown command'),
+                        "error_snippet": result.get('error_snippet', 'See tail_lines'),
+                        "error_analysis": error_features, # Replaced static ErrorPatternDetector with rich analysis
+                        "tail_lines": tail_lines,
+                        "search_keywords": analysis.get("search_keywords", f"docker build error {result.get('failed_command', '')}"),
+                        "auxiliary_logs": aux_logs
+                    }
+
+                    return json.dumps(compact_error, indent=2)
 
             verify_tool = Tool(
                 name="VerifyBuild",
@@ -668,32 +700,94 @@ class ParallelEmpiricalTester:
                 description="Verifies the 'Dockerfile' by running a real Docker build. usage: VerifyBuild('')"
             )
 
-            # Prepare callback handler
-            callback_handler = FormattedOutputHandler()
+            # Prepare callback handler with per-repo logging
+            callback_handler = FormattedOutputHandler(log_file=str(transcript_file))
 
             # Run Learner Agent with Validation Tool
-            print(f"[{repo_name}] Running Learner Agent...")
+            self.log(repo_name, "Agent execution started", to_console=True)
             agent_result = run_learner_agent(
                 repo_path=repo_path,
                 repo_name=repo_name,
                 repo_url=repo_url,
-                max_retries=3,  # 3 attempts with feedback injection
+                max_retries=5,  # 5 attempts with feedback injection
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,
                 extra_tools=[verify_tool]
             )
-            
+
             duration = time.time() - start_time # Use start_time from original code
             result["agent_analysis"] = agent_result
             result["total_duration"] = duration
-            
+            result["detected_language"] = agent_result.get("language", "Unknown")
+
+            # Capture token usage and calculate cost
+            token_usage = callback_handler.token_usage
+            cost_data = compute_token_cost(token_usage)
+            result["token_usage"] = token_usage
+            result["cost"] = cost_data
+
+            # Save structured agent transcript
+            try:
+                transcript = callback_handler.get_transcript()
+                with open(structured_log_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "repo_url": repo_url,
+                        "repo_name": repo_name,
+                        "detected_language": result["detected_language"],
+                        "timestamp": result["timestamp"],
+                        "transcript": transcript,
+                        "token_usage": token_usage,
+                        "cost": cost_data,
+                        "final_result": {
+                            "status": agent_result["status"],
+                            "attempts": agent_result.get("attempts", 0)
+                        }
+                    }, f, indent=2)
+                self.log(repo_name, f"Saved structured transcript to {structured_log_file}", to_console=False)
+            except Exception as e:
+                self.log(repo_name, f"Failed to save transcript: {e}", to_console=False)
+
+            # Add dockerfile_test structure for compatibility with summary
+            result["dockerfile_test"] = {
+                "success": agent_result["status"] == "success",
+                "attempts": agent_result.get("attempts", 0),
+                "final_iteration": agent_result.get("attempts", 0) if agent_result["status"] == "success" else 0,
+                "iterations": []  # Could populate from agent metrics if available
+            }
+
             if agent_result["status"] == "success":
                 result["success"] = True
-                self.log(repo_name, f"SUCCESS! Dockerfile built and verified in {duration:.1f}s", to_console=True)
+                status_msg = f"SUCCESS! Dockerfile built in {duration:.1f}s (Cost: ${cost_data['total_cost_usd']:.4f})"
+                self.log(repo_name, status_msg, to_console=True)
+
+                # Save artifacts
+                artifact_path = self.save_artifacts(slug, repo_path, result)
+                if artifact_path:
+                    result["artifact_path"] = artifact_path
+
+                # Update progress
+                self.update_progress(repo_name, "✓ Success")
+
             else:
-                self.log(repo_name, f"FAILURE: {agent_result.get('error')}", to_console=True)
+                # Populate failure info
+                result["dockerfile_test"]["final_result"] = {
+                    "stage": "AGENT_FAILURE",
+                    "failed_command": "N/A",
+                    "error": agent_result.get("error", "Unknown error")
+                }
+                failure_msg = f"FAILURE: {agent_result.get('error')} (Cost: ${cost_data['total_cost_usd']:.4f})"
+                self.log(repo_name, failure_msg, to_console=True)
+
+                # Save artifacts even on failure for debugging
+                artifact_path = self.save_artifacts(slug, repo_path, result)
+                if artifact_path:
+                    result["artifact_path"] = artifact_path
+
+                # Update progress
+                self.update_progress(repo_name, "✗ Failed")
 
         except Exception as e:
+            result["exception"] = str(e) # Mark exception for cleanup logic
             self.log(repo_name, f"Test crashed: {e}", to_console=True)
             traceback.print_exc()
         
@@ -701,22 +795,11 @@ class ParallelEmpiricalTester:
             # Calculate total duration
             result["total_duration_seconds"] = time.time() - test_start_time
 
-            # Emergency cleanup ONLY if exception occurred and cleanup wasn't done
-            # Check if cleanup already happened by seeing if result was marked success/failure
-            if "success" not in result or result.get("exception"):
-                self.log(repo_name, "Emergency cleanup due to exception", to_console=False)
-                if repo_path and os.path.exists(repo_path):
-                    try:
-                        shutil.rmtree(repo_path)
-                    except:
-                        pass
-
-                # Cleanup Docker image using slug
-                try:
-                    image_name = f"parallel-empirical-{slug}:latest"
-                    self.docker_tester.cleanup_image(image_name)
-                except:
-                    pass
+            # Always cleanup to prevent disk/memory blowups
+            try:
+                self._aggressive_cleanup(repo_name, repo_path, result)
+            except Exception as e:
+                self.log(repo_name, f"Cleanup failed: {e}", to_console=False)
 
             # Force garbage collection after each test
             gc.collect()
@@ -727,6 +810,22 @@ class ParallelEmpiricalTester:
                 self._save_incremental_results(result)  # Append to JSONL
 
         return result
+
+    def _get_recommended_action(self, build_result: Dict) -> str:
+        """Generate recommended next action based on build failure."""
+        stage = build_result.get('stage', '')
+
+        recommendations = {
+            'IMAGE_PULL': 'Use SearchDockerError to find correct base image or verify tag exists',
+            'PLATFORM_INCOMPATIBLE': 'Add --platform=linux/amd64 to FROM statement',
+            'FILE_COPY_MISSING': 'Use ListDirectory to check actual file names, fix COPY paths',
+            'DEPENDENCY_BUILD_TOOLS': 'Install build dependencies: apt-get install -y build-essential python3-dev',
+            'BUILD_TOOL_MISSING': 'SearchDockerError to find how to install the missing tool',
+            'DOCKERFILE_SYNTAX': 'Check Dockerfile syntax - unknown instruction or malformed command',
+            'UNKNOWN': 'Use SearchDockerError with error keywords from tail_lines'
+        }
+
+        return recommendations.get(stage, 'Use SearchDockerError with error keywords to find solution')
 
     def _validate_multistage_references(self, dockerfile_path: Path) -> Dict[str, list]:
         """
@@ -746,10 +845,11 @@ class ParallelEmpiricalTester:
                 content = f.read()
 
             # Find all defined stages: FROM ... AS <name>
+            # Pattern now handles --platform flags and multi-word base images
             defined_stages = set()
-            stage_pattern = r'FROM\s+[^\s]+\s+AS\s+([^\s]+)'
+            stage_pattern = r'FROM\s+(?:--platform=[^\s]+\s+)?(.+?)\s+AS\s+([^\s]+)'
             for match in re.finditer(stage_pattern, content, re.IGNORECASE):
-                stage_name = match.group(1).strip()
+                stage_name = match.group(2).strip()
                 defined_stages.add(stage_name)
 
             # Find all COPY --from=<stage> references
@@ -850,9 +950,9 @@ class ParallelEmpiricalTester:
 
         # 2. Remove Docker image (even on failure to free disk space)
         if "dockerfile_test" in result:
-            # Use slug from result for consistency
+            # Use slug from result for consistency (match what we create)
             slug = result.get("repo_slug", repo_name.lower())
-            image_name = f"parallel-empirical-{slug}:latest"
+            image_name = f"learner-{slug}:latest"
             try:
                 self.docker_tester.cleanup_image(image_name)
                 self.log(repo_name, f"Removed Docker image {image_name}", to_console=False)
@@ -914,12 +1014,20 @@ class ParallelEmpiricalTester:
         Returns:
             Summary dictionary with overall results
         """
+        # Set total count for progress tracking
+        self.total_count = len(repo_urls)
+
         print("="*80)
         print(f"PARALLEL EMPIRICAL TESTING - {len(repo_urls)} repositories")
         print(f"Workers: {self.max_workers}")
         print("="*80)
         print(f"\nResults directory: {self.results_dir.absolute()}")
-        print(f"Master log: {self.master_log_file}")
+        print(f"\nLogging Configuration:")
+        print(f"  Master Log:        {self.master_log_file}")
+        print(f"  Progress Tracker:  {self.progress_file}")
+        print(f"  Agent Transcripts: {self.transcripts_dir}/")
+        print(f"  Structured Logs:   {self.structured_logs_dir}/")
+        print(f"  Artifacts:         {self.artifacts_dir}/")
 
         # Pre-test infrastructure health check
         print("\n[HEALTH CHECK] Verifying Docker infrastructure...")
@@ -929,7 +1037,7 @@ class ParallelEmpiricalTester:
             print(f"[HEALTH CHECK] FAILED: {health_message}")
             if "corrupted" in health_message.lower():
                 print("[HEALTH CHECK] Attempting to fix corruption with docker builder prune...")
-                if self.docker_tester.prune_build_cache():
+                if self.docker_tester.prune_buildkit_cache():
                     print("[HEALTH CHECK] Prune successful - rechecking infrastructure...")
                     healthy, health_message = self.docker_tester.check_infrastructure_health()
                     if healthy:
@@ -993,7 +1101,7 @@ class ParallelEmpiricalTester:
         try:
             import subprocess
             result = subprocess.run(
-                ["docker", "images", "-q", "-f", "reference=parallel-empirical-*"],
+                ["docker", "images", "-q", "-f", "reference=learner-*"],
                 capture_output=True,
                 text=True,
                 timeout=10
@@ -1059,9 +1167,15 @@ class ParallelEmpiricalTester:
         token_totals = []
         cost_totals = []
         for r in self.results:
-            if "agent_analysis" in r and "token_usage" in r["agent_analysis"]:
+            # Check root first, then agent_analysis
+            if "token_usage" in r:
+                 token_totals.append(r["token_usage"].get("total", 0))
+            elif "agent_analysis" in r and "token_usage" in r["agent_analysis"]:
                 token_totals.append(r["agent_analysis"]["token_usage"].get("total", 0))
-            if "agent_analysis" in r and "cost_usd" in r["agent_analysis"]:
+            
+            if "cost" in r:
+                cost_totals.append(r["cost"].get("total_cost_usd", 0.0))
+            elif "agent_analysis" in r and "cost_usd" in r["agent_analysis"]:
                 cost_totals.append(r["agent_analysis"]["cost_usd"].get("total_cost_usd", 0.0))
         avg_tokens = sum(token_totals) / len(token_totals) if token_totals else 0
         avg_cost = sum(cost_totals) / len(cost_totals) if cost_totals else 0
@@ -1154,10 +1268,17 @@ class ParallelEmpiricalTester:
                 f.write(f"   Language: {result.get('detected_language', 'Unknown')}\n")
                 f.write(f"   Duration: {result['total_duration_seconds']:.2f}s\n")
 
-                if "agent_analysis" in result and "token_usage" in result["agent_analysis"]:
+                if "token_usage" in result:
+                    tokens = result["token_usage"]
+                    f.write(f"   Tokens: {tokens.get('total', 0):,}\n")
+                elif "agent_analysis" in result and "token_usage" in result["agent_analysis"]:
                     tokens = result["agent_analysis"]["token_usage"]
                     f.write(f"   Tokens: {tokens.get('total', 0):,}\n")
-                if "agent_analysis" in result and "cost_usd" in result["agent_analysis"]:
+
+                if "cost" in result:
+                    cost = result["cost"]
+                    f.write(f"   Cost: ${cost.get('total_cost_usd', 0):.4f}\n")
+                elif "agent_analysis" in result and "cost_usd" in result["agent_analysis"]:
                     cost = result["agent_analysis"]["cost_usd"]
                     f.write(f"   Cost: ${cost.get('total_cost_usd', 0):.4f}\n")
 

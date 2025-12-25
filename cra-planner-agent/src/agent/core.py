@@ -27,11 +27,8 @@ from langchain_core.prompts import PromptTemplate
 
 # Import tools and helpers
 from .tools import (
-    search_web, search_docker_error, extract_relevant_sections,
-    _get_http_client, _set_repository_base_path, FormattedOutputHandler,
-    grep_files, find_files, list_directory, read_local_file, create_directory_tree,
-    extract_json_field, get_file_metadata, docker_image_search, fetch_web_page,
-    _get_expanded_platform_info, write_to_file
+    _get_http_client, FormattedOutputHandler,
+    create_structured_tools
 )
 # Note: Other tools (ReadFile, docker_image_search, etc.) are currently defined in planner_agent.py 
 # but are simple wrappers. For this refactor, I will define them here 
@@ -52,17 +49,44 @@ _api_semaphore = threading.Semaphore(2)
 
 class GPT5NanoWrapper(BaseChatModel):
     """Wrapper for gpt-5-nano that strips unsupported parameters and rate-limits API calls."""
-    llm: AzureChatOpenAI
+    llm: Any  # Allow Runnable / ChatModel for bind_tools compatibility
     class Config:
         arbitrary_types_allowed = True
-    def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
+
+    def invoke(self, input, config=None, **kwargs):
+        """Rate-limited invoke for compatibility with bound tools."""
+        # Remove unsupported parameters
         kwargs.pop('stop', None)
         with _api_semaphore:
-            return self.llm._generate(messages, **kwargs)
+            return self.llm.invoke(input, config=config, **kwargs)
+
+    async def ainvoke(self, input, config=None, **kwargs):
+        """Rate-limited async invoke for compatibility with bound tools."""
+        # Remove unsupported parameters
+        kwargs.pop('stop', None)
+        with _api_semaphore:
+            return await self.llm.ainvoke(input, config=config, **kwargs)
+
+    def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
+        """Fallback for LangChain versions that call _generate directly."""
+        kwargs.pop('stop', None)
+        with _api_semaphore:
+            # Ensure the bound object has _generate before calling
+            if hasattr(self.llm, '_generate'):
+                return self.llm._generate(messages, **kwargs)
+            else:
+                # Fallback to invoke if _generate is not available
+                result = self.llm.invoke(messages, **kwargs)
+                # Convert to ChatResult if needed
+                from langchain_core.outputs import ChatGeneration
+                return ChatResult(generations=[ChatGeneration(message=result)])
+
     @property
     def _llm_type(self) -> str:
         return "gpt-5-nano-wrapper"
+
     def bind_tools(self, tools, **kwargs):
+        """Bind tools and wrap the result to maintain rate limiting."""
         bound = self.llm.bind_tools(tools, **kwargs)
         return GPT5NanoWrapper(llm=bound)
 
@@ -100,7 +124,8 @@ def create_learner_agent(
     load_dotenv()
     
     # 1. Setup Path Context
-    _set_repository_base_path(repository_path)
+    # REMOVED: _set_repository_base_path(repository_path) - context is now bound to tools
+    pass
     
     # 2. Config
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -123,33 +148,10 @@ def create_learner_agent(
     )
     llm = GPT5NanoWrapper(llm=base_llm)
 
-    # 4. Tools
-    # Critical: Use the definitions from tools.py (I need to update tools.py to include file tools!)
-    # I'll reference them here assuming they exist or simple ones. 
-    # For now, I'll import what I have. I need to make sure tools.py has file tools.
-    # To avoid breaking verify, I will append the FILE TOOLS to tools.py in the NEXT step.
-    # For now I will import "all" from tools and list them.
-    from .tools import search_web, search_docker_error
-    
-    # Define tool implementations inline for now if missing from tools.py (I'll move them properly next)
-    # Actually, let's use a dynamic import or assume I fix tools.py next.
-    # I'll define a provisional list and update it.
-    
-    tools_list = [
-        Tool(name="WriteToFile", func=write_to_file, description="Write content to a file. Input: file_path,content_string"),
-        Tool(name="ReadLocalFile", func=read_local_file, description="Read the content of a local file."),
-        Tool(name="ListDirectory", func=list_directory, description="List files in a directory."),
-        Tool(name="CreateDirectoryTree", func=create_directory_tree, description="List directory tree structure. Input: path,depth (default 2)"),
-        Tool(name="FindFiles", func=find_files, description="Find files matching pattern. Input: dir,pattern,depth"),
-        Tool(name="GrepFiles", func=grep_files, description="Search text in files. Input: dir,pattern,glob"),
-        Tool(name="SearchWeb", func=search_web, description="Search web documentation."),
-        Tool(name="SearchDockerError", func=search_docker_error, description="Search for solutions to Docker errors."),
-        Tool(name="FetchWebPage", func=fetch_web_page, description="Fetch content of a web page."),
-        Tool(name="DockerImageSearch", func=docker_image_search, description="Search/verify Docker Hub images. Input: query or tags:image"),
-        Tool(name="ExtractJsonField", func=extract_json_field, description="Extract field from JSON file."),
-        Tool(name="GetFileMetadata", func=get_file_metadata, description="Get file size and mode.")
-    ]
-    
+    # 4. Tools - Use Structured Tools with Pydantic schemas
+    # 4. Tools - Use Structured Tools with Pydantic schemas bound to this repo
+    tools_list = create_structured_tools(repository_path)
+
     if extra_tools:
         tools_list.extend(extra_tools)
     
@@ -161,6 +163,20 @@ HOST ARCHITECTURE: {host_arch_name}
 
 TOOLS:
 {tools}
+
+TOOL INPUT CONTRACT (MUST FOLLOW):
+- WriteToFile:
+  Action Input: {{"file_path":"Dockerfile","content":"<full file contents>"}}
+- ReadLocalFile:
+  Action Input: {{"file_path":"package.json"}}
+- ListDirectory:
+  Action Input: {{"directory":"."}}
+- VerifyBuild:
+  Action Input: "" (empty string)
+
+IMPORTANT:
+- Action Input must be exactly a JSON object for that tool (or "" for VerifyBuild). No prose.
+- You may emit at most one tool call per message.
 
 ═══════════════════════════════════════════════════════════════════════════════
 CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
@@ -221,14 +237,37 @@ Action: the action to take, should be one of [{tool_names}]
 Action Input: the input to the action
 Observation: the result of the action
 ... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: VerifyBuild returned SUCCESS. I can now provide my Final Answer.
-Final Answer: the final answer (ONLY after VerifyBuild SUCCESS)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+CRITICAL OUTPUT RULES:
+1. You can ONLY output "Thought:", "Action:", "Action Input:", or "Final Answer:"
+2. You must NEVER write "Observation:" - the system adds that automatically after your Action runs
+3. Each response must contain EXACTLY ONE action - never chain multiple actions together
+4. Stop immediately after writing "Action Input:" - do not continue writing
+
+FINAL ANSWER FORMAT:
+When VerifyBuild returns SUCCESS in the Observation, your NEXT response must be:
+
+Thought: VerifyBuild returned SUCCESS.
+Final Answer: Successfully created Dockerfile for [repo-name]. Build verified and smoke test passed.
+
+Keep it to ONE sentence. DO NOT write lengthy documentation after success.
 
 IMPORTANT:
 1. To create a file, you MUST use the WriteToFile tool.
 2. You MUST verify your work with VerifyBuild before finishing.
 3. If VerifyBuild fails, you MUST research and fix it.
-4. Your Final Answer should summarize what you created and confirm the build passed.
+4. Your Final Answer should be CONCISE (1 sentence) after VerifyBuild SUCCESS.
+5. Every Action MUST be immediately followed by "Action Input:" on the next line
+6. You can only output ONE action per response, then you must wait for the system to provide the Observation
+
+FORMAT EXAMPLE (follow this EXACTLY):
+Thought: I need to check the project structure
+Action: ListDirectory
+Action Input: {{"directory":"."}}
+
+(then STOP and wait for Observation)
 
 Begin!
 
@@ -236,8 +275,7 @@ Question: {input}
 Thought:{agent_scratchpad}"""
 
     prompt = PromptTemplate.from_template(template).partial(
-        host_arch_name=host_arch_name,
-        context="{context}" # Placeholder to be filled at invoke time? No, input variable.
+        host_arch_name=host_arch_name
     )
     
     # ReAct Agent
@@ -248,7 +286,9 @@ Thought:{agent_scratchpad}"""
         tools=tools_list,
         verbose=verbose,
         handle_parsing_errors=True,
-        max_iterations=max_iterations
+        max_iterations=max_iterations,
+        return_intermediate_steps=True
     )
-    
-    return executor, FormattedOutputHandler()
+
+    # Return executor, handler, and base_llm for guidelines generation
+    return executor, FormattedOutputHandler(), base_llm

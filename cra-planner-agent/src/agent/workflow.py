@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent
 from .preparation import build_initial_context
-from .tools import _set_report_directory
+# from .tools import _set_report_directory
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ def run_learner_agent(
     repo_path: str,
     repo_name: str,
     repo_url: str,
-    max_retries: int = 3,
+    max_retries: int = 5,
     callback_handler = None,
     validation_callback = None,
     extra_tools: list = None
@@ -49,21 +49,21 @@ def run_learner_agent(
     ts = int(time.time())
     report_dir = Path(repo_path) / "agent_reports" / f"report_{ts}"
     report_dir.mkdir(parents=True, exist_ok=True)
-    _set_report_directory(str(report_dir))
+    # _set_report_directory removed (thread-local state elimination)
     
     # 1. Preparation Phase
     logger.info(f"Starting analysis for {repo_name}...")
     
-    # Create the main agent
-    executor, handler = create_learner_agent(
+    # Create the main agent (now returns base_llm too)
+    executor, handler, base_llm = create_learner_agent(
         repository_path=repo_path,
         repo_name=repo_name,
         verbose=True,
         extra_tools=extra_tools
     )
-    
-    # Build Context
-    prep_context = build_initial_context(executor, repo_path)
+
+    # Build Context with base LLM (not full agent)
+    prep_context = build_initial_context(base_llm, repo_path)
     language = prep_context["language"]
     
     # 2. Execution Loop with Refinement
@@ -84,7 +84,11 @@ def run_learner_agent(
 ⚠️ PREVIOUS ATTEMPT FAILED - YOU MUST FIX THESE ISSUES:
 ═══════════════════════════════════════════════════════════════════════════════
 {"".join(f"• {lesson}" + chr(10) for lesson in lessons_learned)}
-Use SearchDockerError to research solutions for the errors above.
+
+REQUIRED ACTION:
+1. Use SearchDockerError with the error keywords from above
+2. The AI will analyze the error and provide a specific fix
+3. Apply the fix and verify with VerifyBuild
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
@@ -93,14 +97,29 @@ Use SearchDockerError to research solutions for the errors above.
 GOAL: Containerize the '{repo_name}' repository.
 
 OBJECTIVES:
-1. Analyze the project structure and dependencies.
-2. Create a production-ready 'Dockerfile' in the repository root.
-3. Create a '.dockerignore' to exclude unnecessary files.
-4. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile. 
-   - If it fails, use SearchDockerError to research the error
-   - Fix the Dockerfile based on what you learned
-   - Verify again until you get SUCCESS
-5. You MUST get a SUCCESS result from VerifyBuild before finishing.
+1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
+2. Based on ONLY the files that exist, determine build approach
+3. Create a production-ready 'Dockerfile' in the repository root
+4. Create a '.dockerignore' to exclude unnecessary files
+5. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
+6. You MUST get a SUCCESS result from VerifyBuild before finishing
+
+ERROR HANDLING WORKFLOW (When VerifyBuild fails):
+1. Call SearchDockerError with the error message from VerifyBuild
+   Example: SearchDockerError(error_keywords="unable to locate package build-essential")
+2. Read the AI ANALYSIS section to understand:
+   - Root Cause (what went wrong)
+   - Fix (specific changes needed)
+   - Example (code to apply)
+3. Apply the suggested fix to your Dockerfile
+4. Run VerifyBuild again
+5. Repeat until SUCCESS
+
+IMPORTANT RULES:
+- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
+- Use ListDirectory FIRST, then only read files you know exist
+- Be efficient - don't waste API calls on trial-and-error file reads
+- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)
 
 CONTEXT:
 {prep_context['context_str']}
@@ -122,43 +141,90 @@ Begin!
             )
             
             output = result.get("output", "")
+            intermediate_steps = result.get("intermediate_steps", [])
+
             logger.info(f"Agent output: {output[:500]}...")
+
+            # ========== NEW: Enforce VerifyBuild was called and succeeded ==========
+            verify_called = False
+            last_verify_success = False
+            last_verify_index = -1
+            last_write_index = -1
             
+            # Track steps to enforce sequence
+            for idx, step in enumerate(intermediate_steps):
+                action, observation = step
+                
+                # Check for WriteToFile targeting Dockerfile
+                if hasattr(action, 'tool') and action.tool == 'WriteToFile':
+                    # Parse input to see if it's the Dockerfile
+                    # Handle both dict and string input formats
+                    tool_input = action.tool_input
+                    if isinstance(tool_input, str):
+                        # Heuristic for string input
+                        if 'Dockerfile' in tool_input:
+                            last_write_index = idx
+                    elif isinstance(tool_input, dict):
+                        fpath = tool_input.get('file_path', '')
+                        if 'Dockerfile' in fpath or fpath.endswith('Dockerfile'):
+                            last_write_index = idx
+
+                # Check for VerifyBuild
+                if hasattr(action, 'tool') and 'VerifyBuild' in action.tool:
+                    verify_called = True
+                    last_verify_index = idx
+                    
+                    # STRICT CHECK: Parse JSON observation
+                    # The observation is a string (JSON dump), we need to parse it
+                    try:
+                        if isinstance(observation, str):
+                            obs_data = json.loads(observation.strip())
+                            if isinstance(obs_data, dict) and obs_data.get("status") == "success":
+                                last_verify_success = True
+                            else:
+                                last_verify_success = False
+                        else:
+                            last_verify_success = False
+                    except Exception:
+                        # Fallback for non-JSON output (shouldn't happen with updated tool)
+                        last_verify_success = False
+
+            if not verify_called:
+                lesson = f"Attempt {attempt}: Agent did not call VerifyBuild. You MUST verify your Dockerfile before finishing."
+                logger.warning(lesson)
+                lessons_learned.append(lesson)
+                continue
+
+            # Check sequence: Verification must happen AFTER the last write
+            if last_write_index > last_verify_index:
+                 lesson = f"Attempt {attempt}: You modified the Dockerfile (step {last_write_index}) AFTER verifying it (step {last_verify_index}). You must verify LAST."
+                 logger.warning(lesson)
+                 lessons_learned.append(lesson)
+                 continue
+
+            if not last_verify_success:
+                lesson = f"Attempt {attempt}: VerifyBuild failed or was not clean success. You must keep fixing until status='success'."
+                logger.warning(lesson)
+                lessons_learned.append(lesson)
+                continue
+            # ========== END NEW CODE ==========
+
             # 1. Basic Validation: Check if Dockerfile exists
             if not dockerfile_path.exists() or dockerfile_path.stat().st_size == 0:
                 lesson = f"Attempt {attempt}: No Dockerfile produced. You MUST use WriteToFile to create a Dockerfile."
                 logger.warning(lesson)
                 lessons_learned.append(lesson)
                 continue
-            
-            # 2. Advanced Validation: External Callback (e.g. Docker Build)
-            if validation_callback:
-                logger.info(f"Running external validation...")
-                valid_result = validation_callback(repo_path)
-                
-                if valid_result.get("success"):
-                    logger.info("✓ External validation PASSED!")
-                    return {
-                        "status": "success", 
-                        "report_dir": str(report_dir),
-                        "dockerfile": str(dockerfile_path),
-                        "attempts": attempt,
-                        "metrics": valid_result
-                    }
-                else:
-                    error_msg = valid_result.get("error", "Validation failed")
-                    lesson = f"Attempt {attempt}: Build failed - {error_msg}"
-                    logger.warning(f"✗ External validation FAILED: {error_msg}")
-                    lessons_learned.append(lesson)
-                    continue
-            
-            # If no validation callback, success if file exists
-            logger.info("✓ Success! Dockerfile generated (no external validation).")
+
+            # SUCCESS! VerifyBuild passed, which means Docker build succeeded
+            # No need for external validation since VerifyBuild already did the Docker build
+            logger.info("✓ VerifyBuild PASSED! Dockerfile successfully built and verified.")
             return {
-                "status": "success", 
+                "status": "success",
                 "report_dir": str(report_dir),
                 "dockerfile": str(dockerfile_path),
-                "attempts": attempt
+                "attempts": attempt,
+                "language": language
             }
                 
         except Exception as e:

@@ -4,7 +4,8 @@ import logging
 import yaml
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-from .tools import _resolve_path
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
 
@@ -78,20 +79,29 @@ def detect_project_language(repo_path: str) -> str:
         logger.error(f"Error detecting language: {e}")
         return "Unknown"
 
-def generate_language_guidelines(agent, language: str) -> str:
-    """Generate recent best practices via Agent LLM."""
-    if not language or language == "Unknown": return ""
-    
-    prompt = f"""
-    You are an expert DevOps engineer.
-    Generate 10 concise, UP-TO-DATE guidelines for Dockerizing a modern {language} project in 2024/2025.
-    Focus on: Base images, Package managers, Security, and Common Pitfalls.
-    Format as bullet list.
+def generate_language_guidelines(llm: BaseChatModel, language: str) -> str:
     """
+    Generate recent best practices using bare LLM (no tools).
+
+    Args:
+        llm: The base chat model (NOT the agent executor)
+        language: Detected programming language
+
+    Returns:
+        Guidelines as formatted string
+    """
+    if not language or language == "Unknown":
+        return ""
+
+    prompt = f"""You are an expert DevOps engineer.
+Generate 10 concise, UP-TO-DATE guidelines for Dockerizing a modern {language} project in 2024/2025.
+Focus on: Base images, Package managers, Security, and Common Pitfalls.
+Format as bullet list.
+Be specific and actionable."""
+
     try:
-        # Direct invoke
-        result = agent.invoke({"input": prompt, "chat_history": []})
-        return result.get("output", "")
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return response.content
     except Exception as e:
         logger.error(f"Failed to generate guidelines: {e}")
         return ""
@@ -129,18 +139,25 @@ def summarize_github_workflows(repo_path: str) -> str:
     except Exception as e:
         return f"Error reading workflows: {e}"
 
-def build_initial_context(agent, repo_path: str) -> dict:
+def build_initial_context(llm: BaseChatModel, repo_path: str) -> dict:
     """
     Build the initial context for the Learner Agent.
     Aggregates language detection, guidelines, and CI/CD summary.
+
+    Args:
+        llm: The base chat model for generating guidelines
+        repo_path: Path to repository
+
+    Returns:
+        Dictionary with language and context string
     """
     language = detect_project_language(repo_path)
     logger.info(f"Building context for language: {language}")
-    
-    # Run in parallel if we wanted, but sequential is fine for now
-    guidelines = generate_language_guidelines(agent, language)
+
+    # Use bare LLM for guidelines (not agent executor)
+    guidelines = generate_language_guidelines(llm, language)
     workflows = summarize_github_workflows(repo_path)
-    
+
     context_str = f"""
 DETECTED LANGUAGE: {language}
 
