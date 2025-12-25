@@ -2204,6 +2204,19 @@ ANALYSIS APPROACH - Discovery over Assumptions:
    - Alpine: `RUN apk add --no-cache gcc musl-dev make python3-dev`
    - Include build tools BEFORE dependency installation commands.{doc_search_context}
 
+CRITICAL QUALITY RULES - "ANTI-GAMING" POLICY (VIOLATIONS CAUSE INSTANT FAILURE):
+1. **NO ERROR SUPPRESSION**: You are STRICTLY FORBIDDEN from using `|| true`, `|| exit 0`, or `; true` to mask build errors. If a command fails, THE BUILD MUST FAIL so you can see the error and fix it.
+   - WRONG: `RUN ./configure || true`
+   - WRONG: `RUN make || exit 0`
+   - RIGHT: `RUN ./configure` (Let it fail! Then fix the root cause)
+2. **NO FAKE BUILDS**: Do not use `echo` to pretend to do work.
+   - WRONG: `RUN echo "Skipping build..."`
+   - WRONG: `RUN echo "Build successful" > /dev/null`
+   - RIGHT: Run the ACTUAL build command (mvn package, npm run build, cargo build)
+3. **NO PLACEHOLDERS**: Do not create empty files to bypass checks.
+   - WRONG: `RUN touch target/app.jar` (Unless strictly testing file existence logic, but generally forbidden for builds)
+4. **ARTIFACTS REQUIRED**: A successful build MUST produce real artifacts (binaries, JARs, dist/ content). If your Dockerfile runs without error but produces nothing, IT IS A FAILURE.
+
 CRITICAL FORMAT RULES (YOU MUST FOLLOW EXACTLY):
 1. **NEVER write free text or explanations outside the format below**
 2. After "Thought:", you MUST write "Action:" followed by the tool name on the SAME line

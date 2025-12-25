@@ -607,7 +607,7 @@ class ParallelEmpiricalTester:
             self.log(repo_name, "Initializing agent...", to_console=True)
             agent_init_start = time.time()
             agent, callback_handler = create_planner_agent(
-                max_iterations=25,
+                max_iterations=8,  # Reduced from 25 to prevent agent from producing garbage outputs
                 verbose=True,
                 repository_path=repo_path,
                 repo_name=repo_name,
@@ -758,7 +758,10 @@ class ParallelEmpiricalTester:
                     docker_result = self.docker_tester.build_dockerfile(
                         str(dockerfile_path),
                         repo_path,
-                        image_name
+                        image_name,
+                        project_language=detected_language,
+                        validate_artifacts=True,
+                        validate_quality=True
                     )
 
                     iteration_duration = time.time() - iteration_start_time
@@ -768,7 +771,12 @@ class ParallelEmpiricalTester:
                         "success": docker_result.get("success", False),
                         "stage": docker_result.get("stage", "UNKNOWN"),
                         "failed_command": docker_result.get("failed_command", "Unknown"),
-                        "exit_code": docker_result.get("exit_code", -1)
+                        "exit_code": docker_result.get("exit_code", -1),
+                        "quality_score": docker_result.get("quality_score"),
+                        "quality_issues": docker_result.get("quality_issues", []),
+                        "artifacts_validated": docker_result.get("artifacts_validated", False),
+                        "artifacts_valid": docker_result.get("artifacts_valid"),
+                        "artifact_issues": docker_result.get("artifact_issues", [])
                     }
 
                     if docker_result["success"]:
@@ -777,9 +785,17 @@ class ParallelEmpiricalTester:
                         result["dockerfile_test"]["final_iteration"] = iteration
                         iteration_result["message"] = "Build successful"
 
+                        # Log success with validation info
+                        validation_info = []
+                        if docker_result.get("artifacts_validated"):
+                            validation_info.append("artifacts ✓")
+                        if docker_result.get("quality_score"):
+                            validation_info.append(f"quality {docker_result['quality_score']}/100")
+
+                        validation_str = f" [{', '.join(validation_info)}]" if validation_info else ""
                         self.log(
                             repo_name,
-                            f"Docker build SUCCESS at iteration {iteration} ({docker_result['duration_seconds']:.1f}s)",
+                            f"Docker build SUCCESS at iteration {iteration} ({docker_result['duration_seconds']:.1f}s){validation_str}",
                             to_console=True
                         )
 
@@ -1490,6 +1506,56 @@ COMMON PATTERNS AFTER FINDING FILES:
 DO NOT CHANGE BASE IMAGE! Final Answer: ONLY Dockerfile content with verified paths.
 
 Error: {safe_error}"""
+
+            elif stage == "QUALITY_CHECK":
+                self.log(repo_name, f"QUALITY_CHECK failed - Anti-gaming violations detected", to_console=True)
+                quality_issues = docker_result.get('quality_issues', [])
+                issues_str = "\n".join(f"- {issue}" for issue in quality_issues)
+                
+                refinement_query = f"""{stagnation_prefix}
+CRITICAL: DOCKERFILE QUALITY CHECK FAILED!
+You violated the anti-gaming rules. Your Dockerfile was rejected before building.
+
+VIOLATIONS DETECTED:
+{issues_str}
+
+**CORRECTION REQUIRED**:
+1. REMOVE all `|| true`, `|| exit 0`, or `; true` patterns.
+2. REMOVE all `echo` placeholders that skip work.
+3. REMOVE no-op commands like `RUN true`.
+4. Ensure you are running the REAL build command.
+
+If there is a build error, let it fail! Do not mask it. I need to see the error to fix it.
+
+Read Dockerfile: {dockerfile_absolute}
+OUTPUT: Corrected Dockerfile without these patterns."""
+
+            elif stage == "ARTIFACT_VALIDATION":
+                self.log(repo_name, f"ARTIFACT_VALIDATION failed - Build succeeded but produced no output", to_console=True)
+                artifact_issues = docker_result.get('artifact_issues', [])
+                issues_str = "\n".join(f"- {issue}" for issue in artifact_issues)
+
+                refinement_query = f"""{stagnation_prefix}
+CRITICAL: BUILD ARTIFACT VALIDATION FAILED!
+The Docker build "succeeded" (exit code 0), but it produced NO USABLE ARTIFACTS.
+This usually means you skipped the build step or structured the Dockerfile incorrectly.
+
+MISSING ARTIFACTS:
+{issues_str}
+
+**ANALYSIS**:
+- Did you actually run `mvn package`, `npm run build`, `cargo build`, etc.?
+- Did you use a multi-stage build but fail to COPY the artifacts to the final stage?
+- Did you mask a build error with `|| true`? (The build passed but did nothing)
+
+**REQUIRED FIX**:
+1. Check your RUN commands - ensure the build tool actually runs.
+2. Check your COPY commands in the final stage - ensure artifacts are copied.
+3. **DO NOT** create fake files with `touch`.
+4. **DO NOT** just `echo "done"`.
+
+Read Dockerfile: {dockerfile_absolute}
+OUTPUT: Corrected Dockerfile that produces real artifacts."""
 
             elif stage == "IMAGE_DEPRECATED":
                 self.log(repo_name, f"IMAGE_DEPRECATED error detected - ancient Docker Manifest V1 image", to_console=True)
@@ -2504,7 +2570,7 @@ YOU MUST USE 'SearchDockerError' or 'SearchWeb' to understand the error before p
                         "input": stagnation_prefix + tool_warning + refinement_query,
                         "chat_history": f"Repository: {repo_name}. Dockerfile iteration {iteration}. Use tools to investigate."
                     },
-                    max_iterations=15  # Increased from 10 to give agent more attempts to recover from parsing errors
+                    max_iterations=7  # Reduced from 15 to prevent agent from flailing and producing garbage
                 )
             except (ValueError, Exception) as e:
                 # Fallback: if agent errors out (early_stopping or iteration limit), try direct LLM call

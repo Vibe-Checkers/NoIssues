@@ -14,6 +14,9 @@ import subprocess
 import shutil
 import time
 import traceback
+import logging
+import re
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -25,21 +28,344 @@ from planner_agent import create_planner_agent
 print("[STARTUP] All imports loaded successfully!")
 
 
-class DockerBuildTester:
-    """Tests generated Dockerfiles by actually building them with Docker."""
+# Configure logging if not already configured
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    def __init__(self, timeout: int = 1200, platform: str = None):
+# Global lock for serializing Docker builds when needed
+_docker_build_lock = threading.Lock()
+_buildkit_prune_lock = threading.Lock()
+
+
+class DockerfileQualityChecker:
+    """
+    Validates Dockerfile quality and detects gaming patterns.
+
+    Prevents false positives where Dockerfiles pass Docker build but don't actually
+    build the project properly (e.g., skipping build steps, using placeholders).
+    """
+
+    # Patterns that indicate the agent is gaming the system
+    GAMING_PATTERNS = [
+        r'echo\s+["\'].*placeholder.*["\']',  # Placeholder echo statements
+        r'echo\s+["\'].*fix\s+applied.*["\']',  # Fake fix messages
+        r'echo\s+["\'].*skipp(ed|ing).*["\']',  # Admitted skipping
+        r'echo\s+["\'].*todo.*["\']',  # TODO placeholders
+        r'#\s*\(Dockerfile content continues here',  # Incomplete marker
+        r'RUN\s+echo\s+.*>\s*/dev/null',  # Meaningless echo to /dev/null
+        r'RUN\s+true\s*$',  # No-op RUN true
+        r'RUN\s+:\s*$',  # No-op RUN :
+        r'\|\|\s*true\s*$',  # Suppressing errors with || true
+        r'\|\|\s*exit\s*0\s*$',  # Suppressing errors with || exit 0
+    ]
+
+    # Patterns that indicate skipped build steps
+    SKIP_PATTERNS = [
+        r'["\'].*build\s+skipped.*["\']',
+        r'["\'].*skipping\s+(build|compilation|test).*["\']',
+        r'if\s+\[.*\];\s*then\s+echo\s+.*skipp',
+        r'#\s*RUN\s+(mvn|gradle|npm\s+install|pip\s+install)',  # Commented out critical steps
+    ]
+
+    @staticmethod
+    def check_dockerfile_quality(dockerfile_path: str, project_language: Optional[str] = None) -> Tuple[bool, List[str], int]:
+        """
+        Check Dockerfile for quality issues and gaming patterns.
+
+        Args:
+            dockerfile_path: Path to Dockerfile
+            project_language: Detected project language (Java, Python, etc.)
+
+        Returns:
+            Tuple of (is_valid, issues_list, quality_score)
+            - is_valid: False if critical issues found
+            - issues_list: List of detected issues
+            - quality_score: 0-100, higher is better
+        """
+        issues = []
+        quality_score = 100
+
+        try:
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            return False, [f"Cannot read Dockerfile: {e}"], 0
+
+        # Check for gaming patterns
+        for pattern in DockerfileQualityChecker.GAMING_PATTERNS:
+            if re.search(pattern, content, re.IGNORECASE | re.MULTILINE):
+                issues.append(f"Gaming pattern detected: {pattern}")
+                quality_score -= 30
+
+        # Check for skip patterns
+        for pattern in DockerfileQualityChecker.SKIP_PATTERNS:
+            if re.search(pattern, content, re.IGNORECASE):
+                issues.append(f"Build step appears to be skipped: {pattern}")
+                quality_score -= 25
+
+        # Check for incomplete/placeholder content
+        if '# (' in content and 'continues here' in content.lower():
+            issues.append("Incomplete Dockerfile with placeholder comments")
+            quality_score -= 50
+
+        # Check for minimal content (just FROM + COPY)
+        run_commands = len(re.findall(r'^RUN\s+', content, re.MULTILINE))
+        if run_commands == 0:
+            issues.append("No RUN commands - Dockerfile doesn't build anything")
+            quality_score -= 40
+        elif run_commands == 1:
+            # Check if the single RUN is just echo or no-op
+            if re.search(r'^RUN\s+(echo|true|:)\s', content, re.MULTILINE):
+                issues.append("Only RUN command is a no-op (echo/true)")
+                quality_score -= 40
+
+        # Language-specific validation
+        if project_language:
+            lang_issues, lang_score = DockerfileQualityChecker._check_language_specific(content, project_language)
+            issues.extend(lang_issues)
+            quality_score += lang_score  # Can be negative
+
+        # Ensure score is in valid range
+        quality_score = max(0, min(100, quality_score))
+
+        # Critical failure: quality score below 40
+        is_valid = quality_score >= 40 and len(issues) == 0
+
+        return is_valid, issues, quality_score
+
+    @staticmethod
+    def _check_language_specific(content: str, language: str) -> Tuple[List[str], int]:
+        """Check for language-specific build requirements."""
+        issues = []
+        score_adjustment = 0
+
+        lang_lower = language.lower()
+
+        # Java projects
+        if lang_lower in ['java', 'kotlin', 'scala']:
+            has_maven = 'mvn' in content
+            has_gradle = 'gradle' in content or './gradlew' in content
+
+            if not has_maven and not has_gradle:
+                issues.append("Java project missing Maven or Gradle build command")
+                score_adjustment -= 30
+            elif 'mvn' in content and '-DskipTests' not in content:
+                # Bonus for proper testing
+                score_adjustment += 5
+
+        # Python projects
+        elif lang_lower == 'python':
+            has_pip = 'pip install' in content
+            has_requirements = 'requirements.txt' in content
+
+            if has_requirements and not has_pip:
+                issues.append("requirements.txt referenced but pip install is commented out or missing")
+                score_adjustment -= 25
+            elif has_pip and '-r requirements' in content:
+                # Proper dependency installation
+                score_adjustment += 5
+
+        # Node.js/TypeScript projects
+        elif lang_lower in ['javascript', 'typescript']:
+            has_npm = 'npm install' in content or 'npm ci' in content
+            has_yarn = 'yarn install' in content
+            has_package_json = 'package.json' in content
+
+            if has_package_json and not (has_npm or has_yarn):
+                issues.append("package.json exists but npm/yarn install is missing")
+                score_adjustment -= 25
+            elif has_npm or has_yarn:
+                score_adjustment += 5
+
+        # Rust projects
+        elif lang_lower == 'rust':
+            if 'cargo build' not in content:
+                issues.append("Rust project missing 'cargo build' command")
+                score_adjustment -= 30
+            else:
+                score_adjustment += 5
+
+        # Go projects
+        elif lang_lower in ['go', 'golang']:
+            if 'go build' not in content and 'go install' not in content:
+                issues.append("Go project missing 'go build' or 'go install' command")
+                score_adjustment -= 30
+            else:
+                score_adjustment += 5
+
+        # C/C++ projects
+        elif lang_lower in ['c', 'c++', 'cpp']:
+            has_make = 'make' in content
+            has_cmake = 'cmake' in content
+
+            if not has_make and not has_cmake:
+                issues.append("C/C++ project missing make or cmake build command")
+                score_adjustment -= 25
+
+        return issues, score_adjustment
+
+
+class BuildArtifactValidator:
+    """
+    Validates that expected build artifacts were created during Docker build.
+
+    This prevents false positives where Docker build succeeds but no actual
+    compilation or dependency installation occurred.
+    """
+
+    @staticmethod
+    def validate_artifacts(image_name: str, project_language: Optional[str] = None,
+                          context_path: str = None) -> Tuple[bool, List[str]]:
+        """
+        Check if expected build artifacts exist in the Docker image.
+
+        Args:
+            image_name: Name of built Docker image
+            project_language: Detected project language
+            context_path: Path to repository (to check for package manifests)
+
+        Returns:
+            Tuple of (artifacts_valid, issues_list)
+        """
+        issues = []
+
+        if not project_language:
+            # Can't validate without knowing language
+            return True, []
+
+        lang_lower = project_language.lower()
+
+        try:
+            # Java: Check for JAR/WAR files
+            if lang_lower in ['java', 'kotlin', 'scala']:
+                # Check target/ or build/ directory for artifacts
+                result = subprocess.run(
+                    ["docker", "run", "--rm", image_name, "sh", "-c",
+                     "find target build -name '*.jar' -o -name '*.war' 2>/dev/null | head -5"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    # Found JAR/WAR files
+                    print(f"[ARTIFACT CHECK] Found Java artifacts: {result.stdout.strip()[:100]}")
+                else:
+                    # Check if pom.xml or build.gradle exists
+                    if context_path:
+                        has_pom = (Path(context_path) / "pom.xml").exists()
+                        has_gradle = (Path(context_path) / "build.gradle").exists() or \
+                                   (Path(context_path) / "build.gradle.kts").exists()
+
+                        if has_pom or has_gradle:
+                            issues.append("Java project has build files but no JAR/WAR artifacts found in image")
+                            return False, issues
+
+            # Python: Check for installed packages or successful imports
+            elif lang_lower == 'python':
+                # Check if requirements.txt exists in context
+                if context_path and (Path(context_path) / "requirements.txt").exists():
+                    # Verify pip packages were installed
+                    result = subprocess.run(
+                        ["docker", "run", "--rm", image_name, "pip", "list"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if result.returncode == 0:
+                        installed_packages = result.stdout.lower()
+                        # Should have more than just pip and setuptools
+                        package_count = len([l for l in installed_packages.split('\n') if l.strip() and not l.startswith('-')])
+                        if package_count <= 3:  # Just pip, setuptools, wheel
+                            issues.append("requirements.txt exists but no packages appear to be installed")
+                            return False, issues
+                    else:
+                        issues.append("Cannot verify pip packages in image (pip missing or failed)")
+                        return False, issues
+
+            # Node.js: Check for node_modules
+            elif lang_lower in ['javascript', 'typescript']:
+                if context_path and (Path(context_path) / "package.json").exists():
+                    result = subprocess.run(
+                        ["docker", "run", "--rm", image_name, "sh", "-c",
+                         "[ -d node_modules ] && echo 'EXISTS' || echo 'MISSING'"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if result.returncode == 0 and 'MISSING' in result.stdout:
+                        issues.append("package.json exists but node_modules directory not found in image")
+                        return False, issues
+
+            # Rust: Check for target/ directory with binaries
+            elif lang_lower == 'rust':
+                if context_path and (Path(context_path) / "Cargo.toml").exists():
+                    result = subprocess.run(
+                        ["docker", "run", "--rm", image_name, "sh", "-c",
+                         "find target -type f -perm -111 2>/dev/null | head -5"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if result.returncode == 0 and not result.stdout.strip():
+                        # Try finding ANY interesting file in release/debug in case permissions masked it
+                        result_fallback = subprocess.run(
+                             ["docker", "run", "--rm", image_name, "sh", "-c",
+                              "ls -R target | grep -E '\.(exe|a|so|rlib|dylib)' | head -5"],
+                             capture_output=True, text=True, timeout=10
+                        )
+                        if not result_fallback.stdout.strip():
+                            issues.append("Cargo.toml exists but no compiled artifacts found in target/")
+                            return False, issues
+
+            # Go: Check for compiled binary
+            elif lang_lower in ['go', 'golang']:
+                if context_path and (Path(context_path) / "go.mod").exists():
+                    result = subprocess.run(
+                        ["docker", "run", "--rm", image_name, "sh", "-c",
+                         "find . -maxdepth 2 -type f -perm -111 ! -path './.*' 2>/dev/null | head -5"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+
+                    if result.returncode == 0 and not result.stdout.strip():
+                         issues.append("go.mod exists but no compiled binary found")
+                         return False, issues
+
+        except subprocess.TimeoutExpired:
+            print("[ARTIFACT CHECK] Validation timed out")
+            return True, []  # Don't fail on timeout
+        except Exception as e:
+            print(f"[ARTIFACT CHECK] Validation error: {e}")
+            return True, []  # Don't fail on validation errors
+
+        return True, []
+
+
+class DockerBuildTester:
+    """Tests generated Dockerfiles by actually building them with Docker.
+    
+    Includes automatic detection and recovery from BuildKit cache corruption
+    that can occur with high parallel worker counts.
+    """
+
+    def __init__(self, timeout: int = 1200, platform: str = None, serialize_builds: bool = False):
         """
         Initialize Docker build tester.
 
         Args:
             timeout: Maximum time in seconds to wait for Docker build (default: 20 minutes)
-                     Increased from 10 to 20 minutes to support large C++/Java projects (guava, opencv)
             platform: Optional platform to build for (e.g., "linux/amd64", "linux/arm64")
-                     Use None for native platform. Useful for cross-platform testing.
+            serialize_builds: If True, use a global lock to prevent parallel builds.
+                             Slower but prevents cache corruption entirely.
         """
         self.timeout = timeout
         self.platform = platform
+        self.serialize_builds = serialize_builds
         self.docker_available = self._check_docker()
 
     def _check_docker(self) -> bool:
@@ -55,17 +381,72 @@ class DockerBuildTester:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
-    def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str) -> Dict:
+    def check_infrastructure_health(self) -> Tuple[bool, str]:
+        """Verify Docker infrastructure is healthy."""
+        if self._check_docker():
+            return True, "Infrastructure health check passed"
+        return False, "Docker daemon is not running or not accessible"
+
+    def prune_buildkit_cache(self) -> bool:
         """
-        Build a Dockerfile and return detailed results.
+        Prune Docker BuildKit cache to recover from corruption.
+        
+        Uses a lock to prevent multiple workers from pruning simultaneously.
+        
+        Returns:
+            True if prune succeeded, False otherwise
+        """
+        with _buildkit_prune_lock:
+            try:
+                print("[DOCKER] Pruning BuildKit cache to recover from corruption...")
+                result = subprocess.run(
+                    ["docker", "builder", "prune", "--all", "--force"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if result.returncode == 0:
+                    print("[DOCKER] BuildKit cache pruned successfully")
+                    return True
+                else:
+                    print(f"[DOCKER] Prune failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                print(f"[DOCKER] Prune exception: {e}")
+                return False
+
+    def _is_cache_corruption_error(self, error_output: str) -> bool:
+        """Check if the error is a BuildKit cache corruption error."""
+        error_lower = error_output.lower()
+        return (
+            ("parent snapshot" in error_lower and "does not exist" in error_lower) or
+            ("failed to load cache key" in error_lower and "not found" in error_lower) or
+            ("failed to get state for index" in error_lower)
+        )
+
+    def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str,
+                         retry_on_cache_error: bool = True, project_language: Optional[str] = None,
+                         validate_artifacts: bool = True, validate_quality: bool = True) -> Dict:
+        """
+        Build a Dockerfile and return detailed results with comprehensive validation.
+
+        Automatically detects BuildKit cache corruption and recovers by pruning
+        the cache and retrying the build.
+
+        Includes quality checks and artifact validation to prevent false positives.
 
         Args:
             dockerfile_path: Path to Dockerfile
             context_path: Path to build context (usually repository root)
             image_name: Name to tag the built image
+            retry_on_cache_error: If True, auto-recover from cache corruption
+            project_language: Detected project language for semantic validation
+            validate_artifacts: If True, check for expected build artifacts after successful build
+            validate_quality: If True, check Dockerfile quality before building
 
         Returns:
-            Dictionary with build results including success status, stage, error details
+            Dictionary with build results including success status, stage, error details,
+            quality score, and artifact validation results
         """
         if not self.docker_available:
             return {
@@ -87,9 +468,44 @@ class DockerBuildTester:
                 "duration_seconds": 0
             }
 
+        # Quality check before building (prevents wasting time on bad Dockerfiles)
+        if validate_quality:
+            is_valid, quality_issues, quality_score = DockerfileQualityChecker.check_dockerfile_quality(
+                dockerfile_path, project_language
+            )
+
+            if not is_valid:
+                print(f"[QUALITY CHECK] Dockerfile quality check failed (score: {quality_score}/100)")
+                print(f"[QUALITY CHECK] Issues: {quality_issues}")
+                return {
+                    "success": False,
+                    "stage": "QUALITY_CHECK",
+                    "error_type": "QUALITY_FAILED",
+                    "error_message": f"Dockerfile quality check failed. Issues: {'; '.join(quality_issues)}",
+                    "quality_score": quality_score,
+                    "quality_issues": quality_issues,
+                    "exit_code": -1,
+                    "duration_seconds": 0
+                }
+            else:
+                # print(f"[QUALITY CHECK] Passed (score: {quality_score}/100)")
+                pass
+
+        # Optionally serialize builds to prevent cache corruption
+        if self.serialize_builds:
+            with _docker_build_lock:
+                return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error,
+                                     project_language, validate_artifacts)
+        else:
+            return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error,
+                                 project_language, validate_artifacts)
+
+    def _do_build(self, dockerfile_path: str, context_path: str, image_name: str,
+                  retry_on_cache_error: bool = True, project_language: Optional[str] = None,
+                  validate_artifacts: bool = True, _is_retry: bool = False) -> Dict:
+        """Internal build method with retry logic for cache corruption and artifact validation."""
         start_time = time.time()
 
-        # Build Docker image with BuildKit enabled
         try:
             cmd = ["docker", "build"]
 
@@ -103,12 +519,13 @@ class DockerBuildTester:
                 context_path
             ])
 
-            # Enable BuildKit for modern Dockerfile features (--mount, --secret, etc.)
+            # Enable BuildKit for modern Dockerfile features
             env = os.environ.copy()
             env["DOCKER_BUILDKIT"] = "1"
 
             platform_info = f" (platform: {self.platform})" if self.platform else ""
-            print(f"[DOCKER BUILD] Running with BuildKit: {' '.join(cmd)}{platform_info}")
+            retry_info = " [RETRY after cache prune]" if _is_retry else ""
+            print(f"[DOCKER BUILD]{retry_info} Running: {' '.join(cmd)}{platform_info}")
 
             result = subprocess.run(
                 cmd,
@@ -121,22 +538,64 @@ class DockerBuildTester:
             duration = time.time() - start_time
 
             if result.returncode == 0:
-                return {
+                # Docker build succeeded - now validate artifacts
+                build_result = {
                     "success": True,
                     "stage": "BUILD_COMPLETE",
                     "error_type": None,
                     "error_message": None,
                     "exit_code": 0,
                     "duration_seconds": duration,
-                    "stdout": result.stdout[-2000:],  # Last 2000 chars
-                    "stderr": result.stderr[-2000:] if result.stderr else None
+                    "stdout": result.stdout[-2000:] if result.stdout else "",
+                    "stderr": result.stderr[-2000:] if result.stderr else None,
+                    "was_retry": _is_retry
                 }
+
+                # Validate build artifacts if enabled
+                if validate_artifacts and project_language:
+                    # print("[ARTIFACT VALIDATION] Checking for expected build artifacts...")
+                    artifacts_valid, artifact_issues = BuildArtifactValidator.validate_artifacts(
+                        image_name, project_language, context_path
+                    )
+
+                    build_result["artifacts_validated"] = True
+                    build_result["artifacts_valid"] = artifacts_valid
+                    build_result["artifact_issues"] = artifact_issues
+
+                    if not artifacts_valid:
+                        # Log warning
+                        print(f"[ARTIFACT VALIDATION] Failed: {artifact_issues}")
+                        build_result["success"] = False
+                        build_result["stage"] = "ARTIFACT_VALIDATION"
+                        build_result["error_type"] = "MISSING_ARTIFACTS"
+                        build_result["error_message"] = f"Build artifacts validation failed: {'; '.join(artifact_issues)}"
+                    else:
+                        # print("[ARTIFACT VALIDATION] Passed - expected artifacts found")
+                        pass
+                else:
+                    build_result["artifacts_validated"] = False
+
+                return build_result
             else:
                 # Parse error to determine stage
-                full_error = result.stderr or result.stdout
+                full_error = result.stderr or result.stdout or "Unknown error"
+                
+                # Check for cache corruption and auto-recover
+                if retry_on_cache_error and not _is_retry and self._is_cache_corruption_error(full_error):
+                    print("[DOCKER] Detected BuildKit cache corruption, attempting recovery...")
+                    if self.prune_buildkit_cache():
+                        # Wait a moment for Docker to stabilize
+                        time.sleep(2)
+                        # Retry the build
+                        return self._do_build(dockerfile_path, context_path, image_name,
+                                             retry_on_cache_error=False, project_language=project_language,
+                                             validate_artifacts=validate_artifacts, _is_retry=True)
+                    else:
+                        print("[DOCKER] Cache prune failed, returning original error")
+                
                 stage, failed_docker_command = self._parse_docker_error(full_error)
 
-                # Extract a concise error snippet (last error line)
+                # Extract a concise error snippet
                 error_lines = full_error.strip().split('\n')
                 error_snippet = None
                 for line in reversed(error_lines):
@@ -149,13 +608,14 @@ class DockerBuildTester:
                 return {
                     "success": False,
                     "stage": stage,
-                    "failed_command": failed_docker_command,  # The Docker step that failed
-                    "error_message": full_error,  # Full error for detailed analysis
-                    "error_snippet": error_snippet,  # Concise error line for quick review
+                    "failed_command": failed_docker_command,
+                    "error_message": full_error,
+                    "error_snippet": error_snippet,
                     "exit_code": result.returncode,
                     "duration_seconds": duration,
-                    "stdout": result.stdout[-2000:],
-                    "stderr": result.stderr[-2000:] if result.stderr else None
+                    "stdout": result.stdout[-2000:] if result.stdout else "",
+                    "stderr": result.stderr[-2000:] if result.stderr else None,
+                    "was_retry": _is_retry
                 }
 
         except subprocess.TimeoutExpired:
@@ -361,90 +821,6 @@ class DockerBuildTester:
         except Exception:
             return False
 
-    def prune_build_cache(self) -> bool:
-        """
-        Clear Docker BuildKit cache to fix storage corruption.
-
-        This is required when parallel builds + aggressive cleanup cause overlay2
-        storage driver corruption, resulting in "parent snapshot does not exist" errors.
-
-        Returns:
-            True if prune succeeded, False otherwise
-        """
-        try:
-            result = subprocess.run(
-                ["docker", "builder", "prune", "--all", "--force"],
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    def check_infrastructure_health(self) -> Tuple[bool, str]:
-        """
-        Check Docker infrastructure health before starting parallel tests.
-
-        Verifies:
-        1. Docker daemon is running
-        2. BuildKit is functional
-        3. No existing cache corruption
-
-        Returns:
-            Tuple of (healthy: bool, message: str)
-        """
-        try:
-            # Check Docker daemon
-            result = subprocess.run(
-                ["docker", "info"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                return False, "Docker daemon is not running or not accessible"
-
-            # Check BuildKit by attempting a trivial build
-            test_dockerfile = "FROM scratch\n"
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.Dockerfile', delete=False) as f:
-                f.write(test_dockerfile)
-                test_dockerfile_path = f.name
-
-            try:
-                result = subprocess.run(
-                    ["docker", "build", "-f", test_dockerfile_path, "-t", "infra-health-check:test", "."],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-
-                # Check for corruption in test build output
-                if "parent snapshot" in result.stderr.lower() and "does not exist" in result.stderr.lower():
-                    return False, "Docker BuildKit cache is corrupted - prune required"
-
-                # Clean up test image
-                subprocess.run(
-                    ["docker", "rmi", "-f", "infra-health-check:test"],
-                    capture_output=True,
-                    timeout=10
-                )
-
-                return True, "Infrastructure health check passed"
-
-            finally:
-                import os
-                try:
-                    os.unlink(test_dockerfile_path)
-                except:
-                    pass
-
-        except subprocess.TimeoutExpired:
-            return False, "Docker health check timed out"
-        except Exception as e:
-            return False, f"Health check failed: {str(e)}"
-
 
 class EmpiricalTester:
     """Main empirical testing orchestrator."""
@@ -614,7 +990,8 @@ class EmpiricalTester:
                 docker_result = self.docker_tester.build_dockerfile(
                     str(dockerfile_path),
                     repo_path,
-                    image_name
+                    image_name,
+                    project_language=detected_language  # Passed for validation
                 )
 
                 result["dockerfile_test"] = docker_result
