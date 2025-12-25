@@ -54,9 +54,14 @@ else:
     print("[WARNING] AZURE_OPENAI_ENDPOINT not found in environment!")
 
 print("[STARTUP] Loading agent and testing modules...")
-# Legacy imports removed
 
-# Support both direct execution and module execution
+# Support both direct execution (python src/parallel_empirical_test.py)
+# and module execution (python -m src.parallel_empirical_test)
+# Add src directory to Python path for direct execution
+src_dir = Path(__file__).parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
 try:
     from .agent.core import _get_host_platform
     from .agent.validation import DockerBuildTester
