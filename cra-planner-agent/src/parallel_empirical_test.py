@@ -56,12 +56,16 @@ else:
 print("[STARTUP] Loading agent and testing modules...")
 # Legacy imports removed
 
-from .agent.core import _get_host_platform
+# Support both direct execution and module execution
+try:
+    from .agent.core import _get_host_platform
+    from .agent.validation import DockerBuildTester
+except ImportError:
+    from agent.core import _get_host_platform
+    from agent.validation import DockerBuildTester
+
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-
-
-from .agent.validation import DockerBuildTester
 
 print("[STARTUP] All imports loaded successfully!")
 
