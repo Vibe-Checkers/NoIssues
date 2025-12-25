@@ -947,7 +947,8 @@ class ParallelEmpiricalTester:
                             refinement_success, tools_used = self._refine_dockerfile_with_error_feedback(
                                 agent, dockerfile_path, raw_error_file, repo_path, repo_name,
                                 iteration + 1, docker_result, previous_from_lines, previous_tools_used,
-                                consecutive_validation_errors, previous_error_stages, previous_copy_commands
+                                consecutive_validation_errors, previous_error_stages, previous_copy_commands,
+                                multistage_validation, copy_validation
                             )
                             refinement_duration = time.time() - refinement_start
                             
@@ -1283,7 +1284,9 @@ class ParallelEmpiricalTester:
         repo_path: str, repo_name: str, iteration: int, docker_result: Dict = None,
         previous_from_lines: List[str] = None, previous_tools_used: List[str] = None,
         consecutive_validation_errors: int = 0, previous_error_stages: List[str] = None,
-        previous_copy_commands: List[List[str]] = None
+        previous_copy_commands: List[List[str]] = None,
+        multistage_validation: Dict = None,
+        copy_validation: Dict = None
     ) -> Tuple[bool, List[str]]:
         """
         Refine Dockerfile based on build error feedback with enhanced analysis.
@@ -1404,6 +1407,34 @@ DO NOT REPEAT THE SAME APPROACH AGAIN. TRY A DIFFERENT SOLUTION.
             # Detect error type for targeted guidance
             error_log_lower = error_log.lower()
             
+            # Build context hints from pre-validation checks to guide refinement
+            context_hints = []
+            if multistage_validation:
+                invalid_refs = multistage_validation.get('invalid_refs') or []
+                defined_stages = multistage_validation.get('defined_stages') or []
+                if invalid_refs:
+                    context_hints.append(f"Invalid COPY --from references: {', '.join(invalid_refs)}")
+                    if defined_stages:
+                        context_hints.append(f"Defined stages: {', '.join(defined_stages)}")
+            if copy_validation:
+                missing = copy_validation.get('missing') or []
+                suggestions = copy_validation.get('suggestions') or {}
+                if missing:
+                    context_hints.append(f"MISSING COPY SOURCES: {', '.join(missing)}")
+                if suggestions:
+                    suggestion_lines = []
+                    for missing_src, alts in suggestions.items():
+                        suggestion_lines.append(f"{missing_src} -> alternatives: {', '.join(alts)}")
+                    if suggestion_lines:
+                        context_hints.append("Path suggestions:\n" + "\n".join(suggestion_lines))
+            error_snippet = docker_result.get('error_snippet', '') if docker_result else ''
+            if error_snippet:
+                # Truncate to keep prompt small
+                context_hints.append(f"Error snippet: {error_snippet[:800]}")
+            context_prefix = ""
+            if context_hints:
+                context_prefix = "KNOWN PRECHECK FINDINGS:\n" + "\n".join(f"- {h}" for h in context_hints) + "\n\n"
+
             # NEW: Detect platform/architecture incompatibility FIRST (before image pull)
             # This is when an image exists but was pulled for wrong architecture (amd64 vs arm64)
             is_platform_error = any(x in error_log_lower for x in [
@@ -2441,6 +2472,9 @@ CRITICAL RULES:
 Error: {safe_error}
 
 OUTPUT FORMAT - Your answer must be ONLY Dockerfile content starting with FROM:"""
+
+            if context_prefix:
+                refinement_query = context_prefix + refinement_query
 
             self.log(repo_name, f"Requesting enhanced Dockerfile refinement (iteration {iteration})...", to_console=False)
             

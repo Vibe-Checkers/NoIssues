@@ -6,6 +6,8 @@ Use this for complete repository analysis tasks.
 """
 
 import os
+import re
+from collections import Counter
 import sys
 import subprocess
 import shutil
@@ -642,21 +644,24 @@ def validate_dockerfile_output(output: str) -> tuple[bool, str]:
     Validate Dockerfile output for common placeholder and syntax errors.
     Returns (is_valid, error_message)
     """
-    import re
-
     issues = []
 
     # Check for placeholder syntax
-    angle_brackets = re.findall(r'<([^>]+)>', output)
+    heredoc_sanitized = '\n'.join(
+        line for line in output.splitlines()
+        if '<<' not in line  # Ignore heredoc markers like <<EOF that are valid Dockerfile syntax
+    )
+
+    angle_brackets = re.findall(r'<([^>]+)>', heredoc_sanitized)
     if angle_brackets:
         issues.append(f"Found angle bracket placeholders: {', '.join(set(angle_brackets))}")
 
-    square_brackets = re.findall(r'\[([A-Z_]+)\]', output)
+    square_brackets = re.findall(r'\[([A-Z_]+)\]', heredoc_sanitized)
     if square_brackets:
         issues.append(f"Found square bracket placeholders: {', '.join(set(square_brackets))}")
 
     # Check for shell syntax in COPY commands (not in RUN)
-    copy_lines = re.findall(r'COPY[^\n]*', output, re.IGNORECASE)
+    copy_lines = re.findall(r'COPY[^\n]*', heredoc_sanitized, re.IGNORECASE)
     for line in copy_lines:
         if '||' in line:
             issues.append(f"Found shell || operator in COPY: {line.strip()}")
@@ -681,6 +686,56 @@ def validate_dockerfile_output(output: str) -> tuple[bool, str]:
         return False, "Dockerfile validation failed:\n" + '\n'.join(f"  - {i}" for i in issues)
 
     return True, "Valid"
+
+
+def _find_missing_copy_sources(dockerfile_content: str, repo_path: str) -> list[str]:
+    """
+    Detect COPY/ADD statements that reference sources not present in the repo.
+    Returns list of human-readable missing paths to surface before build.
+    """
+    import shlex
+    missing = []
+
+    for line in dockerfile_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if not stripped.lower().startswith(('copy ', 'add ')):
+            continue
+
+        try:
+            parts = shlex.split(stripped, posix=True)
+        except Exception:
+            # If parsing fails, skip — we don't want to false-positive
+            continue
+
+        # Remove the instruction token
+        if parts:
+            parts = parts[1:]
+
+        # Drop flags like --chown
+        parts = [p for p in parts if not p.startswith('--')]
+        if len(parts) < 2:
+            continue  # Need at least one source and a destination
+
+        dest = parts[-1]
+        sources = parts[:-1]
+
+        for src in sources:
+            # Skip remote/absolute paths where existence check isn't meaningful
+            if src.startswith('http://') or src.startswith('https://') or src.startswith('/'):
+                continue
+
+            src_path = Path(repo_path) / src
+            if '*' in src or '?' in src or '[' in src:
+                # Glob pattern: treat as missing only if glob returns nothing
+                if not list(src_path.parent.glob(src_path.name)):
+                    missing.append(src)
+            else:
+                if not src_path.exists():
+                    missing.append(src)
+
+    return missing
 
 
 def detect_project_language(repo_path: str) -> str:
@@ -815,6 +870,29 @@ def _has_dockerfile(output: str) -> bool:
     if not output or not output.strip():
         return False
     return "FROM" in output.upper()
+
+
+def _has_repeated_tool_calls(intermediate_steps, threshold: int = 3) -> bool:
+    """
+    Detect thrashing where the agent repeatedly calls the same tool with the same input.
+    Returns True if any (tool, input) pair occurs at least `threshold` times.
+    """
+    if not intermediate_steps:
+        return False
+
+    counts = Counter()
+    for step in intermediate_steps:
+        try:
+            action = step[0]
+            tool_name = getattr(action, "tool", None) or getattr(action, "tool_name", None)
+            tool_input = getattr(action, "tool_input", None) or getattr(action, "input", None)
+            key = (tool_name, str(tool_input))
+            counts[key] += 1
+        except Exception:
+            # If we can't parse this step, skip it
+            continue
+
+    return any(count >= threshold for count in counts.values())
 
 
 def _validate_dockerfile(dockerfile_content: str, repo_path: str = None) -> tuple[bool, list[str]]:
@@ -1481,7 +1559,7 @@ Now generate the Final Answer with both files using REAL values for your specifi
 
                 # Special handling for final query (Query 4 - Dockerfile generation)
                 # Use smart retry with max_iterations control to prevent endless tool calls
-                max_iterations_for_final = 15  # Increased from 5 to 15 to allow proper image verification and Dockerfile generation
+                max_iterations_for_final = 15  # Allow more room for image verification while still capping thrash
                 
                 if i == len(queries):
                     # For final query, limit iterations to prevent endless searches
@@ -1590,18 +1668,21 @@ Now generate the Final Answer with both files using REAL values for your specifi
                             dockerfile_content = None
                     
                     # Smart retry logic if Dockerfile is missing
-                    max_retries = 2  # Reduced from 3 to 2 for efficiency
+                    max_retries = 2  # Keep two retries: one format reminder, one forced answer
                     for retry_attempt in range(max_retries):
                         if dockerfile_content and _has_dockerfile(dockerfile_content):
                             break
                         
                         # Detect if agent is stuck doing tool calls instead of providing answer
-                        tool_calls_in_result = len(result.get('intermediate_steps', []))
-                        is_stuck_searching = tool_calls_in_result >= max_iterations_for_final
+                        steps = result.get('intermediate_steps', [])
+                        tool_calls_in_result = len(steps)
+                        repeat_thrash = _has_repeated_tool_calls(steps, threshold=3)
+                        is_stuck_searching = tool_calls_in_result >= max_iterations_for_final or repeat_thrash
                         
                         if retry_attempt == 0:
                             if is_stuck_searching:
-                                print(f"\n[WARNING] Agent hit iteration limit ({tool_calls_in_result} tool calls) without providing Dockerfile.")
+                                reason = "iteration cap" if tool_calls_in_result >= max_iterations_for_final else "repeated tool calls"
+                                print(f"\n[WARNING] Agent is stuck ({reason}: {tool_calls_in_result} calls). Forcing direct answer...")
                                 print(f"[INFO] Forcing direct answer with NO tool calls allowed...")
                             else:
                                 print(f"\n[WARNING] Output doesn't contain valid Dockerfile. Retrying with strict format prompt...")
@@ -1706,7 +1787,6 @@ Provide ONLY the Final Answer in this format. No tool calls."""
                         if "```dockerfile" in output.lower() or "```docker" in output.lower():
                             try:
                                 # Find dockerfile code block
-                                import re
                                 pattern = r'```(?:dockerfile|docker)\s*\n(.*?)```'
                                 match = re.search(pattern, output, re.DOTALL | re.IGNORECASE)
                                 if match:
@@ -1783,6 +1863,14 @@ Provide ONLY the Final Answer in this format. No tool calls."""
                         # CRITICAL: Validate Dockerfile quality BEFORE proceeding to Docker build
                         # This catches broken Dockerfiles early (saves 100+ seconds per iteration)
                         is_valid, validation_errors = _validate_dockerfile(dockerfile_content, repo_path)
+
+                        # Early check for missing COPY/ADD sources to avoid FILE_COPY_MISSING cycles
+                        missing_copy = _find_missing_copy_sources(dockerfile_content, repo_path) if repo_path else []
+                        if missing_copy:
+                            validation_errors.append(
+                                f"COPY/ADD sources not found in repo: {', '.join(sorted(set(missing_copy)))[:300]}"
+                            )
+                            is_valid = False
 
                         if not is_valid:
                             print(f"\n[VALIDATION FAILED] Dockerfile has {len(validation_errors)} quality issues:")
