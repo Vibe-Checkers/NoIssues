@@ -1057,64 +1057,64 @@ class ParallelEmpiricalTester:
             print(f"[WARNING] Could not validate multi-stage references: {e}")
             return {'invalid_refs': [], 'defined_stages': []}
 
-    def _detect_fake_binaries(self, dockerfile_path: Path) -> Dict[str, Any]:
-        """
-        Detect if Dockerfile creates fake/dummy executables or empty files to game smoke tests.
+    # def _detect_fake_binaries(self, dockerfile_path: Path) -> Dict[str, any]:
+    #     """
+    #     Detect if Dockerfile creates fake/dummy executables or empty files to game smoke tests.
 
-        Args:
-            dockerfile_path: Path to Dockerfile
+    #     Args:
+    #         dockerfile_path: Path to Dockerfile
 
-        Returns:
-            Dict with 'violations' (list of suspicious patterns found) and 'is_suspicious' (bool)
-        """
-        try:
-            with open(dockerfile_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+    #     Returns:
+    #         Dict with 'violations' (list of suspicious patterns found) and 'is_suspicious' (bool)
+    #     """
+    #     try:
+    #         with open(dockerfile_path, 'r', encoding='utf-8') as f:
+    #             content = f.read()
 
-            violations = []
+    #         violations = []
 
-            # Pattern 1: Creating executables with printf/echo (fake version scripts)
-            if re.search(r'(printf|echo).*["\'].*version.*["\'].*>.*/(bin|sbin)/', content, re.IGNORECASE):
-                violations.append("Creating fake executable with hardcoded version output")
+    #         # Pattern 1: Creating executables with printf/echo (fake version scripts)
+    #         if re.search(r'(printf|echo).*["\'].*version.*["\'].*>.*/(bin|sbin)/', content, re.IGNORECASE):
+    #             violations.append("Creating fake executable with hardcoded version output")
 
-            # Pattern 2: Using 'touch' to create files in bin, lib, or include directories
-            touch_patterns = [
-                (r'touch\s+.*\.(so|a|dylib|dll)', "Creating empty library files"),
-                (r'touch\s+.*/bin/', "Creating empty executables in bin directory"),
-                (r'touch\s+.*/sbin/', "Creating empty executables in sbin directory"),
-            ]
-            for pattern, desc in touch_patterns:
-                if re.search(pattern, content, re.IGNORECASE):
-                    violations.append(desc)
+    #         # Pattern 2: Using 'touch' to create files in bin, lib, or include directories
+    #         touch_patterns = [
+    #             (r'touch\s+.*\.(so|a|dylib|dll)', "Creating empty library files"),
+    #             (r'touch\s+.*/bin/', "Creating empty executables in bin directory"),
+    #             (r'touch\s+.*/sbin/', "Creating empty executables in sbin directory"),
+    #         ]
+    #         for pattern, desc in touch_patterns:
+    #             if re.search(pattern, content, re.IGNORECASE):
+    #                 violations.append(desc)
 
-            # Pattern 3: Comments explicitly mentioning gaming tests
-            suspicious_comments = [
-                (r'#.*fake.*(?:binary|executable|lib)', "Comment mentions 'fake' binary/lib"),
-                (r'#.*dummy.*(?:binary|executable|lib)', "Comment mentions 'dummy' binary/lib"),
-                (r'#.*satisfy.*smoke.*test', "Comment about satisfying smoke tests"),
-                (r'#.*to\s+pass.*test', "Comment about passing tests"),
-            ]
-            for pattern, desc in suspicious_comments:
-                if re.search(pattern, content, re.IGNORECASE):
-                    violations.append(desc)
+    #         # Pattern 3: Comments explicitly mentioning gaming tests
+    #         suspicious_comments = [
+    #             (r'#.*fake.*(?:binary|executable|lib)', "Comment mentions 'fake' binary/lib"),
+    #             (r'#.*dummy.*(?:binary|executable|lib)', "Comment mentions 'dummy' binary/lib"),
+    #             (r'#.*satisfy.*smoke.*test', "Comment about satisfying smoke tests"),
+    #             (r'#.*to\s+pass.*test', "Comment about passing tests"),
+    #         ]
+    #         for pattern, desc in suspicious_comments:
+    #             if re.search(pattern, content, re.IGNORECASE):
+    #                 violations.append(desc)
 
-            # Pattern 4: Creating symbolic links to /dev/null or non-existent files
-            if re.search(r'ln\s+-s\s+/dev/null', content):
-                violations.append("Creating symlink to /dev/null")
+    #         # Pattern 4: Creating symbolic links to /dev/null or non-existent files
+    #         if re.search(r'ln\s+-s\s+/dev/null', content):
+    #             violations.append("Creating symlink to /dev/null")
 
-            # Pattern 5: RUN commands that create files in bin/ without actual compilation
-            # (printf, echo, cat <<EOF to bin paths)
-            if re.search(r'(cat|printf|echo).*>>?\s*(/usr/local/bin|/usr/bin|/bin)/', content):
-                violations.append("Writing text directly to bin directory (not from build)")
+    #         # Pattern 5: RUN commands that create files in bin/ without actual compilation
+    #         # (printf, echo, cat <<EOF to bin paths)
+    #         if re.search(r'(cat|printf|echo).*>>?\s*(/usr/local/bin|/usr/bin|/bin)/', content):
+    #             violations.append("Writing text directly to bin directory (not from build)")
 
-            return {
-                'violations': violations,
-                'is_suspicious': len(violations) > 0
-            }
+    #         return {
+    #             'violations': violations,
+    #             'is_suspicious': len(violations) > 0
+    #         }
 
-        except Exception as e:
-            print(f"[WARNING] Could not detect fake binaries: {e}")
-            return {'violations': [], 'is_suspicious': False}
+    #     except Exception as e:
+    #         print(f"[WARNING] Could not detect fake binaries: {e}")
+    #         return {'violations': [], 'is_suspicious': False}
 
     def _validate_copy_sources(self, dockerfile_path: Path, repo_path: str) -> Dict[str, list]:
         """
