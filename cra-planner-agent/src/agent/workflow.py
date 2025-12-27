@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent
+from langchain_core.messages import SystemMessage, HumanMessage
 from .preparation import build_initial_context
 # from .tools import _set_report_directory
 
@@ -15,15 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 
-def extract_technical_lesson(intermediate_steps: List[Any]) -> Optional[str]:
+def extract_technical_lesson(intermediate_steps: List[Any], llm: Any) -> Optional[str]:
     """
-    Scan agent history to extract technical insights from VerifyBuild or SearchDockerError.
+    Scan agent history to extract technical insights and uses LLM to summarize them.
     
     Returns:
         A concise string explaining the technical root cause/fix, or None.
     """
     if not intermediate_steps:
         return None
+
+    raw_context = None
 
     # Iterate backwards to find the most recent relevant tool output
     for action, observation in reversed(intermediate_steps):
@@ -33,42 +36,48 @@ def extract_technical_lesson(intermediate_steps: List[Any]) -> Optional[str]:
         if "SearchDockerError" in tool_name:
             if "=== AI ANALYSIS ===" in str(observation):
                 # meaningful analysis found
-                # Extract the analysis part roughly
                 try:
                     analysis_part = str(observation).split("=== AI ANALYSIS ===")[1].split("=== SEARCH SOURCES")[0].strip()
-                    # Summarize or truncate if too long
-                    if len(analysis_part) > 500:
-                        analysis_part = analysis_part[:500] + "..."
-                    return f"Technical Root Cause from SearchDockerError: {analysis_part}"
+                    raw_context = f"SearchDockerError Analysis: {analysis_part}"
+                    break
                 except Exception:
                     pass
         
         # 2. Medium Priority: VerifyBuild (contains raw error info)
-        if "VerifyBuild" in tool_name:
-            # Try to parse JSON
+        if "VerifyBuild" in tool_name and not raw_context:
             try:
                 obs_data = json.loads(str(observation))
                 if obs_data.get("status") == "failed":
                     error_msg = obs_data.get("error_snippet", "")
                     analysis = obs_data.get("error_analysis", {})
-                    
-                    parts = []
-                    if error_msg:
-                        parts.append(f"Error: {error_msg}")
-                    
-                    if isinstance(analysis, dict):
-                        if analysis.get("cause"):
-                            parts.append(f"Cause: {analysis.get('cause')}")
-                        if analysis.get("suggested_fix"):
-                            parts.append(f"Fix: {analysis.get('suggested_fix')}")
-                    
-                    lesson = "; ".join(parts)
-                    if lesson:
-                        return f"Previous Build Failure: {lesson}"
+                    raw_context = f"VerifyBuild Failed. Error: {error_msg}. Analysis: {analysis}"
+                    break
             except Exception:
                 pass
-                
-    return None
+
+    if not raw_context:
+        return None
+
+    # Use LLM to summarize the raw context into a concise lesson
+    try:
+        summary_prompt = f"""
+        Analyze the following error context from a failed Docker build attempt.
+        Summarize it into a SINGLE, CONCISE sentence that explains specific fix.
+        Format: "Previous failure caused by [Cause]. Fix: [Action]."
+        
+        CONTEXT:
+        {raw_context[:4000]}
+        """
+        
+        response = llm.invoke([
+            SystemMessage(content="You are a technical summarizer. Be extremely concise. Focus on the FIX."),
+            HumanMessage(content=summary_prompt)
+        ])
+        
+        return response.content.strip()
+    except Exception as e:
+        logger.warning(f"LLM summarization of lesson failed: {e}")
+        return raw_context[:300] + "..." # Fallback to raw truncation
 
 def run_learner_agent(
     repo_path: str,
@@ -262,7 +271,7 @@ Begin!
 
 
             # NEW: Extract technical insight from tool outputs
-            tech_lesson = extract_technical_lesson(intermediate_steps)
+            tech_lesson = extract_technical_lesson(intermediate_steps, base_llm)
             if tech_lesson:
                 lessons_learned.append(f"TECHNICAL INSIGHT: {tech_lesson}")
                 logger.info(f"Extracted technical lesson: {tech_lesson[:100]}...")
