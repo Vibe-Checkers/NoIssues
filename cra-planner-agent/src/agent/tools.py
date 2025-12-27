@@ -387,7 +387,9 @@ class SearchWebInput(BaseModel):
 
 class SearchDockerErrorInput(BaseModel):
     model_config = ConfigDict(extra="allow")
-    error_keywords: str = Field(default="")
+    error_keywords: str = Field(default="", description="Short error keywords for web search")
+    full_error_log: str = Field(default="", description="Complete Docker build error output for detailed analysis")
+    dockerfile_content: str = Field(default="", description="Full Dockerfile content for context")
 
 def _parse_input(input_data: Any, schema: Type[BaseModel], key: str) -> BaseModel:
     """Parse and validate input data against a Pydantic schema.
@@ -646,8 +648,8 @@ def search_docker_error_structured(input_data: Any) -> str:
 
     This enhanced version:
     1. Searches the web for relevant solutions
-    2. Uses LLM to analyze search results + error
-    3. Returns a specific, actionable fix suggestion
+    2. Uses LLM to analyze full error log + Dockerfile content + search results
+    3. Returns a specific, actionable fix suggestion with precise line numbers
     """
     try:
         from langchain_openai import AzureChatOpenAI
@@ -674,22 +676,40 @@ def search_docker_error_structured(input_data: Any) -> str:
         )
 
         system_prompt = """You are a Docker expert debugging build errors.
-Analyze the error and search results, then provide a SPECIFIC, ACTIONABLE fix.
+Analyze the complete error log, Dockerfile content, and search results to provide a SPECIFIC, ACTIONABLE fix.
+
+When you have the Dockerfile, reference exact line numbers in your fix.
+Consider the full error trace to identify cascading failures and root causes.
 
 CRITICAL: You MUST follow this exact format:
 
-**Root Cause:** [1-2 sentences explaining what went wrong]
-**Fix:** [Concrete Dockerfile changes or commands needed]
+**Root Cause:** [1-2 sentences explaining what went wrong and which Dockerfile line/step caused it]
+**Fix:** [Concrete Dockerfile changes needed with line numbers if available]
 **Example:** [Show the exact Dockerfile code to add/change]
 
 Be concise and practical. Focus on the most common solution first."""
 
-        user_prompt = f"""ERROR KEYWORDS: {data.error_keywords}
+        # Build comprehensive user prompt with all available context
+        user_prompt_parts = [f"ERROR KEYWORDS: {data.error_keywords}"]
 
-SEARCH RESULTS FROM WEB:
-{search_results[:3000]}
+        # Add full error log if provided
+        if data.full_error_log and data.full_error_log.strip():
+            # Truncate if extremely long (keep first and last portions)
+            error_log = data.full_error_log
+            if len(error_log) > 15000:
+                error_log = error_log[:7500] + "\n\n... [middle truncated for brevity] ...\n\n" + error_log[-7500:]
+            user_prompt_parts.append(f"\nFULL ERROR LOG:\n{error_log}")
 
-Analyze this Docker build error and provide a fix in the required format."""
+        # Add Dockerfile content if provided
+        if data.dockerfile_content and data.dockerfile_content.strip():
+            user_prompt_parts.append(f"\nDOCKERFILE CONTENT:\n{data.dockerfile_content}")
+
+        # Add search results
+        user_prompt_parts.append(f"\nSEARCH RESULTS FROM WEB:\n{search_results[:3000]}")
+
+        user_prompt_parts.append("\nAnalyze this Docker build error and provide a fix in the required format.")
+
+        user_prompt = "\n".join(user_prompt_parts)
 
         try:
             response = llm.invoke([
@@ -795,10 +815,13 @@ def create_structured_tools(repo_root: str) -> list:
 
             WHEN TO USE: After VerifyBuild fails with an error.
 
-            INPUT: Pass the ERROR MESSAGE or key error keywords from the build failure.
+            INPUT: Provide as much context as possible:
+            - error_keywords (REQUIRED): Key error message for web search (e.g., "unable to locate package")
+            - full_error_log (RECOMMENDED): Complete Docker build output for detailed analysis
+            - dockerfile_content (RECOMMENDED): Full Dockerfile content for precise line-level fixes
 
             OUTPUT: You will receive:
-            - AI ANALYSIS with Root Cause, Fix, and Example code
+            - AI ANALYSIS with Root Cause, Fix, and Example code (with line numbers if Dockerfile provided)
             - SEARCH SOURCES with relevant documentation links
 
             WHAT TO DO NEXT:
@@ -806,8 +829,16 @@ def create_structured_tools(repo_root: str) -> list:
             2. Apply the suggested fix to your Dockerfile
             3. Run VerifyBuild again to test the fix
 
-            Example: If build fails with "E: Unable to locate package build-essential",
-            call SearchDockerError with error_keywords="unable to locate package build-essential"
+            BEST PRACTICE EXAMPLE:
+            SearchDockerError(
+                error_keywords="unable to
+                 locate package build-essential",
+                full_error_log="<entire output from docker build>",
+                dockerfile_content="<read from ReadLocalFile>"
+            )
+
+            MINIMAL EXAMPLE (less accurate):
+            SearchDockerError(error_keywords="unable to locate package build-essential")
             """,
             args_schema=SearchDockerErrorInput
         ),
