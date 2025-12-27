@@ -605,9 +605,10 @@ class ParallelEmpiricalTester:
             from agent.workflow import run_learner_agent
             from agent.tools import FormattedOutputHandler
 
-            # Setup per-repo logging
-            transcript_file = self.transcripts_dir / f"{slug}.log"
-            structured_log_file = self.structured_logs_dir / f"{slug}.json"
+            # Setup per-repo logging with timestamp
+            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            transcript_file = self.transcripts_dir / f"{slug}_{ts_str}.log"
+            structured_log_file = self.structured_logs_dir / f"{slug}_{ts_str}.json"
 
             def validation_callback(path):
                 """Callback for agent to verify its own work via Docker build."""
