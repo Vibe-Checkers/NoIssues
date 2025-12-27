@@ -14,6 +14,62 @@ from .preparation import build_initial_context
 logger = logging.getLogger(__name__)
 
 
+
+def extract_technical_lesson(intermediate_steps: List[Any]) -> Optional[str]:
+    """
+    Scan agent history to extract technical insights from VerifyBuild or SearchDockerError.
+    
+    Returns:
+        A concise string explaining the technical root cause/fix, or None.
+    """
+    if not intermediate_steps:
+        return None
+
+    # Iterate backwards to find the most recent relevant tool output
+    for action, observation in reversed(intermediate_steps):
+        tool_name = action.tool if hasattr(action, 'tool') else ""
+        
+        # 1. High Priority: SearchDockerError (contains AI analysis)
+        if "SearchDockerError" in tool_name:
+            if "=== AI ANALYSIS ===" in str(observation):
+                # meaningful analysis found
+                # Extract the analysis part roughly
+                try:
+                    analysis_part = str(observation).split("=== AI ANALYSIS ===")[1].split("=== SEARCH SOURCES")[0].strip()
+                    # Summarize or truncate if too long
+                    if len(analysis_part) > 500:
+                        analysis_part = analysis_part[:500] + "..."
+                    return f"Technical Root Cause from SearchDockerError: {analysis_part}"
+                except Exception:
+                    pass
+        
+        # 2. Medium Priority: VerifyBuild (contains raw error info)
+        if "VerifyBuild" in tool_name:
+            # Try to parse JSON
+            try:
+                obs_data = json.loads(str(observation))
+                if obs_data.get("status") == "failed":
+                    error_msg = obs_data.get("error_snippet", "")
+                    analysis = obs_data.get("error_analysis", {})
+                    
+                    parts = []
+                    if error_msg:
+                        parts.append(f"Error: {error_msg}")
+                    
+                    if isinstance(analysis, dict):
+                        if analysis.get("cause"):
+                            parts.append(f"Cause: {analysis.get('cause')}")
+                        if analysis.get("suggested_fix"):
+                            parts.append(f"Fix: {analysis.get('suggested_fix')}")
+                    
+                    lesson = "; ".join(parts)
+                    if lesson:
+                        return f"Previous Build Failure: {lesson}"
+            except Exception:
+                pass
+                
+    return None
+
 def run_learner_agent(
     repo_path: str,
     repo_name: str,
@@ -202,6 +258,14 @@ Begin!
                  logger.warning(lesson)
                  lessons_learned.append(lesson)
                  continue
+
+
+
+            # NEW: Extract technical insight from tool outputs
+            tech_lesson = extract_technical_lesson(intermediate_steps)
+            if tech_lesson:
+                lessons_learned.append(f"TECHNICAL INSIGHT: {tech_lesson}")
+                logger.info(f"Extracted technical lesson: {tech_lesson[:100]}...")
 
             if not last_verify_success:
                 lesson = f"Attempt {attempt}: VerifyBuild failed or was not clean success. You must keep fixing until status='success'."
