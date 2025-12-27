@@ -539,7 +539,7 @@ class ParallelEmpiricalTester:
                     # Provide detailed feedback for the refinement loop
                     error_snippet = build_res.get('error_snippet', 'Unknown error')
                     error_stage = build_res.get('stage', 'UNKNOWN')
-                    full_error = build_res.get('error_message', '')[:500]  # Truncate for prompt
+                    full_error = build_res.get('error_message', '')
                     return {
                         "success": False,
                         "error": f"Stage: {error_stage}\nError: {error_snippet}\nDetails: {full_error}{extra_feedback}"
@@ -628,7 +628,7 @@ class ParallelEmpiricalTester:
                              self.docker_tester.cleanup_image(verify_image)
                              return json.dumps({
                                 "status": "success",
-                                "message": f"✓ Build AND Smoke Test passed!\nTest Command: '{test_cmd}'\nOutput: {run_result.get('output', '')[:200]}...",
+                                "message": f"✓ Build AND Smoke Test passed!\nTest Command: '{test_cmd}'\nOutput: {run_result.get('output', '')}...",
                                 "functional_check": "passed",
                                 "auxiliary_logs": aux_logs
                             }, indent=2)
@@ -672,8 +672,8 @@ class ParallelEmpiricalTester:
                     error_msg = result.get('error_message', '')
                     error_lines = error_msg.split('\n') if error_msg else []
 
-                    # Get last 40 lines only (tail)
-                    tail_lines = '\n'.join(error_lines[-40:]) if len(error_lines) > 40 else error_msg
+                    # Return full error log
+                    tail_lines = error_msg
 
                     # LLM-Based Error Analysis
                     self.log(repo_name, "[VerifyBuild] Running LLM error analysis", to_console=False)

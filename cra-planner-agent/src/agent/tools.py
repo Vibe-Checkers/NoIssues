@@ -137,14 +137,16 @@ class FormattedOutputHandler(BaseCallbackHandler):
         })
 
     def on_tool_end(self, output, **kwargs):
-        # Determine output length and whether to truncate
+        # Determine output length
         output_str = str(output)
-        if len(output_str) > 1000:
-            output_preview = output_str[:1000] + f"\n... [truncated, total {len(output_str)} chars]"
-        else:
-            output_preview = output_str
-
-        msg = f"[OBSERVATION]\n{output_preview}\n{'─'*80}\n"
+        
+        # We always want full output in the log file and transcript
+        # For console, we might want to truncate, but for now we'll follow the request 
+        # to "write the complete output of the tools to transcripts" which usually implies 
+        # the log file. The _write_log method writes to both. 
+        # To be safe and meet the user requirement of "complete output", I will remove truncation entirely.
+        
+        msg = f"[OBSERVATION]\n{output_str}\n{'─'*80}\n"
         self._write_log(msg)
 
         # Store in transcript
