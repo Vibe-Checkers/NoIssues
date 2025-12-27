@@ -390,6 +390,7 @@ class SearchDockerErrorInput(BaseModel):
     error_keywords: str = Field(default="", description="Short error keywords for web search")
     full_error_log: str = Field(default="", description="Complete Docker build error output for detailed analysis")
     dockerfile_content: str = Field(default="", description="Full Dockerfile content for context")
+    agent_context: str = Field(default="", description="Additional context, observations, or specific questions from the agent about the error")
 
 def _parse_input(input_data: Any, schema: Type[BaseModel], key: str) -> BaseModel:
     """Parse and validate input data against a Pydantic schema.
@@ -706,6 +707,10 @@ Be concise and practical. Focus on the most common solution first."""
 
         # Add search results
         user_prompt_parts.append(f"\nSEARCH RESULTS FROM WEB:\n{search_results[:3000]}")
+
+        # Add agent context if provided
+        if hasattr(data, 'agent_context') and data.agent_context and data.agent_context.strip():
+            user_prompt_parts.append(f"\nADDITIONAL AGENT CONTEXT/QUESTIONS:\n{data.agent_context}")
 
         user_prompt_parts.append("\nAnalyze this Docker build error and provide a fix in the required format.")
 

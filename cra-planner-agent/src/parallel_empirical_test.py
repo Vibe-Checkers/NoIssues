@@ -765,7 +765,7 @@ class ParallelEmpiricalTester:
                                     "confidence": suitability.get("confidence", "medium"),
                                     "concerns": suitability.get("concerns", [])
                                 },
-                                "auxiliary_logs": aux_logs
+                                # "auxiliary_logs": aux_logs # Removed to save context
                             }, indent=2)
                         else:
                             self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
@@ -795,7 +795,7 @@ class ParallelEmpiricalTester:
                                 },
                                 "error_output": run_result.get("output", ""),
                                 "next_steps": "The container builds but doesn't run correctly. Check your ENTRYPOINT, CMD, runtime dependencies, and ensure the application is actually installed.",
-                                "auxiliary_logs": aux_logs
+                                # "auxiliary_logs": aux_logs # Removed to save context
                             }, indent=2)
 
                     except Exception as e:
@@ -831,7 +831,7 @@ class ParallelEmpiricalTester:
                                 "concerns": suitability.get("concerns", ["Smoke test infrastructure error"])
                             },
                             "next_steps": "The Dockerfile built but we couldn't verify it works. Ensure your container has a valid ENTRYPOINT/CMD and all runtime dependencies are installed.",
-                            "auxiliary_logs": aux_logs
+                            # "auxiliary_logs": aux_logs # Removed to save context
                         }, indent=2)
 
                 else:
@@ -847,13 +847,13 @@ class ParallelEmpiricalTester:
                     error_msg = result.get('error_message', '')
                     error_lines = error_msg.split('\n') if error_msg else []
 
-                    # Return full error log
+                    # Return truncated error log for context to save tokens
                     tail_lines = error_msg
 
                     # LLM-Based Error Analysis
                     self.log(repo_name, "[VerifyBuild] Running LLM error analysis", to_console=False)
                     analyzer = LLMErrorAnalyzer()
-                    analysis, analysis_log = analyzer.analyze_error(tail_lines, result.get('failed_command', ''))
+                    analysis, analysis_log = analyzer.analyze_error(result.get('error_message', ''), result.get('failed_command', ''))
                     aux_logs.append(analysis_log)
                     self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
 
@@ -872,8 +872,8 @@ class ParallelEmpiricalTester:
                         "error_snippet": result.get('error_snippet', 'See tail_lines'),
                         "error_analysis": error_features, # Replaced static ErrorPatternDetector with rich analysis
                         "tail_lines": tail_lines,
-                        "search_keywords": analysis.get("search_keywords", f"docker build error {result.get('failed_command', '')}"),
-                        "auxiliary_logs": aux_logs
+                        "search_keywords": analysis.get("search_keywords", f"docker build error {result.get('failed_command', '')}")
+                        # Removed auxiliary_logs to save context
                     }
 
                     return json.dumps(compact_error, indent=2)

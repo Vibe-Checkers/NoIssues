@@ -173,6 +173,8 @@ TOOL INPUT CONTRACT (MUST FOLLOW):
   Action Input: {{"directory":"."}}
 - VerifyBuild:
   Action Input: "" (empty string)
+- SearchDockerError:
+  Action Input: {{"error_keywords":"<error>", "agent_context":"<what you tried/observed>"}}
 
 IMPORTANT:
 - Action Input must be exactly a JSON object for that tool (or "" for VerifyBuild). No prose.
@@ -196,10 +198,10 @@ PHASE 3 - VERIFY (MANDATORY):
   
 PHASE 4 - IF BUILD FAILS (MANDATORY LOOP):
   7. Read the error message carefully
-  8. SearchDockerError with descriptive keywords from the error
-  9. Fix the Dockerfile based on what you learned
-  10. VerifyBuild again
-  11. Repeat steps 7-10 until VerifyBuild returns SUCCESS
+  8. IMMEDIATELY use SearchDockerError(error_keywords="...", agent_context="...") to get a fix
+  9. Do NOT guess or try to fix it yourself without searching first
+  10. Apply the fix from the AI analysis
+  11. VerifyBuild again
 
 ═══════════════════════════════════════════════════════════════════════════════
 ABSOLUTE RULES:
@@ -207,7 +209,7 @@ ABSOLUTE RULES:
 
 1. You MUST call VerifyBuild at least once before your Final Answer
 2. You CANNOT give a Final Answer if VerifyBuild has not returned "SUCCESS"
-3. When VerifyBuild fails, you MUST use SearchDockerError to find solutions
+3. When VerifyBuild fails, you MUST use SearchDockerError IMMEDIATELY. Do not think "I can fix this" - you must get external validation first.
 4. You MUST fix the Dockerfile and VerifyBuild again after researching
 5. Your Final Answer can ONLY report success if the last VerifyBuild passed
 

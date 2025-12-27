@@ -105,8 +105,9 @@ OBJECTIVES:
 6. You MUST get a SUCCESS result from VerifyBuild before finishing
 
 ERROR HANDLING WORKFLOW (When VerifyBuild fails):
-1. Call SearchDockerError with the error message from VerifyBuild
-   Example: SearchDockerError(error_keywords="unable to locate package build-essential")
+1. STOP. Do not edit the file yet.
+2. Call SearchDockerError with the error message and your context.
+   Example: SearchDockerError(error_keywords="...", agent_context="...")
 2. Read the AI ANALYSIS section to understand:
    - Root Cause (what went wrong)
    - Fix (specific changes needed)
