@@ -156,7 +156,7 @@ class LLMFunctionalVerifier:
         Ask LLM to suggest a safe, non-interactive smoke test command.
         Returns: (command_string, log_data)
         """
-        prompt = f"""You are a QA Engineer. Suggest a SINGLE, ONE-LINE shell command to verify that this application container is working correctly.
+        prompt = f"""You are a QA Engineer. Suggest a SINGLE, ONE-LINE shell command to verify that this application container is ACTUALLY FUNCTIONAL.
 
 CONTEXT: This command will run INSIDE the Docker container using "docker run --rm <image> sh -c <YOUR_COMMAND>".
 Your job is to provide the command that runs INSIDE the container, NOT to run Docker itself.
@@ -165,27 +165,35 @@ REPO NAME: {repo_name}
 DOCKERFILE:
 {dockerfile_content[:1500]}...
 
-Rules:
-1. NEVER suggest "docker run" or any Docker commands - those run on the HOST, not inside the container
-2. Command must be non-interactive (no user input)
-3. Command must return exit code 0 on success
-4. Prefer version checks or help commands: 'python --version', 'flask --version', 'npm --version', 'node --version'
-5. For applications, try: 'python -c "import myapp; print(myapp.__version__)"'
-6. For web frameworks, try: 'flask --help' or 'python app.py --help'
-7. If it's a CLI tool, try: '<toolname> --version' or '<toolname> --help'
-8. DO NOT try to curl localhost or start servers
-9. Return ONLY the command string, no markdown, no quotes, no explanations
+CRITICAL RULES - THE COMMAND MUST ACTUALLY EXECUTE CODE:
+1. NEVER suggest "docker run" or any Docker commands - those run on the HOST, not inside the container!
+2. NEVER use file existence checks (ls, test -f, [ -e ], stat, find) - these can be faked with 'touch' or empty files
+3. MUST actually EXECUTE the application, binary, or import the library to verify it works
+4. For Python apps/libraries: Use 'python -c "import mypackage; print(mypackage.__version__)"' NOT 'python --version'
+5. For Java: Run 'java -jar /path/to/app.jar --version' or test actual class loading
+6. For C/C++ binaries: Execute the actual compiled binary with --version or --help (NOT just check if file exists)
+7. For Node.js: Use 'node -e "require(\"mypackage\")"' NOT just 'node --version'
+8. For compiled libraries (.so, .a): Try to load them with ldd or language-specific import
+9. Command must be non-interactive (no user input)
+10. Command must return exit code 0 on success
+11. DO NOT try to curl localhost or start servers (container may not have network/curl)
+12. Return ONLY the command string, no markdown, no quotes, no explanations
 
-GOOD EXAMPLES:
-- flask --version
-- python -c "import requests; print(requests.__version__)"
-- node --version
-- java -version
+GOOD EXAMPLES (Actually test functionality):
+- python -c "import flask; print(flask.__version__)"
+- node -e "const express = require('express'); console.log(express.version || 'ok')"
+- java -cp /app/lib/* com.example.Main --version
+- /usr/local/bin/myapp --version  (executes the actual binary)
+- ruby -e "require 'rails'; puts Rails::VERSION::STRING"
 
 BAD EXAMPLES (DO NOT DO THIS):
-- docker run --rm myapp (this runs on host, not in container!)
+- ls /usr/local/lib/libwebview.so* (can be faked with 'touch /usr/local/lib/libwebview.so')
+- test -f /usr/bin/myapp (can be faked with 'touch /usr/bin/myapp')
+- [ -e /usr/local/bin/tool ] && echo ok (can be faked with empty file)
+- python --version (only tests Python is installed, not the app)
+- java -version (only tests Java is installed, not the app)
+- docker run --rm myapp (this runs on HOST, not in container - will fail!)
 - curl http://localhost:8080 (container may not have curl or network)
-- python -m pytest (requires test files which may be excluded)
 """
         log_entry = {
             "component": "LLMFunctionalVerifier",
@@ -333,6 +341,99 @@ Analyze this error and determine the fix."""
                 "missing_packages": [],
                 "suggested_fix": "Please analyze the error log manually and try to search for the specific error message.",
                 "search_keywords": f"docker build error {failed_command}"
+            }, log_entry
+
+
+class LLMDockerfileValidator:
+    """
+    Uses LLM to evaluate whether a Dockerfile is suitable for the application.
+    Provides explanation of what was verified and whether the Dockerfile is appropriate.
+    """
+    def __init__(self):
+        self.llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+        )
+
+    def validate_dockerfile_suitability(self, dockerfile_content: str, repo_name: str,
+                                       build_success: bool, smoke_test_passed: bool) -> Tuple[Dict, Dict]:
+        """
+        Evaluate if the Dockerfile is actually suitable for the application.
+
+        Args:
+            dockerfile_content: Full Dockerfile content
+            repo_name: Repository name
+            build_success: Whether Docker build succeeded
+            smoke_test_passed: Whether smoke test passed
+
+        Returns:
+            (validation_dict, log_data)
+        """
+        prompt = f"""You are a Docker expert evaluating whether a Dockerfile is suitable for building a real application.
+
+REPOSITORY: {repo_name}
+BUILD STATUS: {'SUCCESS' if build_success else 'FAILED'}
+SMOKE TEST: {'PASSED' if smoke_test_passed else 'FAILED'}
+
+DOCKERFILE:
+{dockerfile_content}
+
+Your task is to evaluate:
+1. Does this Dockerfile actually build the application from source code?
+2. Are the dependencies appropriate for this type of project?
+3. Does it follow Docker best practices (multi-stage builds, non-root user, etc.)?
+4. Is this a legitimate production-worthy Dockerfile or just a minimal container?
+
+Return ONLY valid JSON in this format:
+{{
+    "is_suitable": true/false,
+    "explanation": "2-3 sentences explaining why this Dockerfile is or isn't suitable for the actual application. Mention what was built, what dependencies were installed, and whether it's production-ready.",
+    "confidence": "high/medium/low",
+    "concerns": ["list", "of", "any", "concerns", "or", "improvements", "needed"]
+}}
+
+Be critical but fair. A Dockerfile is suitable if it:
+- Actually compiles/builds the application (not just installs language runtime)
+- Includes necessary build and runtime dependencies
+- Follows reasonable Docker practices
+- Creates a functional container
+
+A Dockerfile is NOT suitable if it:
+- Only installs the base language without building anything (e.g., just 'FROM python:3.9' with no build steps)
+- Missing critical dependencies for the application type
+- Has obvious security or architectural flaws
+"""
+
+        log_entry = {
+            "component": "LLMDockerfileValidator",
+            "method": "validate_dockerfile_suitability",
+            "prompt": prompt,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            log_entry["response"] = response.content
+            if hasattr(response, 'response_metadata'):
+                log_entry["token_usage"] = response.response_metadata.get("token_usage", {})
+
+            # Parse JSON from response
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            return json.loads(content), log_entry
+        except Exception as e:
+            print(f"[Dockerfile Validator] LLM validation failed: {e}")
+            log_entry["error"] = str(e)
+            # Default to assuming it's suitable if LLM fails
+            return {
+                "is_suitable": True,
+                "explanation": f"Dockerfile validation could not be completed due to error: {e}. Assuming suitable based on build and smoke test results.",
+                "confidence": "low",
+                "concerns": ["LLM validation failed"]
             }, log_entry
 
 
@@ -571,6 +672,7 @@ class ParallelEmpiricalTester:
 
                 # 1. Pre-build Hygiene Checks (Fail Fast)
                 self.log(repo_name, "[VerifyBuild] Running pre-build validation", to_console=False)
+
                 # Check for multi-stage hallucinations (referencing non-existent stages)
                 multistage_errors = self._validate_multistage_references(dockerfile_path)
                 if multistage_errors['invalid_refs']:
@@ -582,6 +684,18 @@ class ParallelEmpiricalTester:
                         "error_type": "INVALID_STAGE_REFERENCE",
                         "message": f"CRITICAL: You are COPYing from stage(s) {multistage_errors['invalid_refs']} which DO NOT EXIST. Defined stages are: {defined}. You must fix this before building."
                     }, indent=2)
+
+                # # Check for fake/dummy binaries
+                # fake_binary_check = self._detect_fake_binaries(dockerfile_path)
+                # if fake_binary_check['is_suspicious']:
+                #     violations = "\n- ".join(fake_binary_check['violations'])
+                #     self.log(repo_name, f"[VerifyBuild] Fake binary patterns detected: {violations}", to_console=False)
+                #     return json.dumps({
+                #         "status": "failed",
+                #         "stage": "PRE_BUILD_CHECK",
+                #         "error_type": "FAKE_BINARY_DETECTED",
+                #         "message": f"CRITICAL: Your Dockerfile appears to create fake/dummy binaries to game smoke tests.\n\nViolations detected:\n- {violations}\n\nYou must create a legitimate Dockerfile that actually builds the application, not fake executables."
+                #     }, indent=2)
 
                 self.log(repo_name, "[VerifyBuild] Pre-build validation passed", to_console=False)
 
@@ -625,37 +739,98 @@ class ParallelEmpiricalTester:
                         
                         if verification.get("success"):
                              self.log(repo_name, "[VerifyBuild] ✓ Smoke test PASSED", to_console=False)
+
+                             # 4. Validate Dockerfile Suitability with LLM
+                             self.log(repo_name, "[VerifyBuild] Validating Dockerfile suitability", to_console=False)
+                             validator = LLMDockerfileValidator()
+                             suitability, suitability_log = validator.validate_dockerfile_suitability(
+                                 df_content,
+                                 repo_path.split('/')[-1],
+                                 build_success=True,
+                                 smoke_test_passed=True
+                             )
+                             aux_logs.append(suitability_log)
+
                              self.docker_tester.cleanup_image(verify_image)
+
+                             # Return response WITHOUT revealing smoke test command
                              return json.dumps({
                                 "status": "success",
-                                "message": f"✓ Build AND Smoke Test passed!\nTest Command: '{test_cmd}'\nOutput: {run_result.get('output', '')}...",
-                                "functional_check": "passed",
+                                "message": "✓ Docker build succeeded and container is functional.",
+                                "verification": {
+                                    "build_passed": True,
+                                    "smoke_test_passed": True,
+                                    "dockerfile_suitable": suitability.get("is_suitable", True),
+                                    "explanation": suitability.get("explanation", "Dockerfile appears suitable for the application."),
+                                    "confidence": suitability.get("confidence", "medium"),
+                                    "concerns": suitability.get("concerns", [])
+                                },
                                 "auxiliary_logs": aux_logs
                             }, indent=2)
                         else:
                             self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
-                            # Build passed, but runtime failed
+
+                            # Validate Dockerfile even on failure to provide explanation
+                            validator = LLMDockerfileValidator()
+                            suitability, suitability_log = validator.validate_dockerfile_suitability(
+                                df_content,
+                                repo_path.split('/')[-1],
+                                build_success=True,
+                                smoke_test_passed=False
+                            )
+                            aux_logs.append(suitability_log)
+
+                            # Build passed, but runtime failed - don't reveal test command
                             return json.dumps({
                                 "status": "failed",
                                 "stage": "RUNTIME_CHECK",
                                 "error_type": "SMOKE_TEST_FAILED",
-                                "message": f"Build succeeded, but the container crashed during smoke test.",
-                                "failed_command": test_cmd,
-                                "tail_lines": run_result.get("output", "") + "\n" + verification.get("reason", ""),
-                                "next_steps": "Check your ENTRYPOINT or runtime dependencies.",
+                                "message": f"Build succeeded, but the container failed functional verification.\n\nThe container built successfully but does not appear to be functional when executed.",
+                                "verification": {
+                                    "build_passed": True,
+                                    "smoke_test_passed": False,
+                                    "dockerfile_suitable": suitability.get("is_suitable", False),
+                                    "explanation": suitability.get("explanation", "Container failed to execute properly."),
+                                    "concerns": suitability.get("concerns", [])
+                                },
+                                "error_output": run_result.get("output", ""),
+                                "next_steps": "The container builds but doesn't run correctly. Check your ENTRYPOINT, CMD, runtime dependencies, and ensure the application is actually installed.",
                                 "auxiliary_logs": aux_logs
                             }, indent=2)
 
                     except Exception as e:
-                        # Fallback if verification infra fails
+                        # Fallback if verification infra fails - treat as failure
                         self.log(repo_name, f"[VerifyBuild] Smoke test error: {e}", to_console=False)
                         print(f"[Warning] Functional verification failed: {e}")
                         self.docker_tester.cleanup_image(verify_image)
+
+                        # Read Dockerfile for validation
+                        with open(dockerfile_path, 'r') as f:
+                            df_content = f.read()
+
+                        # Validate Dockerfile to provide helpful feedback
+                        validator = LLMDockerfileValidator()
+                        suitability, suitability_log = validator.validate_dockerfile_suitability(
+                            df_content,
+                            repo_path.split('/')[-1],
+                            build_success=True,
+                            smoke_test_passed=False
+                        )
+                        aux_logs.append(suitability_log)
+
                         return json.dumps({
-                            "status": "success",
-                            "message": "✓ Docker build succeeded! (Functional check skipped due to error)",
-                            "functional_check": "skipped",
-                            "error": str(e),
+                            "status": "failed",
+                            "stage": "SMOKE_TEST_EXCEPTION",
+                            "error_type": "VERIFICATION_INFRASTRUCTURE_ERROR",
+                            "message": f"Build succeeded but smoke test verification failed with error: {str(e)}\n\nThis likely means your container cannot be executed properly.",
+                            "verification": {
+                                "build_passed": True,
+                                "smoke_test_passed": False,
+                                "dockerfile_suitable": suitability.get("is_suitable", False),
+                                "explanation": suitability.get("explanation", "Unable to verify container functionality."),
+                                "concerns": suitability.get("concerns", ["Smoke test infrastructure error"])
+                            },
+                            "next_steps": "The Dockerfile built but we couldn't verify it works. Ensure your container has a valid ENTRYPOINT/CMD and all runtime dependencies are installed.",
                             "auxiliary_logs": aux_logs
                         }, indent=2)
 
@@ -881,6 +1056,65 @@ class ParallelEmpiricalTester:
         except Exception as e:
             print(f"[WARNING] Could not validate multi-stage references: {e}")
             return {'invalid_refs': [], 'defined_stages': []}
+
+    def _detect_fake_binaries(self, dockerfile_path: Path) -> Dict[str, Any]:
+        """
+        Detect if Dockerfile creates fake/dummy executables or empty files to game smoke tests.
+
+        Args:
+            dockerfile_path: Path to Dockerfile
+
+        Returns:
+            Dict with 'violations' (list of suspicious patterns found) and 'is_suspicious' (bool)
+        """
+        try:
+            with open(dockerfile_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            violations = []
+
+            # Pattern 1: Creating executables with printf/echo (fake version scripts)
+            if re.search(r'(printf|echo).*["\'].*version.*["\'].*>.*/(bin|sbin)/', content, re.IGNORECASE):
+                violations.append("Creating fake executable with hardcoded version output")
+
+            # Pattern 2: Using 'touch' to create files in bin, lib, or include directories
+            touch_patterns = [
+                (r'touch\s+.*\.(so|a|dylib|dll)', "Creating empty library files"),
+                (r'touch\s+.*/bin/', "Creating empty executables in bin directory"),
+                (r'touch\s+.*/sbin/', "Creating empty executables in sbin directory"),
+            ]
+            for pattern, desc in touch_patterns:
+                if re.search(pattern, content, re.IGNORECASE):
+                    violations.append(desc)
+
+            # Pattern 3: Comments explicitly mentioning gaming tests
+            suspicious_comments = [
+                (r'#.*fake.*(?:binary|executable|lib)', "Comment mentions 'fake' binary/lib"),
+                (r'#.*dummy.*(?:binary|executable|lib)', "Comment mentions 'dummy' binary/lib"),
+                (r'#.*satisfy.*smoke.*test', "Comment about satisfying smoke tests"),
+                (r'#.*to\s+pass.*test', "Comment about passing tests"),
+            ]
+            for pattern, desc in suspicious_comments:
+                if re.search(pattern, content, re.IGNORECASE):
+                    violations.append(desc)
+
+            # Pattern 4: Creating symbolic links to /dev/null or non-existent files
+            if re.search(r'ln\s+-s\s+/dev/null', content):
+                violations.append("Creating symlink to /dev/null")
+
+            # Pattern 5: RUN commands that create files in bin/ without actual compilation
+            # (printf, echo, cat <<EOF to bin paths)
+            if re.search(r'(cat|printf|echo).*>>?\s*(/usr/local/bin|/usr/bin|/bin)/', content):
+                violations.append("Writing text directly to bin directory (not from build)")
+
+            return {
+                'violations': violations,
+                'is_suspicious': len(violations) > 0
+            }
+
+        except Exception as e:
+            print(f"[WARNING] Could not detect fake binaries: {e}")
+            return {'violations': [], 'is_suspicious': False}
 
     def _validate_copy_sources(self, dockerfile_path: Path, repo_path: str) -> Dict[str, list]:
         """
