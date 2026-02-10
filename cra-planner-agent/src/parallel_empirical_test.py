@@ -601,6 +601,29 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Clone failed: {e}")
                 return result
 
+            # Step 1.5: Check for existing valid Dockerfile (Pre-check)
+            if self._check_existing_dockerfile(repo_path, repo_name, slug, result):
+                self.log(repo_name, "✓ Existing Dockerfile is valid - Skipping Agent", to_console=True)
+                # Save artifacts for the existing valid Dockerfile
+                artifact_path = self.save_artifacts(slug, repo_path, result)
+                if artifact_path:
+                    result["artifact_path"] = artifact_path
+                
+                # Update progress
+                self.update_progress(repo_name, "✓ Success (Existing)")
+                
+                # Force cleanup since we're returning early
+                try:
+                    self._aggressive_cleanup(repo_name, repo_path, result)
+                except Exception as e:
+                    self.log(repo_name, f"Cleanup failed: {e}", to_console=False)
+                
+                # Append result and return
+                with self.results_lock:
+                    self.results.append(result)
+                    self._save_incremental_results(result)
+                return result
+
             # Step 2: Run Learner Agent with Validation Callback
             from agent.workflow import run_learner_agent
             from agent.tools import FormattedOutputHandler
@@ -1175,6 +1198,67 @@ class ParallelEmpiricalTester:
         except Exception as e:
             print(f"[WARNING] Could not validate COPY sources: {e}")
             return {'missing': [], 'suggestions': {}}
+
+    def _check_existing_dockerfile(self, repo_path: str, repo_name: str, slug: str, result: Dict) -> bool:
+        """
+        Check if the repository already has a valid, buildable Dockerfile.
+        Returns: True if valid Dockerfile exists and builds successfully.
+        """
+        dockerfile_path = Path(repo_path) / "Dockerfile"
+        if not dockerfile_path.exists():
+            # Fallback: Search for any Dockerfile in the repo
+            # This helps with library repos like docker-library/hello-world or node
+            params = list(Path(repo_path).rglob("Dockerfile"))
+            if params:
+                dockerfile_path = params[0]
+                self.log(repo_name, f"No root Dockerfile, but found one at: {dockerfile_path.relative_to(repo_path)}", to_console=True)
+            else:
+                self.log(repo_name, "No existing Dockerfile found.", to_console=False)
+                return False
+
+        self.log(repo_name, "Found existing Dockerfile. Testing validity...", to_console=True)
+        
+        # Try to build it
+        image_name = f"learner-{slug}:latest"
+        build_start = time.time()
+        
+        build_res = self.docker_tester.build_dockerfile(
+            str(dockerfile_path),
+            repo_path,
+            image_name
+        )
+        
+        duration = time.time() - build_start
+        
+        if build_res["success"]:
+            self.log(repo_name, f"Existing Dockerfile built successfully in {duration:.1f}s", to_console=False)
+            
+            # Update result with success info specific to pre-check
+            result["success"] = True
+            result["total_duration_seconds"] = duration # Approximation if skipped agent
+            result["dockerfile_test"] = {
+                "success": True,
+                "source": "existing_dockerfile",
+                "final_iteration": 0,
+                "iterations": []
+            }
+            
+            # Calculate minimal cost (0 for agent, just context token check if we added that)
+            result["token_usage"] = {"total": 0, "prompt": 0, "completion": 0}
+            result["cost"] = {
+                "total_cost_usd": 0.0,
+                "prompt_cost_usd": 0.0,
+                "completion_cost_usd": 0.0
+            }
+            
+            # Verification (Optional: run smoke test here too?)
+            # For now, just build success is enough for "Fast Path" as per requirement "keep simple"
+            
+            self.docker_tester.cleanup_image(image_name)
+            return True
+        else:
+            self.log(repo_name, f"Existing Dockerfile failed to build: {build_res.get('error_snippet')}", to_console=True)
+            return False
 
 
     def _aggressive_cleanup(self, repo_name: str, repo_path: Optional[str], result: Dict):
