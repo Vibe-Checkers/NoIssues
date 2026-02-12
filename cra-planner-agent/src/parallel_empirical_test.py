@@ -75,8 +75,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 print("[STARTUP] All imports loaded successfully!")
 
 # Token pricing (USD per 1K tokens). Override via env to match your Azure SKU.
-PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_PROMPT_COST_PER_1K", "0"))
-COMPLETION_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_COMPLETION_COST_PER_1K", "0"))
+# Agent model (gpt-5-nano)
+NANO_PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_PROMPT_COST_PER_1K", "0"))
+NANO_COMPLETION_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_COMPLETION_COST_PER_1K", "0"))
+# Analysis model (gpt-5) - used for preparation phase
+GPT5_PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5_PROMPT_COST_PER_1K", "0"))
+GPT5_COMPLETION_COST_PER_1K = float(os.getenv("AZURE_GPT5_COMPLETION_COST_PER_1K", "0"))
+
+# Backward compat
+PROMPT_COST_PER_1K = NANO_PROMPT_COST_PER_1K
+COMPLETION_COST_PER_1K = NANO_COMPLETION_COST_PER_1K
 
 
 def repo_slug(repo_url: str) -> str:
@@ -126,11 +134,11 @@ def repo_slug(repo_url: str) -> str:
 
 
 def compute_token_cost(token_usage: Dict) -> Dict[str, float]:
-    """Calculate cost from token usage using configured per-1K prices."""
+    """Calculate cost from token usage using configured per-1K prices (agent/nano model)."""
     prompt = token_usage.get("input", 0)
     completion = token_usage.get("output", 0)
-    cost_prompt = (prompt / 1000.0) * PROMPT_COST_PER_1K
-    cost_completion = (completion / 1000.0) * COMPLETION_COST_PER_1K
+    cost_prompt = (prompt / 1000.0) * NANO_PROMPT_COST_PER_1K
+    cost_completion = (completion / 1000.0) * NANO_COMPLETION_COST_PER_1K
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -141,9 +149,128 @@ def compute_token_cost(token_usage: Dict) -> Dict[str, float]:
     }
 
 
+def compute_preparation_cost(prep_token_usage: Dict) -> Dict[str, float]:
+    """Calculate cost from preparation-phase token usage (GPT-5 model)."""
+    prompt = prep_token_usage.get("input", 0)
+    completion = prep_token_usage.get("output", 0)
+    cost_prompt = (prompt / 1000.0) * GPT5_PROMPT_COST_PER_1K
+    cost_completion = (completion / 1000.0) * GPT5_COMPLETION_COST_PER_1K
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prep_token_usage.get("total", prompt + completion),
+        "prompt_cost_usd": cost_prompt,
+        "completion_cost_usd": cost_completion,
+        "total_cost_usd": cost_prompt + cost_completion,
+        "calls": prep_token_usage.get("calls", []),
+    }
+
+
+def parse_test_results(output: str) -> dict:
+    """
+    Deterministically parse test framework output into structured pass/fail/skip counts.
+    Handles: Maven/JUnit, Cargo, Jest, Mocha, Go test, pytest, CTest/automake.
+
+    Order matters: most-specific patterns are checked first to avoid false matches.
+    E.g. Cargo and Maven must be checked before pytest (r"\d+ passed" matches both).
+    """
+    counts = {"framework": "unknown", "passed": 0, "failed": 0, "skipped": 0, "errors": 0, "total": 0}
+
+    # Maven Surefire (most distinct): "Tests run: 25, Failures: 0, Errors: 0, Skipped: 0"
+    m = re.search(
+        r'Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+)',
+        output
+    )
+    if m:
+        counts["framework"] = "junit/maven"
+        counts["total"] = int(m.group(1))
+        counts["failed"] = int(m.group(2))
+        counts["errors"] = int(m.group(3))
+        counts["skipped"] = int(m.group(4))
+        counts["passed"] = counts["total"] - counts["failed"] - counts["errors"] - counts["skipped"]
+        return counts
+
+    # Cargo (distinct "test result:" prefix): "test result: ok. 42 passed; 0 failed; 3 ignored"
+    m = re.search(r'test result:.*?(\d+) passed;\s*(\d+) failed;\s*(\d+) ignored', output)
+    if m:
+        counts["framework"] = "cargo"
+        counts["passed"] = int(m.group(1))
+        counts["failed"] = int(m.group(2))
+        counts["skipped"] = int(m.group(3))
+        counts["total"] = counts["passed"] + counts["failed"] + counts["skipped"]
+        return counts
+
+    # Jest (distinct "Tests:" label at line start): "Tests: 3 failed, 9 passed, 12 total"
+    if re.search(r'^Tests:\s+', output, re.MULTILINE):
+        counts["framework"] = "jest"
+        for key, pattern in [("passed", r'(\d+) passed'), ("failed", r'(\d+) failed'),
+                              ("skipped", r'(\d+) skipped'), ("total", r'(\d+) total')]:
+            m = re.search(pattern, output)
+            if m:
+                counts[key] = int(m.group(1))
+        return counts
+
+    # Mocha (uses "passing"/"failing", not "passed"/"failed"):
+    # "  12 passing (88ms)"  and  "  3 failing"
+    m_pass = re.search(r'(\d+) passing', output)
+    if m_pass:
+        counts["framework"] = "mocha"
+        counts["passed"] = int(m_pass.group(1))
+        m_fail = re.search(r'(\d+) failing', output)
+        if m_fail:
+            counts["failed"] = int(m_fail.group(1))
+        counts["total"] = counts["passed"] + counts["failed"]
+        return counts
+
+    # Go test: lines starting "ok  " or "FAIL  " per package
+    go_ok = len(re.findall(r'^ok\s+', output, re.MULTILINE))
+    go_fail = len(re.findall(r'^FAIL\s+', output, re.MULTILINE))
+    if go_ok + go_fail > 0:
+        counts["framework"] = "go test"
+        counts["passed"] = go_ok
+        counts["failed"] = go_fail
+        counts["total"] = go_ok + go_fail
+        return counts
+
+    # pytest (generic "\d+ passed"): "5 passed, 2 failed, 1 skipped in 3.22s"
+    if re.search(r'\d+ passed', output):
+        counts["framework"] = "pytest"
+        for key, pattern in [("passed", r'(\d+) passed'), ("failed", r'(\d+) failed'),
+                              ("skipped", r'(\d+) skipped'), ("errors", r'(\d+) error')]:
+            m = re.search(pattern, output)
+            if m:
+                counts[key] = int(m.group(1))
+        counts["total"] = counts["passed"] + counts["failed"] + counts["skipped"] + counts["errors"]
+        return counts
+
+    # CTest summary line: "X tests passed, Y tests failed"
+    m = re.search(r'(\d+) tests? passed', output, re.IGNORECASE)
+    if m:
+        counts["framework"] = "ctest"
+        counts["passed"] = int(m.group(1))
+        m_fail = re.search(r'(\d+) tests? failed', output, re.IGNORECASE)
+        if m_fail:
+            counts["failed"] = int(m_fail.group(1))
+        counts["total"] = counts["passed"] + counts["failed"]
+        return counts
+
+    # automake: count "PASS:" / "FAIL:" lines
+    pass_lines = len(re.findall(r'^PASS:', output, re.MULTILINE))
+    fail_lines = len(re.findall(r'^FAIL:', output, re.MULTILINE))
+    if pass_lines + fail_lines > 0:
+        counts["framework"] = "automake"
+        counts["passed"] = pass_lines
+        counts["failed"] = fail_lines
+        counts["total"] = pass_lines + fail_lines
+        return counts
+
+    return counts
+
+
 class LLMFunctionalVerifier:
     """
-    Generates and analyzes functional smoke tests for containers.
+    DEPRECATED — kept as dead code for reference only.
+    Replaced by real test suite execution via run_tests.sh + parse_test_results().
     """
     def __init__(self):
         self.llm = AzureChatOpenAI(
@@ -517,39 +644,52 @@ class ParallelEmpiricalTester:
                 print(f"[WARNING] Failed to write progress: {e}")
 
     def save_artifacts(self, slug: str, repo_path: str, result: Dict):
-        """Save all artifacts (Dockerfile, .dockerignore, build logs) to artifacts directory."""
+        """Save all artifacts for empirical study reproducibility."""
         try:
             artifact_dir = self.artifacts_dir / slug
             artifact_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save Dockerfile
-            dockerfile_src = Path(repo_path) / "Dockerfile"
-            if dockerfile_src.exists():
-                dockerfile_dst = artifact_dir / "Dockerfile"
-                shutil.copy2(dockerfile_src, dockerfile_dst)
-                self.log(slug, f"Saved Dockerfile to {dockerfile_dst}", to_console=False)
+            # List of files to save
+            files_to_save = [
+                ("Dockerfile", "Dockerfile"),
+                (".dockerignore", ".dockerignore"),
+                ("run_tests.sh", "run_tests.sh"),
+                ("test_output.log", "test_output.log"),
+            ]
 
-            # Save .dockerignore
-            dockerignore_src = Path(repo_path) / ".dockerignore"
-            if dockerignore_src.exists():
-                dockerignore_dst = artifact_dir / ".dockerignore"
-                shutil.copy2(dockerignore_src, dockerignore_dst)
-                self.log(slug, f"Saved .dockerignore to {dockerignore_dst}", to_console=False)
+            saved_files = []
+            for src_name, dst_name in files_to_save:
+                src_path = Path(repo_path) / src_name
+                if src_path.exists():
+                    dst_path = artifact_dir / dst_name
+                    shutil.copy2(src_path, dst_path)
+                    saved_files.append(dst_name)
+                    self.log(slug, f"Saved {dst_name} to {dst_path}", to_console=False)
 
-            # Save result metadata as JSON
+            # Save result metadata as JSON (comprehensive for empirical analysis)
             metadata_file = artifact_dir / "metadata.json"
             with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     "repo_url": result.get("repo_url"),
                     "repo_name": result.get("repo_name"),
+                    "repo_slug": result.get("repo_slug"),
                     "detected_language": result.get("detected_language"),
                     "success": result.get("success"),
                     "timestamp": result.get("timestamp"),
-                    "total_duration": result.get("total_duration_seconds"),
+                    "total_duration_seconds": result.get("total_duration_seconds"),
                     "token_usage": result.get("token_usage"),
-                    "cost": result.get("cost")
+                    "cost": result.get("cost"),
+                    "saved_artifacts": saved_files,
+                    "dockerfile_test": result.get("dockerfile_test"),
+                    "agent_analysis": {
+                        "status": result.get("agent_analysis", {}).get("status"),
+                        "phase": result.get("agent_analysis", {}).get("phase"),
+                        "attempts": result.get("agent_analysis", {}).get("attempts"),
+                        "error": result.get("agent_analysis", {}).get("error"),
+                    } if result.get("agent_analysis") else None
                 }, f, indent=2)
 
+            self.log(slug, f"Saved {len(saved_files)} artifacts + metadata to {artifact_dir}", to_console=False)
             return str(artifact_dir)
 
         except Exception as e:
@@ -654,15 +794,20 @@ class ParallelEmpiricalTester:
 
             def verify_build_tool_func(input_str: str) -> str:
                 """
-                Verifies the Dockerfile by attempting a build.
-                Returns compact JSON structure instead of full logs.
+                Verifies the Dockerfile by building it, then runs run_tests.sh if present.
 
-                Input is ignored (it looks for 'Dockerfile' in the root).
+                Flow:
+                  1. Build Dockerfile (environment setup)
+                  2. If run_tests.sh exists: docker run <image> bash /app/run_tests.sh
+                     Parse test output for pass/fail counts.
+                  3. If no run_tests.sh: return build success only.
                 """
                 self.log(repo_name, "[VerifyBuild] Starting Docker build verification", to_console=False)
 
                 dockerfile_path = Path(repo_path) / "Dockerfile"
+                run_tests_path = Path(repo_path) / "run_tests.sh"
 
+                # 1. Existence check
                 if not dockerfile_path.exists():
                     self.log(repo_name, "[VerifyBuild] Dockerfile not found", to_console=False)
                     return json.dumps({
@@ -670,218 +815,219 @@ class ParallelEmpiricalTester:
                         "message": "Dockerfile not found. You must create it first using WriteToFile."
                     }, indent=2)
 
-                # 1. Pre-build Hygiene Checks (Fail Fast)
+                # 2. Pre-build: validate multi-stage COPY references
                 self.log(repo_name, "[VerifyBuild] Running pre-build validation", to_console=False)
-
-                # Check for multi-stage hallucinations (referencing non-existent stages)
                 multistage_errors = self._validate_multistage_references(dockerfile_path)
                 if multistage_errors['invalid_refs']:
-                    defined = ", ".join(multistage_errors['defined_stages']) if multistage_errors['defined_stages'] else "None"
+                    defined = ", ".join(multistage_errors['defined_stages']) or "None"
                     self.log(repo_name, f"[VerifyBuild] Invalid stage references: {multistage_errors['invalid_refs']}", to_console=False)
                     return json.dumps({
                         "status": "failed",
                         "stage": "PRE_BUILD_CHECK",
                         "error_type": "INVALID_STAGE_REFERENCE",
-                        "message": f"CRITICAL: You are COPYing from stage(s) {multistage_errors['invalid_refs']} which DO NOT EXIST. Defined stages are: {defined}. You must fix this before building."
+                        "message": (
+                            f"CRITICAL: COPYing from stage(s) {multistage_errors['invalid_refs']} "
+                            f"which DO NOT EXIST. Defined stages: {defined}. Fix before building."
+                        )
                     }, indent=2)
-
-                # # Check for fake/dummy binaries
-                # fake_binary_check = self._detect_fake_binaries(dockerfile_path)
-                # if fake_binary_check['is_suspicious']:
-                #     violations = "\n- ".join(fake_binary_check['violations'])
-                #     self.log(repo_name, f"[VerifyBuild] Fake binary patterns detected: {violations}", to_console=False)
-                #     return json.dumps({
-                #         "status": "failed",
-                #         "stage": "PRE_BUILD_CHECK",
-                #         "error_type": "FAKE_BINARY_DETECTED",
-                #         "message": f"CRITICAL: Your Dockerfile appears to create fake/dummy binaries to game smoke tests.\n\nViolations detected:\n- {violations}\n\nYou must create a legitimate Dockerfile that actually builds the application, not fake executables."
-                #     }, indent=2)
 
                 self.log(repo_name, "[VerifyBuild] Pre-build validation passed", to_console=False)
 
-                verify_slug = f"verify-{slug}"
-                verify_image = f"verify-{verify_slug}:latest"
+                verify_image = f"verify-{slug}:latest"
 
-                # Capture auxiliary logs from LLM helpers
-                aux_logs = []
-
+                # 3. Build image
                 self.log(repo_name, "[VerifyBuild] Building Docker image", to_console=False)
-                result = self.docker_tester.build_dockerfile(
-                    str(dockerfile_path),
-                    repo_path,
-                    verify_image
+                build_result = self.docker_tester.build_dockerfile(
+                    str(dockerfile_path), repo_path, verify_image
                 )
 
-                if result.get("success"):
-                    self.log(repo_name, "[VerifyBuild] Docker build succeeded, running smoke test", to_console=False)
-                    # Phase 2: Functional Verification (Smoke Test)
-                    try:
-                        verifier = LLMFunctionalVerifier()
-
-                        # Read Dockerfile for context
-                        with open(dockerfile_path, 'r') as f:
-                            df_content = f.read()
-
-                        # 1. Generate Command
-                        self.log(repo_name, "[VerifyBuild] Generating smoke test command via LLM", to_console=False)
-                        test_cmd, cmd_log = verifier.generate_verification_command(df_content, repo_path.split('/')[-1])
-                        aux_logs.append(cmd_log)
-                        self.log(repo_name, f"[VerifyBuild] Generated test command: {test_cmd}", to_console=False)
-
-                        # 2. Run Container
-                        self.log(repo_name, f"[VerifyBuild] Running container with test command", to_console=False)
-                        run_result = self.docker_tester.run_container(verify_image, test_cmd, timeout=20)
-
-                        # 3. Analyze Output
-                        self.log(repo_name, "[VerifyBuild] Analyzing smoke test output via LLM", to_console=False)
-                        verification, verify_log = verifier.verify_output(test_cmd, run_result.get("output", ""), run_result.get("exit_code", -1))
-                        if verify_log: aux_logs.append(verify_log)
-                        
-                        if verification.get("success"):
-                             self.log(repo_name, "[VerifyBuild] ✓ Smoke test PASSED", to_console=False)
-
-                             # 4. Validate Dockerfile Suitability with LLM
-                             self.log(repo_name, "[VerifyBuild] Validating Dockerfile suitability", to_console=False)
-                             validator = LLMDockerfileValidator()
-                             suitability, suitability_log = validator.validate_dockerfile_suitability(
-                                 df_content,
-                                 repo_path.split('/')[-1],
-                                 build_success=True,
-                                 smoke_test_passed=True
-                             )
-                             aux_logs.append(suitability_log)
-
-                             self.docker_tester.cleanup_image(verify_image)
-
-                             # Return response WITHOUT revealing smoke test command
-                             return json.dumps({
-                                "status": "success",
-                                "message": "✓ Docker build succeeded and container is functional.",
-                                "verification": {
-                                    "build_passed": True,
-                                    "smoke_test_passed": True,
-                                    "dockerfile_suitable": suitability.get("is_suitable", True),
-                                    "explanation": suitability.get("explanation", "Dockerfile appears suitable for the application."),
-                                    "confidence": suitability.get("confidence", "medium"),
-                                    "concerns": suitability.get("concerns", [])
-                                },
-                                "auxiliary_logs": aux_logs
-                            }, indent=2)
-                        else:
-                            self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
-
-                            # Validate Dockerfile even on failure to provide explanation
-                            validator = LLMDockerfileValidator()
-                            suitability, suitability_log = validator.validate_dockerfile_suitability(
-                                df_content,
-                                repo_path.split('/')[-1],
-                                build_success=True,
-                                smoke_test_passed=False
-                            )
-                            aux_logs.append(suitability_log)
-
-                            # Build passed, but runtime failed - don't reveal test command
-                            return json.dumps({
-                                "status": "failed",
-                                "stage": "RUNTIME_CHECK",
-                                "error_type": "SMOKE_TEST_FAILED",
-                                "message": f"Build succeeded, but the container failed functional verification.\n\nThe container built successfully but does not appear to be functional when executed.",
-                                "verification": {
-                                    "build_passed": True,
-                                    "smoke_test_passed": False,
-                                    "dockerfile_suitable": suitability.get("is_suitable", False),
-                                    "explanation": suitability.get("explanation", "Container failed to execute properly."),
-                                    "concerns": suitability.get("concerns", [])
-                                },
-                                "error_output": run_result.get("output", ""),
-                                "next_steps": "The container builds but doesn't run correctly. Check your ENTRYPOINT, CMD, runtime dependencies, and ensure the application is actually installed.",
-                                "auxiliary_logs": aux_logs
-                            }, indent=2)
-
-                    except Exception as e:
-                        # Fallback if verification infra fails - treat as failure
-                        self.log(repo_name, f"[VerifyBuild] Smoke test error: {e}", to_console=False)
-                        print(f"[Warning] Functional verification failed: {e}")
-                        self.docker_tester.cleanup_image(verify_image)
-
-                        # Read Dockerfile for validation
-                        with open(dockerfile_path, 'r') as f:
-                            df_content = f.read()
-
-                        # Validate Dockerfile to provide helpful feedback
-                        validator = LLMDockerfileValidator()
-                        suitability, suitability_log = validator.validate_dockerfile_suitability(
-                            df_content,
-                            repo_path.split('/')[-1],
-                            build_success=True,
-                            smoke_test_passed=False
-                        )
-                        aux_logs.append(suitability_log)
-
-                        return json.dumps({
-                            "status": "failed",
-                            "stage": "SMOKE_TEST_EXCEPTION",
-                            "error_type": "VERIFICATION_INFRASTRUCTURE_ERROR",
-                            "message": f"Build succeeded but smoke test verification failed with error: {str(e)}\n\nThis likely means your container cannot be executed properly.",
-                            "verification": {
-                                "build_passed": True,
-                                "smoke_test_passed": False,
-                                "dockerfile_suitable": suitability.get("is_suitable", False),
-                                "explanation": suitability.get("explanation", "Unable to verify container functionality."),
-                                "concerns": suitability.get("concerns", ["Smoke test infrastructure error"])
-                            },
-                            "next_steps": "The Dockerfile built but we couldn't verify it works. Ensure your container has a valid ENTRYPOINT/CMD and all runtime dependencies are installed.",
-                            "auxiliary_logs": aux_logs
-                        }, indent=2)
-
-                else:
-                    self.log(repo_name, f"[VerifyBuild] ✗ Docker build FAILED at stage: {result.get('stage')}", to_console=False)
-
-                    # Cleanup verify image on build failure
+                if not build_result.get("success"):
+                    self.log(repo_name, f"[VerifyBuild] ✗ Build FAILED: {build_result.get('stage')}", to_console=False)
                     try:
                         self.docker_tester.cleanup_image(verify_image)
-                    except:
+                    except Exception:
                         pass
 
-                    # Extract compact error info
-                    error_msg = result.get('error_message', '')
-                    error_lines = error_msg.split('\n') if error_msg else []
-
-                    # Return full error log
-                    tail_lines = error_msg
-
-                    # LLM-Based Error Analysis
-                    self.log(repo_name, "[VerifyBuild] Running LLM error analysis", to_console=False)
+                    tail_lines = build_result.get('error_message', '')
                     analyzer = LLMErrorAnalyzer()
-                    analysis, analysis_log = analyzer.analyze_error(tail_lines, result.get('failed_command', ''))
-                    aux_logs.append(analysis_log)
+                    analysis, _ = analyzer.analyze_error(tail_lines, build_result.get('failed_command', ''))
                     self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
 
-                    # Build structured error features from LLM analysis
-                    error_features = {
-                        "cause": analysis.get("cause"),
-                        "suggested_fix": analysis.get("suggested_fix"),
-                        "missing_packages": analysis.get("missing_packages", []),
-                    }
-
-                    # Build compact response
-                    compact_error = {
+                    return json.dumps({
                         "status": "failed",
-                        "stage": result.get('stage', 'UNKNOWN'),
-                        "failed_command": result.get('failed_command', 'Unknown command'),
-                        "error_snippet": result.get('error_snippet', 'See tail_lines'),
-                        "error_analysis": error_features, # Replaced static ErrorPatternDetector with rich analysis
+                        "stage": build_result.get('stage', 'UNKNOWN'),
+                        "failed_command": build_result.get('failed_command', 'Unknown command'),
+                        "error_snippet": build_result.get('error_snippet', ''),
+                        "error_analysis": {
+                            "cause": analysis.get("cause"),
+                            "suggested_fix": analysis.get("suggested_fix"),
+                            "missing_packages": analysis.get("missing_packages", []),
+                        },
                         "tail_lines": tail_lines,
-                        "search_keywords": analysis.get("search_keywords", f"docker build error {result.get('failed_command', '')}"),
-                        "auxiliary_logs": aux_logs
-                    }
+                        "search_keywords": analysis.get(
+                            "search_keywords",
+                            f"docker build error {build_result.get('failed_command', '')}"
+                        ),
+                    }, indent=2)
 
-                    return json.dumps(compact_error, indent=2)
+                # 4. Build succeeded — run tests if run_tests.sh present
+                self.log(repo_name, "[VerifyBuild] ✓ Build succeeded", to_console=False)
+
+                if run_tests_path.exists():
+                    self.log(repo_name, "[VerifyBuild] run_tests.sh found — running test suite (timeout=300s)", to_console=False)
+                    run_result = self.docker_tester.run_container(
+                        verify_image, "bash /app/run_tests.sh", timeout=300
+                    )
+                    self.docker_tester.cleanup_image(verify_image)
+
+                    raw_output = (run_result.get("output") or "").strip()
+                    exit_code = run_result.get("exit_code", -1)
+                    test_counts = parse_test_results(raw_output)
+                    # Keep last 3000 chars so the agent can read meaningful failures
+                    display_output = raw_output[-3000:] if len(raw_output) > 3000 else raw_output
+
+                    # Save full test output to persistent file on host
+                    try:
+                        test_output_file = Path(repo_path) / "test_output.log"
+                        with open(test_output_file, 'w', encoding='utf-8') as f:
+                            f.write(f"# Test run at {datetime.now().isoformat()}\n")
+                            f.write(f"# Exit code: {exit_code}\n")
+                            f.write(f"# Framework: {test_counts.get('framework', 'unknown')}\n")
+                            f.write(f"# Passed: {test_counts.get('passed', 0)}, Failed: {test_counts.get('failed', 0)}\n\n")
+                            f.write(raw_output)
+                        self.log(repo_name, f"[VerifyBuild] Saved test output to {test_output_file}", to_console=False)
+                    except Exception as e:
+                        self.log(repo_name, f"[VerifyBuild] Warning: Could not save test output: {e}", to_console=False)
+
+                    self.log(
+                        repo_name,
+                        f"[VerifyBuild] Test exit={exit_code} counts={test_counts}",
+                        to_console=False
+                    )
+
+                    if exit_code == 0:
+                        return json.dumps({
+                            "status": "success",
+                            "message": "✓ Build AND test suite passed!",
+                            "test_results": test_counts,
+                            "test_output": display_output,
+                            "STOP": "Task complete. Give your Final Answer now. Do NOT call any more tools.",
+                        }, indent=2)
+                    else:
+                        return json.dumps({
+                            "status": "failed",
+                            "stage": "TEST_SUITE",
+                            "message": "Build succeeded but test suite failed (exit code {}).".format(exit_code),
+                            "test_results": test_counts,
+                            "test_output": display_output,
+                            "NEXT_STEP": (
+                                "You MUST call DiagnoseTestFailure BEFORE attempting any fix. "
+                                "Pass the test_output above, plus ReadLocalFile('Dockerfile') "
+                                "and ReadLocalFile('run_tests.sh') as inputs. "
+                                "DiagnoseTestFailure will tell you whether to fix the Dockerfile or run_tests.sh."
+                            ),
+                            "note": (
+                                "Fix missing dependencies or configuration in Dockerfile / run_tests.sh. "
+                                "Do NOT modify test files or replace the test command with a no-op."
+                            ),
+                        }, indent=2)
+                else:
+                    # No run_tests.sh — build-only, NOT complete
+                    self.docker_tester.cleanup_image(verify_image)
+                    return json.dumps({
+                        "status": "incomplete",
+                        "message": (
+                            "⚠ Build succeeded but run_tests.sh is MISSING. "
+                            "You MUST create run_tests.sh with WriteToFile and then call VerifyBuild again. "
+                            "The task is NOT complete until tests pass."
+                        ),
+                    }, indent=2)
 
             verify_tool = Tool(
                 name="VerifyBuild",
                 func=verify_build_tool_func,
                 description="Verifies the 'Dockerfile' by running a real Docker build. usage: VerifyBuild('')"
+            )
+
+            # RunInContainer tool — cheap diagnostic commands inside the built image
+            def run_in_container_func(input_str: str) -> str:
+                """
+                Run an arbitrary command inside the last-built Docker image.
+                Use for quick diagnostics before committing to a full VerifyBuild cycle.
+                
+                Examples:
+                  RunInContainer({"command": "pip list"})
+                  RunInContainer({"command": "pytest --co -q"})
+                  RunInContainer({"command": "which make && make --version"})
+                """
+                try:
+                    # Parse input
+                    if isinstance(input_str, str):
+                        try:
+                            parsed = json.loads(input_str)
+                            command = parsed.get("command", input_str)
+                        except json.JSONDecodeError:
+                            command = input_str
+                    elif isinstance(input_str, dict):
+                        command = input_str.get("command", str(input_str))
+                    else:
+                        command = str(input_str)
+                    
+                    command = command.strip()
+                    if not command:
+                        return json.dumps({"status": "error", "message": "Empty command"})
+                    
+                    self.log(repo_name, f"[RunInContainer] Running: {command[:100]}", to_console=False)
+                    
+                    # Check if the image exists, build if needed
+                    container_image = f"verify-{slug}:latest"
+                    dockerfile_path_ric = Path(repo_path) / "Dockerfile"
+                    
+                    if not dockerfile_path_ric.exists():
+                        return json.dumps({
+                            "status": "error",
+                            "message": "No Dockerfile found. Create it first with WriteToFile."
+                        })
+                    
+                    # Quick build (uses cache if nothing changed)
+                    build_result = self.docker_tester.build_dockerfile(
+                        str(dockerfile_path_ric), repo_path, container_image
+                    )
+                    if not build_result.get("success"):
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Docker build failed: {build_result.get('error_snippet', 'unknown')}"
+                        })
+                    
+                    # Run command
+                    run_result = self.docker_tester.run_container(
+                        container_image, command, timeout=60
+                    )
+                    self.docker_tester.cleanup_image(container_image)
+                    
+                    output = run_result.get("output", "")
+                    exit_code = run_result.get("exit_code", -1)
+                    
+                    # Truncate output to 3000 chars
+                    if len(output) > 3000:
+                        output = output[:1500] + "\n\n... (truncated) ...\n\n" + output[-1500:]
+                    
+                    return json.dumps({
+                        "status": "success" if run_result.get("success") else "failed",
+                        "exit_code": exit_code,
+                        "output": output
+                    }, indent=2)
+                    
+                except Exception as e:
+                    return json.dumps({"status": "error", "message": str(e)})
+            
+            run_in_container_tool = Tool(
+                name="RunInContainer",
+                func=run_in_container_func,
+                description=(
+                    "Run a command inside the Docker container for quick diagnostics. "
+                    "Usage: RunInContainer({\"command\": \"pip list\"}) — cheaper than VerifyBuild."
+                )
             )
 
             # Prepare callback handler with per-repo logging
@@ -896,7 +1042,7 @@ class ParallelEmpiricalTester:
                 max_retries=5,  # 5 attempts with feedback injection
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,
-                extra_tools=[verify_tool]
+                extra_tools=[verify_tool, run_in_container_tool]
             )
 
             duration = time.time() - start_time # Use start_time from original code
@@ -904,38 +1050,104 @@ class ParallelEmpiricalTester:
             result["total_duration"] = duration
             result["detected_language"] = agent_result.get("language", "Unknown")
 
-            # Capture token usage and calculate cost
+            # Capture token usage and calculate cost (agent model - nano)
             token_usage = callback_handler.token_usage
             cost_data = compute_token_cost(token_usage)
             result["token_usage"] = token_usage
             result["cost"] = cost_data
 
-            # Save structured agent transcript
+            # Capture preparation-phase token usage (analysis model - GPT-5)
+            prep_tokens = agent_result.get("preparation_token_usage", {})
+            if prep_tokens:
+                prep_cost = compute_preparation_cost(prep_tokens)
+                result["preparation_token_usage"] = prep_tokens
+                result["preparation_cost"] = prep_cost
+                # Combined total
+                result["total_cost_usd"] = (
+                    cost_data["total_cost_usd"] + prep_cost["total_cost_usd"]
+                )
+                self.log(repo_name,
+                    f"Costs - Agent(nano): ${cost_data['total_cost_usd']:.4f} | "
+                    f"Prep(GPT-5): ${prep_cost['total_cost_usd']:.4f} | "
+                    f"Total: ${result['total_cost_usd']:.4f}",
+                    to_console=True
+                )
+            else:
+                result["total_cost_usd"] = cost_data["total_cost_usd"]
+
+            # Save structured agent transcript with all artifacts for empirical analysis
             try:
                 transcript = callback_handler.get_transcript()
+
+                # Read generated files for inclusion in structured log
+                dockerfile_content = None
+                run_tests_content = None
+                test_output_content = None
+
+                dockerfile_path = Path(repo_path) / "Dockerfile"
+                if dockerfile_path.exists():
+                    dockerfile_content = dockerfile_path.read_text(encoding='utf-8')
+
+                run_tests_path = Path(repo_path) / "run_tests.sh"
+                if run_tests_path.exists():
+                    run_tests_content = run_tests_path.read_text(encoding='utf-8')
+
+                test_output_path = Path(repo_path) / "test_output.log"
+                if test_output_path.exists():
+                    test_output_content = test_output_path.read_text(encoding='utf-8')
+
+                # Extract test results from transcript if available
+                test_results = None
+                for step in reversed(transcript):
+                    obs = step.get("observation", "")
+                    if '"status": "success"' in obs and '"test_results"' in obs:
+                        try:
+                            obs_data = json.loads(obs)
+                            test_results = obs_data.get("test_results")
+                            break
+                        except:
+                            pass
+
                 with open(structured_log_file, 'w', encoding='utf-8') as f:
                     json.dump({
                         "repo_url": repo_url,
                         "repo_name": repo_name,
+                        "repo_slug": slug,
                         "detected_language": result["detected_language"],
                         "timestamp": result["timestamp"],
-                        "transcript": transcript,
+                        "total_duration_seconds": duration,
                         "token_usage": token_usage,
                         "cost": cost_data,
                         "final_result": {
                             "status": agent_result["status"],
-                            "attempts": agent_result.get("attempts", 0)
-                        }
+                            "attempts": agent_result.get("attempts", 0),
+                            "phase": agent_result.get("phase"),
+                            "error": agent_result.get("error")
+                        },
+                        "test_results": test_results,
+                        "generated_files": {
+                            "dockerfile": dockerfile_content,
+                            "run_tests_sh": run_tests_content,
+                            "test_output": test_output_content
+                        },
+                        "transcript": transcript
                     }, f, indent=2)
                 self.log(repo_name, f"Saved structured transcript to {structured_log_file}", to_console=False)
             except Exception as e:
                 self.log(repo_name, f"Failed to save transcript: {e}", to_console=False)
 
             # Add dockerfile_test structure for compatibility with summary
+            # Note: workflow returns attempts as {"build": N, "test": M} dict
+            raw_attempts = agent_result.get("attempts", 0)
+            if isinstance(raw_attempts, dict):
+                total_attempts = sum(raw_attempts.values())
+            else:
+                total_attempts = int(raw_attempts) if raw_attempts else 0
+
             result["dockerfile_test"] = {
                 "success": agent_result["status"] == "success",
-                "attempts": agent_result.get("attempts", 0),
-                "final_iteration": agent_result.get("attempts", 0) if agent_result["status"] == "success" else 0,
+                "attempts": total_attempts,
+                "final_iteration": total_attempts if agent_result["status"] == "success" else 0,
                 "iterations": []  # Could populate from agent metrics if available
             }
 
@@ -1416,7 +1628,10 @@ class ParallelEmpiricalTester:
             elif "agent_analysis" in r and "token_usage" in r["agent_analysis"]:
                 token_totals.append(r["agent_analysis"]["token_usage"].get("total", 0))
             
-            if "cost" in r:
+            # Use combined total_cost_usd (nano + GPT-5) if available
+            if "total_cost_usd" in r:
+                cost_totals.append(r["total_cost_usd"])
+            elif "cost" in r:
                 cost_totals.append(r["cost"].get("total_cost_usd", 0.0))
             elif "agent_analysis" in r and "cost_usd" in r["agent_analysis"]:
                 cost_totals.append(r["agent_analysis"]["cost_usd"].get("total_cost_usd", 0.0))

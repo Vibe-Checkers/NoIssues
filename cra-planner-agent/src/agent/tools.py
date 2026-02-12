@@ -745,6 +745,83 @@ Please manually review the search results above for solutions."""
         return f"Error searching for Docker error solution: {e}\n\nPlease try searching manually or checking Docker documentation."
 
 # ============================================================================
+# DiagnoseTestFailure — LLM-powered test failure analysis
+# ============================================================================
+
+class DiagnoseTestFailureInput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    test_output: str = Field(default="", description="Full test output / error from VerifyBuild test_output field")
+    dockerfile_content: str = Field(default="", description="Current Dockerfile content (read with ReadLocalFile)")
+    run_tests_content: str = Field(default="", description="Current run_tests.sh content (read with ReadLocalFile)")
+
+
+def diagnose_test_failure_structured(input_data: Any) -> str:
+    """
+    Use LLM to diagnose a test suite failure and suggest specific fixes.
+
+    This tool is called when VerifyBuild returns status='failed' at stage='TEST_SUITE'.
+    It analyses the test output plus the current Dockerfile and run_tests.sh to
+    suggest concrete, targeted changes.
+    """
+    try:
+        from langchain_openai import AzureChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        data = _parse_input(input_data, DiagnoseTestFailureInput, 'test_output')
+
+        if not data.test_output.strip():
+            return "ERROR: Please provide the test_output from VerifyBuild to diagnose."
+
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+        )
+
+        system_prompt = """You are a DevOps expert diagnosing why a test suite fails inside Docker.
+The Docker image built successfully. The test runner script (run_tests.sh) was executed but exited non-zero.
+
+Your job: identify the ROOT CAUSE and give a SPECIFIC, MINIMAL fix.
+
+Respond in this exact format:
+
+**Root Cause:** [1-2 sentences — what error/exception caused the failure and why]
+**Fix Location:** [DOCKERFILE or RUN_TESTS_SH or BOTH]
+**Fix:** [Exact change to make — show the line(s) to add/change/remove]
+**Example:**
+```
+<show the corrected snippet>
+```
+
+Rules:
+- NEVER suggest modifying test files or replacing the test command with a no-op
+- Prefer fixing missing deps, env vars, WORKDIR, or permissions
+- If tests fail due to network/integration issues, suggest skip flags (e.g. pytest -k "not network")
+- Keep the fix minimal — don't rewrite the whole Dockerfile"""
+
+        parts = [f"TEST OUTPUT (last 3000 chars):\n{data.test_output[-3000:]}"]
+        if data.dockerfile_content.strip():
+            parts.append(f"\nCURRENT DOCKERFILE:\n{data.dockerfile_content}")
+        if data.run_tests_content.strip():
+            parts.append(f"\nCURRENT run_tests.sh:\n{data.run_tests_content}")
+        parts.append("\nDiagnose this test failure and provide the fix.")
+
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content="\n".join(parts))
+        ])
+
+        content = response.content
+        if "**Root Cause:**" not in content:
+            content = f"**Root Cause:** Analysis incomplete\n**Fix Location:** UNKNOWN\n**Fix:** {content}"
+
+        return f"=== TEST FAILURE DIAGNOSIS ===\n{content}"
+
+    except Exception as e:
+        logger.error(f"DiagnoseTestFailure failed: {e}")
+        return f"DiagnoseTestFailure error: {e}"
+
+
+# ============================================================================
 # Factory
 # ============================================================================
 
@@ -853,5 +930,31 @@ def create_structured_tools(repo_root: str) -> list:
             func=docker_image_search_structured,
             description="Search Docker Hub for images or verify tag existence.",
             args_schema=DockerImageSearchInput
+        ),
+        StructuredTool(
+            name="DiagnoseTestFailure",
+            func=diagnose_test_failure_structured,
+            description="""Use AI to diagnose why the test suite failed inside Docker and get a specific fix.
+
+            WHEN TO USE: After VerifyBuild returns status="failed" with stage="TEST_SUITE".
+
+            INPUT: Provide as much context as possible:
+            - test_output (REQUIRED): The full test_output field from VerifyBuild
+            - dockerfile_content (RECOMMENDED): Read from ReadLocalFile("Dockerfile")
+            - run_tests_content (RECOMMENDED): Read from ReadLocalFile("run_tests.sh")
+
+            OUTPUT: AI analysis with:
+            - Root Cause of the test failure
+            - Fix Location (Dockerfile vs run_tests.sh)
+            - Exact fix to apply
+
+            EXAMPLE:
+            DiagnoseTestFailure(
+                test_output="<test_output from VerifyBuild>",
+                dockerfile_content="<content of Dockerfile>",
+                run_tests_content="<content of run_tests.sh>"
+            )
+            """,
+            args_schema=DiagnoseTestFailureInput
         ),
     ]

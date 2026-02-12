@@ -109,7 +109,7 @@ def _get_host_platform() -> tuple:
     return 'linux/amd64', 'AMD64 (Unknown)'
 
 def create_learner_agent(
-    max_iterations: int = 15,
+    max_iterations: int = 35,
     verbose: bool = True,
     repository_path: str = None,
     repo_name: str = None,
@@ -155,7 +155,7 @@ def create_learner_agent(
     if extra_tools:
         tools_list.extend(extra_tools)
     
-    # 5. Prompt - Enhanced with Research-Fix Workflow
+    # 5. Prompt - Phase A: Containerization only
     _, host_arch_name = _get_host_platform()
     
     template = """You are an AUTONOMOUS DevOps engineer creating Dockerfiles.
@@ -167,6 +167,7 @@ TOOLS:
 TOOL INPUT CONTRACT (MUST FOLLOW):
 - WriteToFile:
   Action Input: {{"file_path":"Dockerfile","content":"<full file contents>"}}
+  Also used for: .dockerignore
 - ReadLocalFile:
   Action Input: {{"file_path":"package.json"}}
 - ListDirectory:
@@ -179,55 +180,48 @@ IMPORTANT:
 - You may emit at most one tool call per message.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
+WORKFLOW:
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 1 - ANALYZE:
-  1. ListDirectory to see project structure
-  2. ReadLocalFile to check package.json, requirements.txt, pom.xml, etc.
-  3. Identify language, framework, and dependencies
+1. ListDirectory to see project structure
+2. ReadLocalFile for build files (package.json, requirements.txt, pom.xml, etc.)
+3. Identify language, framework, and dependencies
+4. WriteToFile to create Dockerfile:
+   - Install ALL system packages, runtime, and build tools (including git, make, gcc if needed)
+   - Copy source with: COPY . /app
+   - Set WORKDIR /app
+   - Use ENV DEBIAN_FRONTEND=noninteractive
+   - Add -y flags to all apt-get calls
+   - Include dev/test dependencies too (they will be needed later for test suite)
+   - DO NOT set NODE_ENV=production or equivalent — tests need dev dependencies
+   - DO NOT add any RUN or CMD instruction that executes tests (no RUN npm test, no RUN pytest, etc.)
+   - Tests are run via a SEPARATE run_tests.sh script, never inside the Dockerfile
+5. WriteToFile to create .dockerignore
+   - DO NOT exclude: tests/, test/, spec/, __tests__/, run_tests.sh, Makefile
+6. VerifyBuild — builds the Docker image
 
-PHASE 2 - CREATE:
-  4. WriteToFile to create Dockerfile
-  5. WriteToFile to create .dockerignore
-
-PHASE 3 - VERIFY (MANDATORY):
-  6. VerifyBuild to test the Dockerfile
-  
-PHASE 4 - IF BUILD FAILS (MANDATORY LOOP):
-  7. Read the error message carefully
-  8. SearchDockerError with descriptive keywords from the error
-  9. Fix the Dockerfile based on what you learned
-  10. VerifyBuild again
-  11. Repeat steps 7-10 until VerifyBuild returns SUCCESS
-
-═══════════════════════════════════════════════════════════════════════════════
-ABSOLUTE RULES:
-═══════════════════════════════════════════════════════════════════════════════
-
-1. You MUST call VerifyBuild at least once before your Final Answer
-2. You CANNOT give a Final Answer if VerifyBuild has not returned "SUCCESS"
-3. When VerifyBuild fails, you MUST use SearchDockerError to find solutions
-4. You MUST fix the Dockerfile and VerifyBuild again after researching
-5. Your Final Answer can ONLY report success if the last VerifyBuild passed
+IF BUILD FAILS:
+  - Use SearchDockerError with keywords from the error
+  - Fix the Dockerfile
+  - VerifyBuild again
+  - Repeat until build succeeds
 
 ═══════════════════════════════════════════════════════════════════════════════
-COMMON FIX PATTERNS (Learn from these):
+RULES:
 ═══════════════════════════════════════════════════════════════════════════════
 
-Error: "npm ERR! could not find package-lock.json"
-Fix: Use "npm install" instead of "npm ci", or "COPY package*.json ./"
+1. You MUST call VerifyBuild before your Final Answer
+2. You CANNOT give Final Answer unless VerifyBuild returned status="success" or status="incomplete"
+3. When build fails, use SearchDockerError to find solutions
+4. Use ENV DEBIAN_FRONTEND=noninteractive and -y on all apt-get
+5. Install build tools (git, make, gcc, etc.) that the project may need
 
-Error: "pip: No module named X" or missing system dependencies
-Fix: Install build deps: RUN apt-get update && apt-get install -y python3-dev gcc
-
-Error: "exec format error" or platform mismatch
-Fix: Use --platform=linux/amd64 in FROM statement
-
-Error: "COPY failed: file not found"
-Fix: Check actual file names with ListDirectory, fix COPY paths
-
-═══════════════════════════════════════════════════════════════════════════════
+COMMON FIX PATTERNS:
+- "npm ERR! could not find package-lock.json" → Use "npm install" not "npm ci"
+- "pip: No module named X" → RUN apt-get install -y python3-dev gcc
+- "exec format error" → Use --platform=linux/amd64 in FROM
+- "COPY failed: file not found" → Check with ListDirectory, fix paths
+- "[Y/n]" hanging → ENV DEBIAN_FRONTEND=noninteractive + -y
 
 Use the following format:
 
@@ -242,34 +236,12 @@ Final Answer: the final answer to the original input question
 
 CRITICAL OUTPUT RULES:
 1. You can ONLY output "Thought:", "Action:", "Action Input:", or "Final Answer:"
-2. You must NEVER write "Observation:" - the system adds that automatically after your Action runs
-3. Each response must contain EXACTLY ONE action - never chain multiple actions together
-4. Stop immediately after writing "Action Input:" - do not continue writing
+2. You must NEVER write "Observation:" - the system adds that automatically
+3. Each response must contain EXACTLY ONE action
+4. Stop immediately after writing "Action Input:"
 
-FINAL ANSWER FORMAT:
-When VerifyBuild returns SUCCESS in the Observation, your NEXT response must be:
-
-Thought: VerifyBuild returned SUCCESS.
-Final Answer: Successfully created Dockerfile for [repo-name]. Build verified and smoke test passed.
-
-Keep it to ONE sentence. DO NOT write lengthy documentation after success.
-
-IMPORTANT:
-1. To create a file, you MUST use the WriteToFile tool.
-2. You MUST verify your work with VerifyBuild before finishing.
-3. If VerifyBuild fails, you MUST research and fix it.
-4. Your Final Answer should be CONCISE (1 sentence) after VerifyBuild SUCCESS.
-5. Every Action MUST be immediately followed by "Action Input:" on the next line
-6. You can only output ONE action per response, then you must wait for the system to provide the Observation
-
-FORMAT EXAMPLE (follow this EXACTLY):
-Thought: I need to check the project structure
-Action: ListDirectory
-Action Input: {{"directory":"."}}
-
-(then STOP and wait for Observation)
-
-Begin!
+When VerifyBuild returns status="success" or status="incomplete", respond:
+Thought: VerifyBuild confirmed the build. Final Answer: Successfully created Dockerfile for [repo-name]. Build verified.
 
 Question: {input}
 Thought:{agent_scratchpad}"""
@@ -291,4 +263,170 @@ Thought:{agent_scratchpad}"""
     )
 
     # Return executor, handler, and base_llm for guidelines generation
+    return executor, FormattedOutputHandler(), base_llm
+
+
+def create_test_agent(
+    max_iterations: int = 35,
+    verbose: bool = True,
+    repository_path: str = None,
+    repo_name: str = None,
+    detected_language: str = None,
+    extra_tools: List[Tool] = None
+):
+    """
+    Create a TEST AGENT (Phase B).
+    
+    This agent discovers the test command, creates run_tests.sh, and verifies
+    that the test suite passes inside the already-built Docker container.
+    """
+    load_dotenv()
+    
+    # Config
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+
+    if not all([api_key, endpoint, deployment]):
+        raise ValueError("Missing required environment variables.")
+
+    # LLM
+    base_llm = AzureChatOpenAI(
+        azure_deployment=deployment,
+        api_key=api_key,
+        azure_endpoint=endpoint,
+        api_version=api_version,
+        max_retries=5,
+        timeout=120,
+        http_client=_get_http_client(),
+    )
+    llm = GPT5NanoWrapper(llm=base_llm)
+
+    # Tools
+    tools_list = create_structured_tools(repository_path)
+    if extra_tools:
+        tools_list.extend(extra_tools)
+    
+    _, host_arch_name = _get_host_platform()
+    
+    template = """You are an AUTONOMOUS DevOps engineer. A Dockerfile already exists for this repo.
+Your job: discover the test command, create run_tests.sh, and verify that tests pass.
+HOST ARCHITECTURE: {host_arch_name}
+
+TOOLS:
+{tools}
+
+TOOL INPUT CONTRACT:
+- WriteToFile:
+  Action Input: {{"file_path":"run_tests.sh","content":"<script contents>"}}
+  Also used for: Dockerfile (if you need to add missing deps)
+- ReadLocalFile:
+  Action Input: {{"file_path":"Dockerfile"}}
+- ListDirectory:
+  Action Input: {{"directory":"."}}
+- VerifyBuild:
+  Action Input: "" (empty string)
+- DiagnoseTestFailure:
+  Action Input: {{"test_output":"<from VerifyBuild>","dockerfile_content":"<from ReadLocalFile>","run_tests_content":"<from ReadLocalFile>"}}
+- RunInContainer:
+  Action Input: {{"command":"pip install pytest && pytest --co -q"}}
+
+IMPORTANT:
+- Action Input must be exactly a JSON object for that tool (or "" for VerifyBuild).
+- You may emit at most one tool call per message.
+
+═══════════════════════════════════════════════════════════════════════════════
+WORKFLOW:
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1 — DISCOVER TEST COMMAND (check in this order):
+  a. CI workflows: ReadLocalFile(".github/workflows/<file>.yml") — look for 'run:' steps
+     with pytest/npm test/mvn test/make check/go test/cargo test etc.
+  b. Makefile: look for 'test:' or 'check:' or 'ci:' targets
+  c. package.json → "scripts.test"; tox.ini → [commands]; pyproject.toml → [tool.pytest]
+  d. README.md / CONTRIBUTING.md — testing instructions
+  e. Fallback heuristics:
+     Python → python -m pytest; Node.js → npm test; Java/Maven → mvn test
+     Go → go test ./...; Rust → cargo test; C/C++ → make check or ctest
+
+STEP 2 — CREATE run_tests.sh:
+  - Start with: #!/bin/bash\nset -eo pipefail
+  - Install test-only dependencies (pip install pytest, npm install, etc.)
+  - Handle submodules: git submodule update --init --recursive (if .gitmodules exists)
+  - Run the discovered test command
+  - DO NOT use 'tee' or write to files - VerifyBuild captures all output automatically
+
+STEP 3 — VERIFY:
+  - VerifyBuild rebuilds the image and runs: docker run <image> bash /app/run_tests.sh
+
+STEP 4 — IF TESTS FAIL (MANDATORY):
+  a. Call DiagnoseTestFailure with the test_output + ReadLocalFile('Dockerfile') + ReadLocalFile('run_tests.sh')
+  b. Apply the suggested fix (update Dockerfile or run_tests.sh)
+  c. VerifyBuild again
+  d. Repeat until status="success"
+
+You can also use RunInContainer to run quick diagnostic commands inside the built image
+before committing to a full VerifyBuild cycle.
+
+═══════════════════════════════════════════════════════════════════════════════
+TEST FAILURE FIX RULES:
+═══════════════════════════════════════════════════════════════════════════════
+
+ALLOWED fixes:
+  ✓ Install missing dependency (in run_tests.sh or Dockerfile)
+  ✓ Add missing ENV variable (DATABASE_URL=sqlite:///test.db, etc.)
+  ✓ Fix WORKDIR or cd path in run_tests.sh
+  ✓ Initialize git submodules
+  ✓ Skip network/integration tests: pytest -k "not network"
+
+NEVER do these:
+  ✗ Overwrite or delete test files
+  ✗ Replace test command with echo or true
+  ✗ Add --collect-only or --ignore flags that skip all tests
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+CRITICAL OUTPUT RULES:
+1. You can ONLY output "Thought:", "Action:", "Action Input:", or "Final Answer:"
+2. You must NEVER write "Observation:"
+3. Each response must contain EXACTLY ONE action
+4. Stop immediately after writing "Action Input:"
+
+CRITICAL: When VerifyBuild returns status="success", you MUST IMMEDIATELY give your Final Answer.
+Do NOT call any more tools. Do NOT try to read test_results.txt (it's in an ephemeral container).
+The test output is already in the VerifyBuild response.
+
+When VerifyBuild returns status="success":
+Thought: Tests passed! Final Answer: Successfully created run_tests.sh. Test suite passes.
+
+Question: {input}
+Thought:{agent_scratchpad}"""
+
+    prompt = PromptTemplate.from_template(template).partial(
+        host_arch_name=host_arch_name
+    )
+    
+    agent = create_react_agent(llm, tools_list, prompt)
+    
+    executor = AgentExecutor(
+        agent=agent,
+        tools=tools_list,
+        verbose=verbose,
+        handle_parsing_errors=True,
+        max_iterations=max_iterations,
+        return_intermediate_steps=True
+    )
+
     return executor, FormattedOutputHandler(), base_llm
