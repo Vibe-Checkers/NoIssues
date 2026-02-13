@@ -97,7 +97,7 @@ class DockerBuildTester:
         )
 
     def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str, 
-                         retry_on_cache_error: bool = True) -> Dict:
+                         retry_on_cache_error: bool = True, cache_dir: Optional[str] = None) -> Dict:
         """
         Build a Dockerfile and return detailed results.
         
@@ -109,6 +109,7 @@ class DockerBuildTester:
             context_path: Path to build context (usually repository root)
             image_name: Name to tag the built image
             retry_on_cache_error: If True, auto-recover from cache corruption
+            cache_dir: Optional directory for local Buildx cache isolation
 
         Returns:
             Dictionary with build results including success status, stage, error details
@@ -133,20 +134,35 @@ class DockerBuildTester:
                 "duration_seconds": 0
             }
 
-        # Optionally serialize builds to prevent cache corruption
         if self.serialize_builds:
             with _docker_build_lock:
-                return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error)
+                return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error, cache_dir=cache_dir)
         else:
-            return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error)
+            return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error, cache_dir=cache_dir)
 
     def _do_build(self, dockerfile_path: str, context_path: str, image_name: str,
-                  retry_on_cache_error: bool = True, _is_retry: bool = False) -> Dict:
+                  retry_on_cache_error: bool = True, _is_retry: bool = False,
+                  cache_dir: Optional[str] = None) -> Dict:
         """Internal build method with retry logic for cache corruption."""
         start_time = time.time()
 
         try:
-            cmd = ["docker", "build"]
+            if cache_dir:
+                # Use buildx for local cache isolation
+                cmd = ["docker", "buildx", "build", "--load"] # --load ensures image is available in regular docker images list
+                
+                # Create cache directory if it doesn't exist
+                os.makedirs(cache_dir, exist_ok=True)
+                
+                # Always export cache to this directory
+                cmd.extend(["--cache-to", f"type=local,dest={cache_dir},mode=max"])
+                
+                # ONLY import cache if it actually exists to avoid warnings/errors on first run
+                # index.json is the indicator of a valid local cache export
+                if os.path.exists(os.path.join(cache_dir, "index.json")):
+                    cmd.extend(["--cache-from", f"type=local,src={cache_dir}"])
+            else:
+                cmd = ["docker", "build"]
 
             # Add platform flag if specified (for cross-platform builds)
             if self.platform:
@@ -211,12 +227,22 @@ class DockerBuildTester:
                 # Check for cache corruption and auto-recover
                 if retry_on_cache_error and not _is_retry and self._is_cache_corruption_error(full_error):
                     logger.warning("[DOCKER] Detected BuildKit cache corruption, attempting recovery...")
+                    
+                    # Also remove local cache directory if it exists as it might be the source
+                    if cache_dir and os.path.exists(cache_dir):
+                        try:
+                            logger.warning(f"[DOCKER] Removing local cache directory: {cache_dir}")
+                            shutil.rmtree(cache_dir)
+                        except Exception as e:
+                            logger.error(f"[DOCKER] Warning: Could not remove local cache: {e}")
+
                     if self.prune_buildkit_cache():
                         # Wait a moment for Docker to stabilize
                         time.sleep(2)
                         # Retry the build
                         return self._do_build(dockerfile_path, context_path, image_name, 
-                                             retry_on_cache_error=False, _is_retry=True)
+                                             retry_on_cache_error=False, _is_retry=True,
+                                             cache_dir=cache_dir)
                     else:
                         logger.error("[DOCKER] Cache prune failed, returning original error")
                 

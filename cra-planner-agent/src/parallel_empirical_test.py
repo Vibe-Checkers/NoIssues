@@ -589,8 +589,12 @@ class ParallelEmpiricalTester:
         self.transcripts_dir.mkdir(exist_ok=True)
         self.artifacts_dir.mkdir(exist_ok=True)
         self.structured_logs_dir.mkdir(exist_ok=True)
+        
+        # Unique cache directory for local buildx cache isolation
+        self.caches_dir = self.results_dir / "caches"
+        self.caches_dir.mkdir(exist_ok=True)
 
-        self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=True)
+        self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=False)
 
         # Thread-safe console output
         self.console_lock = threading.Lock()
@@ -758,10 +762,12 @@ class ParallelEmpiricalTester:
 
                 self.log(repo_name, "Validation: Building Docker image...", to_console=False)
                 image_name = f"learner-{slug}:latest"
+                cache_dir = self.caches_dir / slug
                 build_res = self.docker_tester.build_dockerfile(
                     str(dockerfile_path),
                     path,
-                    image_name
+                    image_name,
+                    cache_dir=str(cache_dir)
                 )
 
                 if build_res["success"]:
@@ -837,8 +843,9 @@ class ParallelEmpiricalTester:
 
                 # 3. Build image
                 self.log(repo_name, "[VerifyBuild] Building Docker image", to_console=False)
+                cache_dir = self.caches_dir / slug
                 build_result = self.docker_tester.build_dockerfile(
-                    str(dockerfile_path), repo_path, verify_image
+                    str(dockerfile_path), repo_path, verify_image, cache_dir=str(cache_dir)
                 )
 
                 if not build_result.get("success"):
@@ -990,8 +997,9 @@ class ParallelEmpiricalTester:
                         })
                     
                     # Quick build (uses cache if nothing changed)
+                    cache_dir_ric = self.caches_dir / slug
                     build_result = self.docker_tester.build_dockerfile(
-                        str(dockerfile_path_ric), repo_path, container_image
+                        str(dockerfile_path_ric), repo_path, container_image, cache_dir=str(cache_dir_ric)
                     )
                     if not build_result.get("success"):
                         return json.dumps({
@@ -1414,7 +1422,17 @@ class ParallelEmpiricalTester:
             except Exception as e:
                 self.log(repo_name, f"Warning: Could not remove Docker image: {e}", to_console=False)
 
-        # 3. Clear large result fields to reduce memory
+        # 3. Remove local cache directory
+        slug = result.get("repo_slug", repo_name.lower())
+        cache_dir = self.caches_dir / slug
+        if cache_dir.exists():
+            try:
+                shutil.rmtree(cache_dir)
+                self.log(repo_name, f"Removed local cache at {cache_dir}", to_console=False)
+            except Exception as e:
+                self.log(repo_name, f"Warning: Could not remove local cache: {e}", to_console=False)
+
+        # 4. Clear large result fields to reduce memory
         # Keep error messages but truncate if too large
         if "dockerfile_test" in result:
             docker_test = result["dockerfile_test"]
