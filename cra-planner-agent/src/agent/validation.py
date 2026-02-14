@@ -34,6 +34,8 @@ class DockerBuildTester:
         self.platform = platform
         self.serialize_builds = serialize_builds
         self.docker_available = self._check_docker()
+        if self.docker_available:
+            self._ensure_compatible_builder()
 
     def _check_docker(self) -> bool:
         """Check if Docker is installed and accessible."""
@@ -51,8 +53,81 @@ class DockerBuildTester:
     def check_infrastructure_health(self) -> Tuple[bool, str]:
         """Verify Docker infrastructure is healthy."""
         if self._check_docker():
-            return True, "Infrastructure health check passed"
+            try:
+                self._ensure_compatible_builder()
+                return True, "Infrastructure health check passed"
+            except Exception as e:
+                return False, f"Infrastructure health check failed: {e}"
         return False, "Docker daemon is not running or not accessible"
+
+    def _ensure_compatible_builder(self):
+        """
+        Ensure that the current Docker Buildx builder supports local cache exports.
+        The default 'docker' driver does NOT support this. We need a 'docker-container' driver.
+        """
+        try:
+            # 1. Check current builder driver
+            result = subprocess.run(
+                ["docker", "buildx", "inspect"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            # Look for Driver: docker (the limited one)
+            is_limited_driver = False
+            for line in result.stdout.splitlines():
+                if "Driver:" in line and "docker" in line.lower() and "container" not in line.lower():
+                    is_limited_driver = True
+                    break
+            
+            if not is_limited_driver:
+                return
+
+            logger.warning("[DOCKER] Default 'docker' driver does not support local cache isolation. Setting up compatible builder...")
+
+            # 2. Try to use an existing managed builder
+            builder_name = "noissues-managed-builder"
+            use_result = subprocess.run(
+                ["docker", "buildx", "use", builder_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if use_result.returncode == 0:
+                logger.info(f"[DOCKER] Switched to existing builder: {builder_name}")
+                return
+
+            # 3. Create it if it doesn't exist
+            logger.info(f"[DOCKER] Creating new 'docker-container' builder: {builder_name}")
+            create_result = subprocess.run(
+                ["docker", "buildx", "create", "--name", builder_name, "--driver", "docker-container", "--use"],
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            
+            if create_result.returncode == 0:
+                logger.info(f"[DOCKER] Successfully created and switched to {builder_name}")
+                # Bootstrap to ensure it's ready
+                subprocess.run(["docker", "buildx", "inspect", "--bootstrap"], timeout=60, capture_output=True)
+                return
+            else:
+                error_msg = f"Failed to create compatible Docker builder: {create_result.stderr}"
+                logger.error(f"[DOCKER] {error_msg}")
+                raise RuntimeError(error_msg)
+
+        except subprocess.TimeoutExpired:
+            error_msg = "Timeout while configuring Docker Buildx builder"
+            logger.error(f"[DOCKER] {error_msg}")
+            raise RuntimeError(error_msg)
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            error_msg = f"Unexpected error during Docker builder setup: {e}"
+            logger.error(f"[DOCKER] {error_msg}")
+            raise RuntimeError(error_msg)
 
     def prune_buildkit_cache(self) -> bool:
         """
