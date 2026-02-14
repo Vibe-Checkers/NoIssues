@@ -20,7 +20,7 @@ class DockerBuildTester:
     that can occur with high parallel worker counts.
     """
 
-    def __init__(self, timeout: int = 600, platform: str = None, serialize_builds: bool = False):
+    def __init__(self, timeout: int = 1200, platform: str = None, serialize_builds: bool = False):
         """
         Initialize Docker build tester.
 

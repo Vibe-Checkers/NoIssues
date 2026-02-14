@@ -109,7 +109,7 @@ def _get_host_platform() -> tuple:
     return 'linux/amd64', 'AMD64 (Unknown)'
 
 def create_learner_agent(
-    max_iterations: int = 35,
+    max_iterations: int = 50,
     verbose: bool = True,
     repository_path: str = None,
     repo_name: str = None,
@@ -252,12 +252,26 @@ Thought:{agent_scratchpad}"""
     
     # ReAct Agent
     agent = create_react_agent(llm, tools_list, prompt)
-    
+
+    def _handle_parsing_error(error) -> str:
+        """Guide the agent back to proper format on parse errors."""
+        return (
+            "FORMAT ERROR: Your output was not in the correct format. "
+            "You MUST use exactly this format:\n"
+            "Thought: <your reasoning>\n"
+            "Action: <tool name>\n"
+            "Action Input: <JSON input or empty string>\n\n"
+            "OR to finish:\n"
+            "Thought: I now know the final answer\n"
+            "Final Answer: <your answer>\n\n"
+            "Try again with the correct format."
+        )
+
     executor = AgentExecutor(
         agent=agent,
         tools=tools_list,
         verbose=verbose,
-        handle_parsing_errors=True,
+        handle_parsing_errors=_handle_parsing_error,
         max_iterations=max_iterations,
         return_intermediate_steps=True
     )
@@ -267,7 +281,7 @@ Thought:{agent_scratchpad}"""
 
 
 def create_test_agent(
-    max_iterations: int = 35,
+    max_iterations: int = 50,
     verbose: bool = True,
     repository_path: str = None,
     repo_name: str = None,
@@ -419,12 +433,26 @@ Thought:{agent_scratchpad}"""
     )
     
     agent = create_react_agent(llm, tools_list, prompt)
-    
+
+    def _handle_parsing_error(error) -> str:
+        """Guide the agent back to proper format on parse errors."""
+        return (
+            "FORMAT ERROR: Your output was not in the correct format. "
+            "You MUST use exactly this format:\n"
+            "Thought: <your reasoning>\n"
+            "Action: <tool name>\n"
+            "Action Input: <JSON input or empty string>\n\n"
+            "OR to finish:\n"
+            "Thought: I now know the final answer\n"
+            "Final Answer: <your answer>\n\n"
+            "Try again with the correct format."
+        )
+
     executor = AgentExecutor(
         agent=agent,
         tools=tools_list,
         verbose=verbose,
-        handle_parsing_errors=True,
+        handle_parsing_errors=_handle_parsing_error,
         max_iterations=max_iterations,
         return_intermediate_steps=True
     )

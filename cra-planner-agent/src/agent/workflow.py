@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent, create_test_agent
 from .preparation import build_initial_context
-# from .tools import _set_report_directory
+from .tools import reset_search_docker_error_counter
 
 logger = logging.getLogger(__name__)
 
@@ -167,28 +167,52 @@ def run_learner_agent(
     
     for attempt in range(1, max_retries + 1):
         phase_a_attempts = attempt
+        reset_search_docker_error_counter()
         logger.info(f"=== Phase A - Attempt {attempt}/{max_retries} ===")
         
         feedback_section = ""
         if build_lessons:
+            # Carry forward: include the last Dockerfile content and explain what went wrong
+            last_dockerfile_content = ""
+            if dockerfile_path.exists():
+                try:
+                    content = dockerfile_path.read_text(encoding='utf-8')
+                    if len(content) > 3000:
+                        content = content[:3000] + "\n# ... [truncated]"
+                    last_dockerfile_content = f"""
+YOUR PREVIOUS DOCKERFILE (this did NOT build successfully — fix the issues below):
+```dockerfile
+{content}
+```
+"""
+                except Exception:
+                    pass
+
             feedback_section = f"""
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚠️ PREVIOUS ATTEMPT FAILED - FIX THESE ISSUES:
+⚠️ ATTEMPT {attempt-1} FAILED — HERE IS WHAT HAPPENED AND WHAT TO FIX:
 ═══════════════════════════════════════════════════════════════════════════════
-{"".join(f"• {lesson}" + chr(10) for lesson in build_lessons)}
 
-REQUIRED ACTION:
-1. Use SearchDockerError with the error keywords from above
-2. Apply the fix and verify with VerifyBuild
+FAILURE REASON:
+{"".join(f"• {lesson}" + chr(10) for lesson in build_lessons[-3:])}
+{last_dockerfile_content}
+WHAT YOU MUST DO NOW:
+1. The Dockerfile above FAILED to build. Read it and understand the error.
+2. Fix the SPECIFIC issue described above — do NOT rewrite from scratch.
+3. If the error is about a missing package: add it to apt-get install.
+4. If the error is about a wrong base image: change the FROM line.
+5. If you've seen the SAME error twice: try a completely different approach
+   (different base image, different install strategy, etc.)
+6. Write the fixed Dockerfile with WriteToFile and run VerifyBuild.
 ═══════════════════════════════════════════════════════════════════════════════
 """
-        
+
         goal_prompt = f"""
 GOAL: Containerize the '{repo_name}' repository.
 
 OBJECTIVES:
-1. Use ListDirectory to see what files exist
+{"1. READ YOUR PREVIOUS DOCKERFILE above — it failed to build. Fix the specific error." if build_lessons else "1. Use ListDirectory to see what files exist"}
 2. Create a 'Dockerfile' that installs ALL dependencies (including dev/test deps)
 3. Create a '.dockerignore' (do NOT exclude test directories or Makefile)
 4. CRITICAL: Use 'VerifyBuild' to verify the Docker image builds successfully
@@ -196,7 +220,7 @@ OBJECTIVES:
 
 IMPORTANT RULES:
 - READ the REPOSITORY ANALYSIS in the context below — it contains critical insights for this specific repo
-- Use ListDirectory FIRST, then only read files you know exist
+{"- You already explored the repo in the previous attempt. Skip ListDirectory and go straight to fixing the Dockerfile." if build_lessons else "- Use ListDirectory FIRST, then only read files you know exist"}
 - Be efficient — don't waste API calls on trial-and-error file reads
 - Include dev/test dependencies in the Dockerfile (they'll be needed for testing later)
 
@@ -266,20 +290,63 @@ Begin!
     
     for attempt in range(1, max_retries + 1):
         phase_b_attempts = attempt
+        reset_search_docker_error_counter()
         logger.info(f"=== Phase B - Attempt {attempt}/{max_retries} ===")
         
         feedback_section = ""
         if test_lessons:
+            # Carry forward: include existing run_tests.sh (the part that failed)
+            # and Dockerfile (which WORKS — don't break it)
+            last_run_tests = ""
+            if run_tests_path.exists():
+                try:
+                    content = run_tests_path.read_text(encoding='utf-8')
+                    if len(content) > 2000:
+                        content = content[:2000] + "\n# ... [truncated]"
+                    last_run_tests = f"""
+YOUR PREVIOUS run_tests.sh (this FAILED — fix it):
+```bash
+{content}
+```
+"""
+                except Exception:
+                    pass
+
+            last_dockerfile = ""
+            if dockerfile_path.exists():
+                try:
+                    content = dockerfile_path.read_text(encoding='utf-8')
+                    if len(content) > 2000:
+                        content = content[:2000] + "\n# ... [truncated]"
+                    last_dockerfile = f"""
+YOUR WORKING DOCKERFILE (builds successfully — only modify if tests need extra system deps):
+```dockerfile
+{content}
+```
+"""
+                except Exception:
+                    pass
+
             feedback_section = f"""
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚠️ PREVIOUS ATTEMPT FAILED - FIX THESE ISSUES:
+⚠️ ATTEMPT {attempt-1} FAILED — THE BUILD WORKS BUT TESTS FAILED:
 ═══════════════════════════════════════════════════════════════════════════════
-{"".join(f"• {lesson}" + chr(10) for lesson in test_lessons)}
 
-REQUIRED ACTION:
-1. Call DiagnoseTestFailure with test_output + Dockerfile + run_tests.sh
-2. Apply the fix and VerifyBuild again
+The Dockerfile builds successfully. Do NOT break it.
+The problem is in run_tests.sh or missing test dependencies.
+
+FAILURE REASON:
+{"".join(f"• {lesson}" + chr(10) for lesson in test_lessons[-3:])}
+{last_run_tests}
+{last_dockerfile}
+WHAT YOU MUST DO NOW:
+1. The Dockerfile WORKS. Focus on fixing run_tests.sh.
+2. If tests need extra system packages (e.g. chromium, xvfb), add them to the Dockerfile.
+3. If the test command is wrong, fix it in run_tests.sh.
+4. If tests need env vars, add ENV lines to the Dockerfile.
+5. Call DiagnoseTestFailure if you need help understanding the error.
+6. Write the fixed file(s) and run VerifyBuild.
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
