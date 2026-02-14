@@ -137,8 +137,14 @@ class FormattedOutputHandler(BaseCallbackHandler):
         })
 
     def on_tool_end(self, output, **kwargs):
-        # Determine output length
-        output_str = str(output)
+        # Safely convert output to string — handle bytes objects
+        if isinstance(output, bytes):
+            try:
+                output_str = output.decode('utf-8', errors='replace')
+            except Exception:
+                output_str = output.decode('latin-1')
+        else:
+            output_str = str(output)
         
         # We always want full output in the log file and transcript
         # For console, we might want to truncate, but for now we'll follow the request 
@@ -642,6 +648,16 @@ def search_web_structured(input_data: Any) -> str:
     except Exception as e:
         return f"Input error: {e}"
 
+_search_docker_error_call_count = {}
+_search_docker_error_lock = threading.Lock()
+
+
+def reset_search_docker_error_counter():
+    """Reset the SearchDockerError call counter for the current thread."""
+    thread_id = threading.get_ident()
+    with _search_docker_error_lock:
+        _search_docker_error_call_count[thread_id] = 0
+
 def search_docker_error_structured(input_data: Any) -> str:
     """
     Search for Docker error solutions and use LLM to analyze and suggest fixes.
@@ -650,7 +666,22 @@ def search_docker_error_structured(input_data: Any) -> str:
     1. Searches the web for relevant solutions
     2. Uses LLM to analyze full error log + Dockerfile content + search results
     3. Returns a specific, actionable fix suggestion with precise line numbers
+
+    Rate-limited to 3 calls per thread to prevent context flooding.
     """
+    # Rate limit: max 3 calls per thread (proxy for per-repo)
+    thread_id = threading.get_ident()
+    with _search_docker_error_lock:
+        count = _search_docker_error_call_count.get(thread_id, 0)
+        if count >= 5:
+            return (
+                "SearchDockerError call limit reached (5/5). "
+                "You have already received fix suggestions. "
+                "Apply the previous suggestions and run VerifyBuild. "
+                "If the same error persists, try a fundamentally different approach."
+            )
+        _search_docker_error_call_count[thread_id] = count + 1
+
     try:
         from langchain_openai import AzureChatOpenAI
         from langchain_core.messages import SystemMessage, HumanMessage

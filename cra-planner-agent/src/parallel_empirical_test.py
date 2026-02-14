@@ -594,7 +594,7 @@ class ParallelEmpiricalTester:
         self.caches_dir = self.results_dir / "caches"
         self.caches_dir.mkdir(exist_ok=True)
 
-        self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=False)
+        self.docker_tester = DockerBuildTester(timeout=1200, serialize_builds=False)
 
         # Thread-safe console output
         self.console_lock = threading.Lock()
@@ -855,10 +855,21 @@ class ParallelEmpiricalTester:
                     except Exception:
                         pass
 
-                    tail_lines = build_result.get('error_message', '')
+                    full_error = build_result.get('error_message', '')
                     analyzer = LLMErrorAnalyzer()
-                    analysis, _ = analyzer.analyze_error(tail_lines, build_result.get('failed_command', ''))
+                    analysis, _ = analyzer.analyze_error(full_error, build_result.get('failed_command', ''))
                     self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
+
+                    # Smart truncation: keep last 2000 chars (where the actual error is)
+                    # plus first 500 chars (FROM line / early context)
+                    if len(full_error) > 3000:
+                        tail_lines = (
+                            full_error[:500]
+                            + "\n\n... [TRUNCATED — showing last 2000 chars] ...\n\n"
+                            + full_error[-2000:]
+                        )
+                    else:
+                        tail_lines = full_error
 
                     return json.dumps({
                         "status": "failed",

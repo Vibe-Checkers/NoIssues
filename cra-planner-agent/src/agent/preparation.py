@@ -351,66 +351,118 @@ def detect_project_language(repo_path: str) -> str:
     """
     Detect the primary programming language of a repository.
     PRIORITIZES build system files over source files.
+    Uses ordered checks: framework-specific > package manager > build system > file extensions.
     """
     try:
         if not os.path.exists(repo_path):
             return "Unknown"
 
-        # Check for build files first (strongest signal)
-        build_indicators = {
-            'package.json': 'Node.js',
-            'requirements.txt': 'Python',
-            'setup.py': 'Python',
-            'pyproject.toml': 'Python',
-            'Pipfile': 'Python',
-            'pom.xml': 'Java',
-            'build.gradle': 'Java',
-            'build.gradle.kts': 'Kotlin',
-            'go.mod': 'Go',
-            'Cargo.toml': 'Rust',
-            'Gemfile': 'Ruby',
-            'composer.json': 'PHP',
-            'mix.exs': 'Elixir',
-            'cabal.project': 'Haskell',
-            'pubspec.yaml': 'Dart',
-            'CMakeLists.txt': 'C++',
-            'Makefile': 'C/C++', # Ambiguous but often C/C++
-            'angular.json': 'Angular', # Specific framework
-            'next.config.js': 'Next.js', # Specific framework
-        }
+        def _exists(filename):
+            return os.path.exists(os.path.join(repo_path, filename))
 
-        # Check root directory for build files
-        for filename, language in build_indicators.items():
-            if os.path.exists(os.path.join(repo_path, filename)):
+        # Tier 1: Framework-specific files (highest confidence)
+        framework_indicators = [
+            ('angular.json', 'Angular'),
+            ('next.config.js', 'Next.js'),
+            ('next.config.mjs', 'Next.js'),
+            ('next.config.ts', 'Next.js'),
+            ('nuxt.config.js', 'Node.js'),
+            ('nuxt.config.ts', 'Node.js'),
+            ('svelte.config.js', 'Node.js'),
+        ]
+        for filename, language in framework_indicators:
+            if _exists(filename):
+                logger.info(f"Detected language {language} from framework file {filename}")
+                return language
+
+        # Tier 2: Package manager / build system files (ordered by specificity)
+        # More specific files first, ambiguous ones (Makefile) last
+        build_indicators = [
+            # Node.js ecosystem
+            ('package.json', 'Node.js'),
+            # Python ecosystem
+            ('pyproject.toml', 'Python'),
+            ('requirements.txt', 'Python'),
+            ('setup.py', 'Python'),
+            ('setup.cfg', 'Python'),
+            ('Pipfile', 'Python'),
+            # JVM ecosystem
+            ('pom.xml', 'Java'),
+            ('build.gradle', 'Java'),
+            ('build.gradle.kts', 'Kotlin'),
+            # Other languages
+            ('go.mod', 'Go'),
+            ('Cargo.toml', 'Rust'),
+            ('Gemfile', 'Ruby'),
+            ('composer.json', 'PHP'),
+            ('mix.exs', 'Elixir'),
+            ('cabal.project', 'Haskell'),
+            ('stack.yaml', 'Haskell'),
+            ('pubspec.yaml', 'Dart'),
+            ('CMakeLists.txt', 'C++'),
+            ('meson.build', 'C/C++'),
+            # Makefile is ambiguous — only use as last resort in this tier
+        ]
+
+        for filename, language in build_indicators:
+            if _exists(filename):
                 logger.info(f"Detected language {language} based on {filename}")
                 return language
 
-        # Fallback to file extensions in top-level directories
+        # Tier 3: Fallback to file extension counting
+        extension_map = {
+            '.py': 'Python',
+            '.js': 'Node.js', '.jsx': 'Node.js',
+            '.ts': 'Node.js', '.tsx': 'Node.js',
+            '.mjs': 'Node.js', '.cjs': 'Node.js',
+            '.java': 'Java',
+            '.kt': 'Kotlin', '.kts': 'Kotlin',
+            '.go': 'Go',
+            '.rb': 'Ruby',
+            '.php': 'PHP',
+            '.rs': 'Rust',
+            '.c': 'C/C++', '.h': 'C/C++',
+            '.cpp': 'C++', '.cc': 'C++', '.cxx': 'C++', '.hpp': 'C++',
+            '.cs': 'C#',
+            '.swift': 'Swift',
+            '.scala': 'Scala',
+            '.ex': 'Elixir', '.exs': 'Elixir',
+        }
+
         extension_counts = {}
-        for root, dirs, files in os.walk(repo_path):
-            # Don't go deep
-            if root.count(os.sep) - repo_path.count(os.sep) > 2:
-                continue
-                
-            # Skip hidden dirs
-            if any(part.startswith('.') for part in root.split(os.sep)):
+        repo_path_abs = os.path.abspath(repo_path)
+        for root, dirs, files in os.walk(repo_path_abs):
+            # Skip hidden directories and common non-source dirs
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith('.') and d not in (
+                    'node_modules', 'vendor', '__pycache__',
+                    'venv', '.venv', 'dist', 'build', 'target'
+                )
+            ]
+            # Don't go deeper than 3 levels
+            rel_depth = root[len(repo_path_abs):].count(os.sep)
+            if rel_depth > 3:
                 continue
 
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
-                if ext in ['.py']: extension_counts['Python'] = extension_counts.get('Python', 0) + 1
-                elif ext in ['.js', '.jsx', '.ts', '.tsx']: extension_counts['Node.js'] = extension_counts.get('Node.js', 0) + 1
-                elif ext in ['.java']: extension_counts['Java'] = extension_counts.get('Java', 0) + 1
-                elif ext in ['.go']: extension_counts['Go'] = extension_counts.get('Go', 0) + 1
-                elif ext in ['.rb']: extension_counts['Ruby'] = extension_counts.get('Ruby', 0) + 1
-                elif ext in ['.php']: extension_counts['PHP'] = extension_counts.get('PHP', 0) + 1
-                elif ext in ['.rs']: extension_counts['Rust'] = extension_counts.get('Rust', 0) + 1
+                lang = extension_map.get(ext)
+                if lang:
+                    extension_counts[lang] = extension_counts.get(lang, 0) + 1
 
         if extension_counts:
-            # Return most frequent
             most_common = max(extension_counts.items(), key=lambda x: x[1])[0]
-            logger.info(f"Detected language {most_common} based on file extensions {extension_counts}")
+            logger.info(
+                f"Detected language {most_common} based on "
+                f"file extensions {extension_counts}"
+            )
             return most_common
+
+        # Tier 4: Makefile-only projects (very last resort)
+        if _exists('Makefile'):
+            logger.info("Detected C/C++ based on Makefile (last resort)")
+            return "C/C++"
 
         return "Unknown"
     except Exception as e:
