@@ -700,9 +700,23 @@ def search_docker_error_structured(input_data: Any) -> str:
         if not search_results or "Search failed" in search_results or "No results" in search_results:
             return f"Could not find solutions for: {data.error_keywords}\n\nTry refining your error keywords or checking Docker documentation directly."
 
-        # Step 2: Use LLM to analyze and suggest fix
+        # Step 2: Use LLM to analyze and suggest fix (prefer GPT-5 analysis model)
+        deployment = (
+            os.getenv("ANALYSIS_MODEL_DEPLOYMENT")
+            or os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        )
+        endpoint = (
+            os.getenv("ANALYSIS_MODEL_ENDPOINT")
+            or os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+        api_key = (
+            os.getenv("ANALYSIS_MODEL_API_KEY")
+            or os.getenv("AZURE_OPENAI_API_KEY")
+        )
         llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=deployment,
+            azure_endpoint=endpoint,
+            api_key=api_key,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION")
         )
 
@@ -723,12 +737,15 @@ Be concise and practical. Focus on the most common solution first."""
         # Build comprehensive user prompt with all available context
         user_prompt_parts = [f"ERROR KEYWORDS: {data.error_keywords}"]
 
-        # Add full error log if provided
+        # Add full error log if provided — pass as much context as possible
         if data.full_error_log and data.full_error_log.strip():
-            # Truncate if extremely long (keep first and last portions)
             error_log = data.full_error_log
-            if len(error_log) > 15000:
-                error_log = error_log[:7500] + "\n\n... [middle truncated for brevity] ...\n\n" + error_log[-7500:]
+            if len(error_log) > 25000:
+                error_log = (
+                    error_log[:5000]
+                    + "\n\n... [middle truncated] ...\n\n"
+                    + error_log[-15000:]
+                )
             user_prompt_parts.append(f"\nFULL ERROR LOG:\n{error_log}")
 
         # Add Dockerfile content if provided
@@ -788,11 +805,13 @@ class DiagnoseTestFailureInput(BaseModel):
 
 def diagnose_test_failure_structured(input_data: Any) -> str:
     """
-    Use LLM to diagnose a test suite failure and suggest specific fixes.
+    Use GPT-5 to deeply diagnose test suite failures and suggest precise fixes.
 
-    This tool is called when VerifyBuild returns status='failed' at stage='TEST_SUITE'.
-    It analyses the test output plus the current Dockerfile and run_tests.sh to
-    suggest concrete, targeted changes.
+    Enhanced version that:
+    1. Receives FULL test output (not truncated)
+    2. Analyzes Dockerfile + run_tests.sh together for environment issues
+    3. Classifies failure type and provides targeted fix strategy
+    4. Returns ready-to-use corrected file contents
     """
     try:
         from langchain_openai import AzureChatOpenAI
@@ -803,38 +822,100 @@ def diagnose_test_failure_structured(input_data: Any) -> str:
         if not data.test_output.strip():
             return "ERROR: Please provide the test_output from VerifyBuild to diagnose."
 
+        # Use the analysis model (GPT-5) if available, fall back to agent model
+        deployment = (
+            os.getenv("ANALYSIS_MODEL_DEPLOYMENT")
+            or os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        )
+        endpoint = (
+            os.getenv("ANALYSIS_MODEL_ENDPOINT")
+            or os.getenv("AZURE_OPENAI_ENDPOINT")
+        )
+        api_key = (
+            os.getenv("ANALYSIS_MODEL_API_KEY")
+            or os.getenv("AZURE_OPENAI_API_KEY")
+        )
+
         llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=deployment,
+            azure_endpoint=endpoint,
+            api_key=api_key,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION")
         )
 
-        system_prompt = """You are a DevOps expert diagnosing why a test suite fails inside Docker.
+        system_prompt = """You are an expert DevOps engineer diagnosing why a test suite fails inside a Docker container.
 The Docker image built successfully. The test runner script (run_tests.sh) was executed but exited non-zero.
 
-Your job: identify the ROOT CAUSE and give a SPECIFIC, MINIMAL fix.
+ANALYSIS APPROACH — think through these categories in order:
 
-Respond in this exact format:
+1. MISSING DEPENDENCY: Test needs a package not installed in Dockerfile
+   (e.g., sqlite3, chromium, xvfb, gcc, python-dev, native libs)
+2. WRONG TEST COMMAND: The test command doesn't match this project
+   (e.g., using pytest but project uses unittest, using npm test but scripts.test is missing)
+3. MISSING ENV VARIABLE: Tests expect env vars that aren't set
+   (e.g., CI=true, DATABASE_URL, NODE_ENV=test, DISPLAY for browser tests)
+4. WRONG WORKING DIRECTORY: Tests run from wrong location
+   (e.g., WORKDIR is /app but tests expect to run from /app/src)
+5. MISSING BUILD STEP: Tests need compiled artifacts that weren't built
+   (e.g., TypeScript not compiled, C extensions not built, assets not generated)
+6. PERMISSION ERROR: Files or directories have wrong ownership
+   (e.g., node_modules owned by root, cache directories not writable)
+7. NETWORK/INTEGRATION: Tests try to connect to external services
+   (e.g., database, Redis, API — need skip flags)
+8. TEST FRAMEWORK CONFIG: Framework config file missing or wrong
+   (e.g., jest.config.js not copied, conftest.py not in path)
 
-**Root Cause:** [1-2 sentences — what error/exception caused the failure and why]
+Your job: identify the ROOT CAUSE category and give a SPECIFIC, MINIMAL, COPY-PASTE READY fix.
+
+Respond in this EXACT format:
+
+**Failure Category:** [one of: MISSING_DEPENDENCY | WRONG_TEST_COMMAND | MISSING_ENV_VAR | WRONG_WORKDIR | MISSING_BUILD_STEP | PERMISSION_ERROR | NETWORK_INTEGRATION | TEST_CONFIG | OTHER]
+**Root Cause:** [2-3 sentences — what specific error/exception caused the failure, which test(s) failed, and why]
 **Fix Location:** [DOCKERFILE or RUN_TESTS_SH or BOTH]
-**Fix:** [Exact change to make — show the line(s) to add/change/remove]
-**Example:**
+**Fix:** [Exact changes to make — reference specific lines]
+**Corrected run_tests.sh:**
+```bash
+<complete corrected run_tests.sh if it needs changes>
 ```
-<show the corrected snippet>
+**Dockerfile additions (if needed):**
+```dockerfile
+<only the lines to ADD or CHANGE in Dockerfile>
 ```
 
 Rules:
-- NEVER suggest modifying test files or replacing the test command with a no-op
-- Prefer fixing missing deps, env vars, WORKDIR, or permissions
-- If tests fail due to network/integration issues, suggest skip flags (e.g. pytest -k "not network")
-- Keep the fix minimal — don't rewrite the whole Dockerfile"""
+- NEVER suggest modifying test source files or replacing the test command with echo/true/exit 0
+- NEVER add --collect-only, --ignore-glob that skips ALL tests, or --no-tests
+- Prefer fixing the environment (deps, env vars, WORKDIR, permissions) over skipping tests
+- If tests fail due to network/integration, suggest MINIMAL skip flags (e.g., pytest -k "not integration")
+- If you see import errors, identify the EXACT missing pip/apt package
+- If you see "command not found", identify what needs to be installed and WHERE (Dockerfile vs run_tests.sh)
+- Consider that run_tests.sh runs INSIDE the container via: docker run <image> bash /app/run_tests.sh"""
 
-        parts = [f"TEST OUTPUT (last 3000 chars):\n{data.test_output[-3000:]}"]
+        # Pass FULL test output — much more context for better diagnosis
+        test_output = data.test_output
+        if len(test_output) > 15000:
+            test_output = (
+                test_output[:3000]
+                + "\n\n... [middle truncated — showing first 3000 + last 10000 chars] ...\n\n"
+                + test_output[-10000:]
+            )
+
+        parts = [f"FULL TEST OUTPUT:\n{test_output}"]
+
         if data.dockerfile_content.strip():
-            parts.append(f"\nCURRENT DOCKERFILE:\n{data.dockerfile_content}")
+            # Add line numbers
+            numbered = []
+            for i, line in enumerate(data.dockerfile_content.split('\n'), 1):
+                numbered.append(f"{i:3d} | {line}")
+            parts.append(f"\nCURRENT DOCKERFILE (with line numbers):\n" + "\n".join(numbered))
+
         if data.run_tests_content.strip():
-            parts.append(f"\nCURRENT run_tests.sh:\n{data.run_tests_content}")
-        parts.append("\nDiagnose this test failure and provide the fix.")
+            numbered = []
+            for i, line in enumerate(data.run_tests_content.split('\n'), 1):
+                numbered.append(f"{i:3d} | {line}")
+            parts.append(f"\nCURRENT run_tests.sh (with line numbers):\n" + "\n".join(numbered))
+
+        parts.append("\nDiagnose this test failure and provide the complete fix.")
 
         response = llm.invoke([
             SystemMessage(content=system_prompt),
@@ -842,10 +923,15 @@ Rules:
         ])
 
         content = response.content
-        if "**Root Cause:**" not in content:
-            content = f"**Root Cause:** Analysis incomplete\n**Fix Location:** UNKNOWN\n**Fix:** {content}"
+        if "**Root Cause:**" not in content and "**Failure Category:**" not in content:
+            content = (
+                f"**Failure Category:** OTHER\n"
+                f"**Root Cause:** Analysis incomplete\n"
+                f"**Fix Location:** UNKNOWN\n"
+                f"**Fix:** {content}"
+            )
 
-        return f"=== TEST FAILURE DIAGNOSIS ===\n{content}"
+        return f"=== TEST FAILURE DIAGNOSIS (GPT-5) ===\n{content}"
 
     except Exception as e:
         logger.error(f"DiagnoseTestFailure failed: {e}")

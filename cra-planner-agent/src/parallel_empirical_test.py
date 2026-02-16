@@ -405,19 +405,25 @@ class LLMErrorAnalyzer:
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
         )
 
-    def analyze_error(self, error_log: str, failed_command: str) -> Tuple[Dict, Dict]:
+    def analyze_error(self, error_log: str, failed_command: str,
+                      dockerfile_content: str = "") -> Tuple[Dict, Dict]:
         """
         Analyze a build error and return structured diagnosis.
+        Now accepts full Dockerfile content for context-aware fixes.
         Returns: (analysis_dict, log_data)
         """
         system_prompt = """You are a Docker Build Expert and Linux System Administrator.
 Your goal is to analyze a failed Docker build log and identify the EXACT valid fix.
+
+You will receive the FULL Dockerfile content and the FULL error log.
+Use both to provide precise, line-specific fixes.
 
 Output must be valid JSON with this structure:
 {
     "cause": "Concise explanation of what went wrong (e.g. 'Missing compiled extension dependencies')",
     "missing_packages": ["list", "of", "likely", "missing", "linux", "packages"],
     "suggested_fix": "Concrete, single-line command to fix the issue (e.g. 'RUN apt-get update && apt-get install -y libxml2-dev')",
+    "dockerfile_fix": "Show the EXACT Dockerfile lines to change — include line numbers and before/after",
     "search_keywords": "Optimized keywords for web search if the fix is uncertain"
 }
 
@@ -426,12 +432,35 @@ Rules:
 2. If it's a network error, suggest a retry or check proxies.
 3. Be specific with package names (e.g. 'python3-dev' instead of just 'dev headers').
 4. Do NOT hallucinate packages. If unsure, assume a web search is needed.
+5. When you have the Dockerfile, reference exact lines and show corrected versions.
+6. Consider cascading errors — the FIRST error in the log is usually the root cause.
 """
-        
+
+        # Pass full error log — let the LLM see everything
+        error_display = error_log
+        if len(error_log) > 20000:
+            error_display = (
+                error_log[:5000]
+                + "\n\n... [middle truncated] ...\n\n"
+                + error_log[-10000:]
+            )
+
+        dockerfile_section = ""
+        if dockerfile_content:
+            # Add line numbers for precise reference
+            numbered_lines = []
+            for i, line in enumerate(dockerfile_content.split('\n'), 1):
+                numbered_lines.append(f"{i:3d} | {line}")
+            dockerfile_section = (
+                "\n\nDOCKERFILE (with line numbers):\n"
+                + "\n".join(numbered_lines)
+            )
+
         user_prompt = f"""FAILED COMMAND: {failed_command}
-        
-ERROR LOG TAIL:
-{error_log}
+{dockerfile_section}
+
+FULL ERROR LOG:
+{error_display}
 
 Analyze this error and determine the fix."""
 
@@ -856,17 +885,30 @@ class ParallelEmpiricalTester:
                         pass
 
                     full_error = build_result.get('error_message', '')
+
+                    # Read current Dockerfile for context-aware error analysis
+                    current_dockerfile = ""
+                    try:
+                        if dockerfile_path.exists():
+                            current_dockerfile = dockerfile_path.read_text(encoding='utf-8')
+                    except Exception:
+                        pass
+
                     analyzer = LLMErrorAnalyzer()
-                    analysis, _ = analyzer.analyze_error(full_error, build_result.get('failed_command', ''))
+                    analysis, _ = analyzer.analyze_error(
+                        full_error,
+                        build_result.get('failed_command', ''),
+                        dockerfile_content=current_dockerfile
+                    )
                     self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
 
-                    # Smart truncation: keep last 2000 chars (where the actual error is)
-                    # plus first 500 chars (FROM line / early context)
-                    if len(full_error) > 3000:
+                    # Pass FULL error to agent — no aggressive truncation
+                    # Keep first 1000 chars (FROM line / early context) + last 6000 chars (actual error)
+                    if len(full_error) > 8000:
                         tail_lines = (
-                            full_error[:500]
-                            + "\n\n... [TRUNCATED — showing last 2000 chars] ...\n\n"
-                            + full_error[-2000:]
+                            full_error[:1000]
+                            + "\n\n... [middle truncated — showing first 1000 + last 6000 chars] ...\n\n"
+                            + full_error[-6000:]
                         )
                     else:
                         tail_lines = full_error
@@ -880,6 +922,7 @@ class ParallelEmpiricalTester:
                             "cause": analysis.get("cause"),
                             "suggested_fix": analysis.get("suggested_fix"),
                             "missing_packages": analysis.get("missing_packages", []),
+                            "dockerfile_fix": analysis.get("dockerfile_fix", ""),
                         },
                         "tail_lines": tail_lines,
                         "search_keywords": analysis.get(
@@ -901,8 +944,16 @@ class ParallelEmpiricalTester:
                     raw_output = (run_result.get("output") or "").strip()
                     exit_code = run_result.get("exit_code", -1)
                     test_counts = parse_test_results(raw_output)
-                    # Keep last 3000 chars so the agent can read meaningful failures
-                    display_output = raw_output[-3000:] if len(raw_output) > 3000 else raw_output
+                    # Pass much more test output to agent for better diagnosis
+                    # Keep first 1000 chars (setup/compilation) + last 7000 chars (actual test results)
+                    if len(raw_output) > 10000:
+                        display_output = (
+                            raw_output[:1000]
+                            + "\n\n... [middle truncated — showing first 1000 + last 7000 chars] ...\n\n"
+                            + raw_output[-7000:]
+                        )
+                    else:
+                        display_output = raw_output
 
                     # Save full test output to persistent file on host
                     try:
@@ -1027,9 +1078,9 @@ class ParallelEmpiricalTester:
                     output = run_result.get("output", "")
                     exit_code = run_result.get("exit_code", -1)
                     
-                    # Truncate output to 3000 chars
-                    if len(output) > 3000:
-                        output = output[:1500] + "\n\n... (truncated) ...\n\n" + output[-1500:]
+                    # Pass more output for better diagnosis
+                    if len(output) > 8000:
+                        output = output[:2000] + "\n\n... (truncated) ...\n\n" + output[-5000:]
                     
                     return json.dumps({
                         "status": "success" if run_result.get("success") else "failed",

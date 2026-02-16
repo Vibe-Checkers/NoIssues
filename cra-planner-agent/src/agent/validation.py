@@ -341,8 +341,8 @@ class DockerBuildTester:
                     "error_snippet": error_snippet,
                     "exit_code": result.returncode,
                     "duration_seconds": duration,
-                    "stdout": result.stdout[-2000:] if result.stdout else "",
-                    "stderr": result.stderr[-2000:] if result.stderr else None,
+                    "stdout": result.stdout[-6000:] if result.stdout else "",
+                    "stderr": result.stderr[-6000:] if result.stderr else None,
                     "was_retry": _is_retry
                 }
 

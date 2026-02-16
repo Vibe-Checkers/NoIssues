@@ -109,7 +109,7 @@ def _get_host_platform() -> tuple:
     return 'linux/amd64', 'AMD64 (Unknown)'
 
 def create_learner_agent(
-    max_iterations: int = 50,
+    max_iterations: int = 30,
     verbose: bool = True,
     repository_path: str = None,
     repo_name: str = None,
@@ -281,7 +281,7 @@ Thought:{agent_scratchpad}"""
 
 
 def create_test_agent(
-    max_iterations: int = 50,
+    max_iterations: int = 30,
     verbose: bool = True,
     repository_path: str = None,
     repo_name: str = None,
@@ -354,34 +354,50 @@ IMPORTANT:
 WORKFLOW:
 ═══════════════════════════════════════════════════════════════════════════════
 
-STEP 1 — DISCOVER TEST COMMAND (check in this order):
-  a. CI workflows: ReadLocalFile(".github/workflows/<file>.yml") — look for 'run:' steps
-     with pytest/npm test/mvn test/make check/go test/cargo test etc.
-  b. Makefile: look for 'test:' or 'check:' or 'ci:' targets
-  c. package.json → "scripts.test"; tox.ini → [commands]; pyproject.toml → [tool.pytest]
-  d. README.md / CONTRIBUTING.md — testing instructions
-  e. Fallback heuristics:
-     Python → python -m pytest; Node.js → npm test; Java/Maven → mvn test
-     Go → go test ./...; Rust → cargo test; C/C++ → make check or ctest
+STEP 1 — USE THE AUTO-DISCOVERED TEST COMMAND:
+  The preparation phase has already analyzed CI workflows, config files, and project structure
+  using GPT-5 to discover the test command. Check the AUTO-DISCOVERED TEST COMMAND section
+  in the context below — it includes:
+  - The exact test command to use
+  - Setup commands to run BEFORE the test command
+  - ENV vars to add to Dockerfile
+  - Skip patterns for tests that won't work in Docker
+  - Whether a build step is needed first
+
+  ONLY if no auto-discovered command is provided, discover it yourself:
+  a. CI workflows: ReadLocalFile(".github/workflows/<file>.yml")
+  b. Makefile: look for 'test:' or 'check:' targets
+  c. package.json → "scripts.test"; pyproject.toml → [tool.pytest]
+  d. README.md / CONTRIBUTING.md
 
 STEP 2 — CREATE run_tests.sh:
   - Start with: #!/bin/bash\nset -eo pipefail
-  - Install test-only dependencies (pip install pytest, npm install, etc.)
+  - Add any setup_commands from the auto-discovered test info
+  - If needs_build_first: run the build_command before tests
   - Handle submodules: git submodule update --init --recursive (if .gitmodules exists)
-  - Run the discovered test command
+  - Run the discovered test command (with skip patterns if provided)
   - DO NOT use 'tee' or write to files - VerifyBuild captures all output automatically
+
+STEP 2b — UPDATE DOCKERFILE IF NEEDED:
+  - Check the TEST ENVIRONMENT ANALYSIS section in context
+  - Add any required ENV vars (CI=true, NODE_ENV=test, etc.)
+  - Add any required system packages (chromium, xvfb, sqlite3, etc.)
+  - Do NOT break the existing build — only ADD lines
 
 STEP 3 — VERIFY:
   - VerifyBuild rebuilds the image and runs: docker run <image> bash /app/run_tests.sh
 
 STEP 4 — IF TESTS FAIL (MANDATORY):
-  a. Call DiagnoseTestFailure with the test_output + ReadLocalFile('Dockerfile') + ReadLocalFile('run_tests.sh')
-  b. Apply the suggested fix (update Dockerfile or run_tests.sh)
-  c. VerifyBuild again
-  d. Repeat until status="success"
+  a. Call DiagnoseTestFailure with the FULL test_output + ReadLocalFile('Dockerfile') + ReadLocalFile('run_tests.sh')
+  b. DiagnoseTestFailure uses GPT-5 to classify the failure and give precise fixes
+  c. Apply the COMPLETE suggested fix — don't cherry-pick parts
+  d. If fix says BOTH: update both Dockerfile AND run_tests.sh
+  e. VerifyBuild again
+  f. If SAME error after 2 attempts: try a fundamentally different approach
 
 You can also use RunInContainer to run quick diagnostic commands inside the built image
 before committing to a full VerifyBuild cycle.
+Examples: RunInContainer("pip list"), RunInContainer("node --version"), RunInContainer("ls /app/node_modules/.bin/")
 
 ═══════════════════════════════════════════════════════════════════════════════
 TEST FAILURE FIX RULES:

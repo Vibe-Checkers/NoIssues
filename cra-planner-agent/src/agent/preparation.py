@@ -697,22 +697,249 @@ def _fallback_workflow_summary(repo_path: str) -> str:
     except Exception as e:
         return f"Error reading workflows: {e}"
 
-def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, str]]:
+def _gather_test_relevant_files(repo_path: str, max_file_size: int = 6000) -> Dict[str, str]:
     """
-    Auto-discover the test command by probing project files.
-    
-    Checks (in priority order):
-      1. CI workflow files (.github/workflows/*.yml)
-      2. Makefile test/check targets
-      3. package.json scripts.test
-      4. pyproject.toml / tox.ini / setup.cfg
-      5. Language-based fallback heuristics
-    
-    Returns:
-        Dict with 'command', 'source', 'confidence' or None
+    Gather all files that could contain test configuration or test command hints.
+    Returns a dict of {relative_path: content}.
     """
     repo = Path(repo_path)
-    
+    test_files = {}
+
+    # Direct test config files
+    test_config_files = [
+        "package.json", "Makefile", "pyproject.toml", "tox.ini", "setup.cfg",
+        "setup.py", "pytest.ini", "conftest.py", ".nycrc", ".nycrc.json",
+        "jest.config.js", "jest.config.ts", "jest.config.mjs", "jest.config.cjs",
+        "vitest.config.ts", "vitest.config.js", "vitest.config.mts",
+        "karma.conf.js", "karma.conf.cjs",
+        ".mocharc.yml", ".mocharc.json", ".mocharc.js",
+        "phpunit.xml", "phpunit.xml.dist",
+        "build.gradle", "build.gradle.kts", "pom.xml",
+        "Cargo.toml", "go.mod",
+        "Gemfile", "Rakefile", ".rspec",
+        "mix.exs", "CMakeLists.txt",
+        "docker-compose.yml", "docker-compose.yaml",
+        "docker-compose.test.yml", "docker-compose.ci.yml",
+        "README.md", "CONTRIBUTING.md",
+        ".github/CONTRIBUTING.md",
+    ]
+
+    for filename in test_config_files:
+        filepath = repo / filename
+        if filepath.exists():
+            try:
+                content = filepath.read_text(encoding='utf-8', errors='ignore')
+                if len(content) > max_file_size:
+                    content = content[:max_file_size] + "\n... [TRUNCATED]"
+                test_files[filename] = content
+            except Exception:
+                pass
+
+    # CI workflow files (critical for test discovery)
+    ci_dirs = [
+        (repo / ".github" / "workflows", "*.yml"),
+        (repo / ".github" / "workflows", "*.yaml"),
+    ]
+    for ci_dir, pattern in ci_dirs:
+        if ci_dir.exists():
+            for wf_file in list(ci_dir.glob(pattern))[:5]:
+                rel_path = f".github/workflows/{wf_file.name}"
+                try:
+                    content = wf_file.read_text(encoding='utf-8', errors='ignore')
+                    if len(content) > max_file_size:
+                        content = content[:max_file_size] + "\n... [TRUNCATED]"
+                    test_files[rel_path] = content
+                except Exception:
+                    pass
+
+    # Also check for .travis.yml, .circleci/config.yml, Jenkinsfile
+    for ci_file in [".travis.yml", ".circleci/config.yml", "Jenkinsfile"]:
+        filepath = repo / ci_file
+        if filepath.exists():
+            try:
+                content = filepath.read_text(encoding='utf-8', errors='ignore')
+                if len(content) > max_file_size:
+                    content = content[:max_file_size] + "\n... [TRUNCATED]"
+                test_files[ci_file] = content
+            except Exception:
+                pass
+
+    # Scan for test directories to understand test structure
+    test_dir_indicators = []
+    for d in ["tests", "test", "spec", "__tests__", "test_suite", "testing"]:
+        test_dir = repo / d
+        if test_dir.is_dir():
+            try:
+                items = list(test_dir.iterdir())[:20]
+                listing = [f"  {item.name}" for item in items]
+                test_dir_indicators.append(f"{d}/:\n" + "\n".join(listing))
+            except Exception:
+                pass
+    if test_dir_indicators:
+        test_files["__TEST_DIRECTORIES__"] = "\n".join(test_dir_indicators)
+
+    return test_files
+
+
+def discover_test_command(
+    repo_path: str,
+    language: str,
+    llm: Optional[BaseChatModel] = None,
+    tracker: Optional['PreparationTokenTracker'] = None
+) -> Optional[Dict[str, str]]:
+    """
+    Discover the test command using GPT-5 deep analysis of ALL test-relevant files.
+
+    This replaces the old heuristic-only approach. GPT-5 analyzes:
+      - CI workflows (GitHub Actions, Travis, CircleCI, Jenkins)
+      - Build system files (Makefile, package.json, pyproject.toml, pom.xml, etc.)
+      - Test config files (jest.config, pytest.ini, karma.conf, etc.)
+      - README/CONTRIBUTING for test instructions
+      - Test directory structure
+
+    Falls back to heuristics only if LLM is not available.
+
+    Returns:
+        Dict with 'command', 'source', 'confidence', 'setup_commands',
+        'env_vars', 'test_framework', 'skip_patterns' or None
+    """
+    repo = Path(repo_path)
+
+    # Gather all test-relevant files
+    test_files = _gather_test_relevant_files(repo_path)
+
+    if not test_files:
+        logger.warning("No test-relevant files found in repository")
+        return _heuristic_test_command_fallback(repo_path, language)
+
+    # If LLM available, use GPT-5 for deep analysis
+    if llm is not None:
+        try:
+            result = _llm_discover_test_command(llm, test_files, language, repo_path, tracker)
+            if result:
+                return result
+            logger.warning("LLM test discovery returned no result, falling back to heuristics")
+        except Exception as e:
+            logger.warning(f"LLM test discovery failed: {e}, falling back to heuristics")
+
+    return _heuristic_test_command_fallback(repo_path, language)
+
+
+def _llm_discover_test_command(
+    llm: BaseChatModel,
+    test_files: Dict[str, str],
+    language: str,
+    repo_path: str,
+    tracker: Optional['PreparationTokenTracker'] = None
+) -> Optional[Dict[str, str]]:
+    """
+    Use GPT-5 to deeply analyze test configuration and discover the correct test command.
+    Returns enriched test command info including setup steps and environment variables.
+    """
+    # Build file contents section
+    files_section = ""
+    for filename, content in test_files.items():
+        files_section += f"\n{'='*50}\nFILE: {filename}\n{'='*50}\n{content}\n"
+
+    system_prompt = """You are an expert at analyzing software repositories to discover how to run their test suites.
+
+You must analyze ALL provided files carefully and determine:
+1. The EXACT test command the project uses
+2. What test framework is being used
+3. Any setup steps needed BEFORE running tests
+4. Environment variables needed for tests
+5. Any tests that should be skipped in a Docker container (network, GUI, integration tests)
+
+CRITICAL RULES:
+- Extract the ACTUAL test command from CI workflows or config files — don't guess
+- If CI uses multiple test stages, pick the PRIMARY unit test command (not lint, not e2e)
+- If package.json scripts.test exists and is not "no test specified" or "echo \\"Error: no test\\"", use "npm test"
+- For Python: check if the project uses pytest, unittest, nose, or tox
+- For Java: check Maven (mvn test), Gradle (./gradlew test), or custom
+- For Go: typically "go test ./..." but check CI for flags like -race, -v, -count=1
+- For Rust: typically "cargo test" but check for features or workspace flags
+- If the project needs a build step before tests, include it in setup_commands
+- Prefer the command from CI over README, prefer README over pure heuristics
+
+You MUST respond in valid JSON only — no markdown, no explanation outside the JSON."""
+
+    user_prompt = f"""Analyze this {language} repository's test configuration and discover the test command.
+
+{files_section}
+
+Respond with this exact JSON structure:
+{{
+    "test_command": "<the exact command to run tests>",
+    "test_framework": "<framework name: pytest/jest/mocha/junit/go-test/cargo-test/rspec/etc>",
+    "source": "<which file you found this in and why>",
+    "confidence": "<high/medium/low>",
+    "setup_commands": ["<commands to run BEFORE the test command, e.g. 'pip install -e .[test]'>"],
+    "env_vars": {{"KEY": "VALUE"}},
+    "skip_patterns": ["<patterns for tests to skip in Docker, e.g. 'not integration'>"],
+    "needs_build_first": <true/false>,
+    "build_command": "<build command if needs_build_first is true, else null>",
+    "notes": "<any important observations about the test setup>"
+}}
+
+If you cannot determine the test command with any confidence, respond:
+{{"test_command": null, "reason": "<why>"}}"""
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ])
+        if tracker:
+            tracker.track(response, "test_command_discovery")
+
+        # Parse response
+        content = response.content.strip()
+        # Strip markdown fences if present
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(content)
+
+        if not result.get("test_command"):
+            logger.info(f"LLM could not determine test command: {result.get('reason', 'unknown')}")
+            return None
+
+        logger.info(
+            f"LLM discovered test command: {result['test_command']} "
+            f"(framework: {result.get('test_framework', 'unknown')}, "
+            f"confidence: {result.get('confidence', 'unknown')}, "
+            f"source: {result.get('source', 'unknown')})"
+        )
+
+        return {
+            "command": result["test_command"],
+            "source": result.get("source", "LLM analysis"),
+            "confidence": result.get("confidence", "medium"),
+            "test_framework": result.get("test_framework", "unknown"),
+            "setup_commands": result.get("setup_commands", []),
+            "env_vars": result.get("env_vars", {}),
+            "skip_patterns": result.get("skip_patterns", []),
+            "needs_build_first": result.get("needs_build_first", False),
+            "build_command": result.get("build_command"),
+            "notes": result.get("notes", ""),
+        }
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse LLM test discovery response: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"LLM test discovery failed: {e}")
+        return None
+
+
+def _heuristic_test_command_fallback(repo_path: str, language: str) -> Optional[Dict[str, str]]:
+    """
+    Fallback heuristic test command discovery (used when LLM is unavailable).
+    """
+    repo = Path(repo_path)
+
     # Known test command patterns to look for in CI
     test_patterns = re.compile(
         r'\b(pytest|py\.test|python\s+-m\s+pytest|npm\s+test|npx\s+jest|'
@@ -720,7 +947,7 @@ def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, s
         r'ctest|phpunit|rspec|bundle\s+exec\s+rspec|mix\s+test)\b',
         re.IGNORECASE
     )
-    
+
     # 1. CI Workflows
     workflows_dir = repo / ".github" / "workflows"
     if workflows_dir.exists():
@@ -739,11 +966,9 @@ def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, s
                         if isinstance(run_cmd, str):
                             match = test_patterns.search(run_cmd)
                             if match:
-                                # Extract the full line containing the match
                                 for line in run_cmd.strip().split('\n'):
                                     if test_patterns.search(line):
                                         cmd = line.strip()
-                                        logger.info(f"Discovered test command from CI: {cmd}")
                                         return {
                                             "command": cmd,
                                             "source": f".github/workflows/{wf_file.name} (job: {job_name})",
@@ -751,28 +976,21 @@ def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, s
                                         }
         except Exception as e:
             logger.debug(f"Error parsing CI workflows: {e}")
-    
+
     # 2. Makefile
     makefile = repo / "Makefile"
     if makefile.exists():
         try:
             with open(makefile, 'r') as f:
                 content = f.read()
-            # Look for test: or check: targets
             for target in ['test', 'check', 'tests']:
                 pattern = re.compile(rf'^{target}\s*:', re.MULTILINE)
                 if pattern.search(content):
-                    cmd = f"make {target}"
-                    logger.info(f"Discovered test command from Makefile: {cmd}")
-                    return {
-                        "command": cmd,
-                        "source": "Makefile",
-                        "confidence": "high"
-                    }
-        except Exception as e:
-            logger.debug(f"Error reading Makefile: {e}")
-    
-    # 3. package.json (Node.js)
+                    return {"command": f"make {target}", "source": "Makefile", "confidence": "high"}
+        except Exception:
+            pass
+
+    # 3. package.json
     pkg_json = repo / "package.json"
     if pkg_json.exists():
         try:
@@ -780,15 +998,10 @@ def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, s
                 pkg = json.load(f)
             test_script = pkg.get('scripts', {}).get('test', '')
             if test_script and 'no test specified' not in test_script.lower():
-                logger.info(f"Discovered test command from package.json: npm test")
-                return {
-                    "command": "npm test",
-                    "source": f"package.json (scripts.test = {test_script})",
-                    "confidence": "high"
-                }
-        except Exception as e:
-            logger.debug(f"Error reading package.json: {e}")
-    
+                return {"command": "npm test", "source": f"package.json (scripts.test = {test_script})", "confidence": "high"}
+        except Exception:
+            pass
+
     # 4. pyproject.toml
     pyproject = repo / "pyproject.toml"
     if pyproject.exists():
@@ -796,76 +1009,128 @@ def discover_test_command(repo_path: str, language: str) -> Optional[Dict[str, s
             with open(pyproject, 'r') as f:
                 content = f.read()
             if '[tool.pytest' in content or 'pytest' in content.lower():
-                logger.info("Discovered test command from pyproject.toml: pytest")
-                return {
-                    "command": "python -m pytest",
-                    "source": "pyproject.toml ([tool.pytest] section found)",
-                    "confidence": "high"
-                }
-        except Exception as e:
-            logger.debug(f"Error reading pyproject.toml: {e}")
-    
-    # 5. tox.ini
-    tox_ini = repo / "tox.ini"
-    if tox_ini.exists():
-        try:
-            with open(tox_ini, 'r') as f:
-                content = f.read()
-            # Look for commands = pytest or similar
-            for line in content.split('\n'):
-                if 'commands' in line.lower() and '=' in line:
-                    cmd_part = line.split('=', 1)[1].strip()
-                    if cmd_part:
-                        logger.info(f"Discovered test command from tox.ini: {cmd_part}")
-                        return {
-                            "command": cmd_part,
-                            "source": "tox.ini",
-                            "confidence": "medium"
-                        }
-        except Exception as e:
-            logger.debug(f"Error reading tox.ini: {e}")
-    
-    # 6. setup.cfg
-    setup_cfg = repo / "setup.cfg"
-    if setup_cfg.exists():
-        try:
-            with open(setup_cfg, 'r') as f:
-                content = f.read()
-            if '[tool:pytest]' in content:
-                logger.info("Discovered test command from setup.cfg: pytest")
-                return {
-                    "command": "python -m pytest",
-                    "source": "setup.cfg ([tool:pytest] section)",
-                    "confidence": "medium"
-                }
-        except Exception as e:
-            logger.debug(f"Error reading setup.cfg: {e}")
-    
-    # 7. Language-based fallback
+                return {"command": "python -m pytest", "source": "pyproject.toml", "confidence": "high"}
+        except Exception:
+            pass
+
+    # 5. Language-based fallback
     fallbacks = {
-        'Python': ('python -m pytest', 'low'),
-        'Node.js': ('npm test', 'low'),
-        'Java': ('mvn test', 'low'),
-        'Kotlin': ('./gradlew test', 'low'),
-        'Go': ('go test ./...', 'low'),
-        'Rust': ('cargo test', 'low'),
-        'Ruby': ('bundle exec rspec', 'low'),
-        'PHP': ('./vendor/bin/phpunit', 'low'),
-        'Elixir': ('mix test', 'low'),
-        'C/C++': ('make check', 'low'),
-        'C++': ('ctest', 'low'),
+        'Python': 'python -m pytest', 'Node.js': 'npm test', 'Java': 'mvn test',
+        'Kotlin': './gradlew test', 'Go': 'go test ./...', 'Rust': 'cargo test',
+        'Ruby': 'bundle exec rspec', 'PHP': './vendor/bin/phpunit',
+        'Elixir': 'mix test', 'C/C++': 'make check', 'C++': 'ctest',
     }
-    
     if language in fallbacks:
-        cmd, confidence = fallbacks[language]
-        logger.info(f"Using fallback test command for {language}: {cmd}")
-        return {
-            "command": cmd,
-            "source": f"language fallback ({language})",
-            "confidence": confidence
-        }
-    
+        return {"command": fallbacks[language], "source": f"language fallback ({language})", "confidence": "low"}
+
     return None
+
+
+def analyze_test_environment(
+    llm: BaseChatModel,
+    repo_path: str,
+    language: str,
+    test_command: Optional[Dict[str, str]] = None,
+    gathered_context: Optional[Dict[str, Any]] = None,
+    tracker: Optional['PreparationTokenTracker'] = None
+) -> str:
+    """
+    GPT-5 powered deep analysis of the test environment requirements.
+
+    This is a NEW preparation step that analyzes what the test suite needs to run
+    successfully inside Docker — system packages, env vars, services, file permissions,
+    build artifacts, etc.
+
+    Returns a structured analysis string to be included in agent context.
+    """
+    test_files = _gather_test_relevant_files(repo_path)
+
+    # Build file contents section
+    files_section = ""
+    for filename, content in test_files.items():
+        files_section += f"\n--- {filename} ---\n{content}\n"
+
+    test_cmd_info = ""
+    if test_command:
+        test_cmd_info = f"""
+DISCOVERED TEST COMMAND: {test_command.get('command', 'N/A')}
+TEST FRAMEWORK: {test_command.get('test_framework', 'unknown')}
+SETUP COMMANDS: {test_command.get('setup_commands', [])}
+ENV VARS NEEDED: {test_command.get('env_vars', {})}
+SKIP PATTERNS: {test_command.get('skip_patterns', [])}
+NEEDS BUILD FIRST: {test_command.get('needs_build_first', False)}
+BUILD COMMAND: {test_command.get('build_command', 'N/A')}
+NOTES: {test_command.get('notes', '')}
+"""
+
+    system_prompt = """You are a senior DevOps engineer specialized in running test suites inside Docker containers.
+Analyze the repository files and produce a COMPLETE test environment specification.
+
+Your analysis will be fed directly to an autonomous agent that creates:
+1. A Dockerfile (must include ALL test dependencies as system packages and ENV vars)
+2. A run_tests.sh script (runs inside the container after build)
+
+Be EXTREMELY specific and actionable. Every recommendation must be copy-paste ready."""
+
+    user_prompt = f"""Analyze this {language} repository and determine EVERYTHING needed to run its test suite inside Docker.
+
+{test_cmd_info}
+
+PROJECT FILES:
+{files_section}
+
+Produce a structured analysis with these EXACT sections:
+
+## TEST FRAMEWORK & COMMAND
+- Exact test framework and version (if detectable)
+- The exact command to run in run_tests.sh
+- Any flags needed (--no-coverage, --forceExit, -x, etc.)
+
+## PRE-TEST SETUP (for run_tests.sh)
+Steps that must happen BEFORE running the test command:
+- Dependency installation that can't go in Dockerfile (e.g., pip install -e .)
+- Database migrations or fixtures
+- Git submodule initialization
+- File permission fixes
+- Creating temp directories
+
+## DOCKERFILE REQUIREMENTS (for test compatibility)
+System packages, ENV vars, and config the Dockerfile MUST include:
+- List every apt-get package (e.g., chromium, xvfb, sqlite3, libpq-dev)
+- List every ENV var (e.g., CI=true, NODE_ENV=test, DISPLAY=:99)
+- Any config files that must exist (e.g., .env.test)
+- WORKDIR considerations
+
+## TESTS TO SKIP IN DOCKER
+Tests that will ALWAYS fail in a Docker container:
+- Browser/GUI tests without headless support
+- Tests requiring external services (databases, Redis, etc.)
+- Network-dependent tests
+- Tests requiring specific OS features (systemd, etc.)
+Provide the exact skip flags/patterns for the test framework.
+
+## COMMON FAILURE PATTERNS
+Known issues for this specific tech stack in Docker:
+- Permission errors (node_modules, .cache)
+- Missing native dependencies
+- Timezone issues
+- Locale issues
+- Memory limits
+
+## READY-TO-USE run_tests.sh
+Provide a complete, ready-to-use run_tests.sh script."""
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ])
+        if tracker:
+            tracker.track(response, "test_environment_analysis")
+        return response.content
+    except Exception as e:
+        logger.error(f"Test environment analysis failed: {e}")
+        return f"[Test environment analysis failed: {e}]"
 
 
 def build_initial_context(llm: BaseChatModel, repo_path: str, skip_analysis: bool = False) -> dict:
@@ -923,22 +1188,44 @@ def build_initial_context(llm: BaseChatModel, repo_path: str, skip_analysis: boo
             analysis_model, repo_path, language, gathered_context, tracker
         )
 
-    # 6. Test command discovery (heuristic + structured)
-    test_command = discover_test_command(repo_path, language)
+    # 6. Test command discovery (GPT-5 powered deep analysis)
+    logger.info("Discovering test command with LLM deep analysis...")
+    test_command = discover_test_command(
+        repo_path, language, llm=analysis_model, tracker=tracker
+    )
+
+    # 7. Test environment analysis (GPT-5 powered)
+    logger.info("Analyzing test environment requirements...")
+    test_env_analysis = analyze_test_environment(
+        analysis_model, repo_path, language,
+        test_command=test_command,
+        gathered_context=gathered_context,
+        tracker=tracker
+    )
 
     # --- Assemble context string ---
 
     test_cmd_section = ""
     if test_command:
+        setup_cmds = test_command.get('setup_commands', [])
+        env_vars = test_command.get('env_vars', {})
+        skip_pats = test_command.get('skip_patterns', [])
         test_cmd_section = f"""
-AUTO-DISCOVERED TEST COMMAND:
+AUTO-DISCOVERED TEST COMMAND (GPT-5 analyzed):
   Command: {test_command['command']}
-  Source:  {test_command['source']}
-  Confidence: {test_command['confidence']}
+  Framework: {test_command.get('test_framework', 'unknown')}
+  Source:  {test_command.get('source', 'unknown')}
+  Confidence: {test_command.get('confidence', 'unknown')}
+  Setup Commands: {setup_cmds if setup_cmds else 'None'}
+  Required ENV vars: {env_vars if env_vars else 'None'}
+  Skip Patterns (for Docker): {skip_pats if skip_pats else 'None'}
+  Needs Build First: {test_command.get('needs_build_first', False)}
+  Build Command: {test_command.get('build_command', 'N/A')}
+  Notes: {test_command.get('notes', '')}
 """
         logger.info(
             f"Auto-discovered test command: {test_command['command']} "
-            f"(from {test_command['source']})"
+            f"(from {test_command.get('source', 'unknown')})"
         )
 
     sep = '=' * 60
@@ -1019,6 +1306,11 @@ CONTAINERIZATION GUIDELINES
 UNIVERSAL BUILD GUIDELINES
 {sep}
 {universal_guidelines}
+
+{sep}
+TEST ENVIRONMENT ANALYSIS (GPT-5 deep analysis)
+{sep}
+{test_env_analysis}
 {test_cmd_section}"""
 
     # Log preparation token summary

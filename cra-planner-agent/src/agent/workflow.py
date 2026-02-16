@@ -172,13 +172,14 @@ def run_learner_agent(
         
         feedback_section = ""
         if build_lessons:
-            # Carry forward: include the last Dockerfile content and explain what went wrong
+            # Carry forward: include the FULL Dockerfile content and explain what went wrong
             last_dockerfile_content = ""
             if dockerfile_path.exists():
                 try:
                     content = dockerfile_path.read_text(encoding='utf-8')
-                    if len(content) > 3000:
-                        content = content[:3000] + "\n# ... [truncated]"
+                    # Include full Dockerfile — agent needs complete context
+                    if len(content) > 8000:
+                        content = content[:8000] + "\n# ... [truncated]"
                     last_dockerfile_content = f"""
 YOUR PREVIOUS DOCKERFILE (this did NOT build successfully — fix the issues below):
 ```dockerfile
@@ -295,14 +296,11 @@ Begin!
         
         feedback_section = ""
         if test_lessons:
-            # Carry forward: include existing run_tests.sh (the part that failed)
-            # and Dockerfile (which WORKS — don't break it)
+            # Carry forward: include FULL run_tests.sh and Dockerfile
             last_run_tests = ""
             if run_tests_path.exists():
                 try:
                     content = run_tests_path.read_text(encoding='utf-8')
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n# ... [truncated]"
                     last_run_tests = f"""
 YOUR PREVIOUS run_tests.sh (this FAILED — fix it):
 ```bash
@@ -316,8 +314,6 @@ YOUR PREVIOUS run_tests.sh (this FAILED — fix it):
             if dockerfile_path.exists():
                 try:
                     content = dockerfile_path.read_text(encoding='utf-8')
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n# ... [truncated]"
                     last_dockerfile = f"""
 YOUR WORKING DOCKERFILE (builds successfully — only modify if tests need extra system deps):
 ```dockerfile
@@ -350,18 +346,48 @@ WHAT YOU MUST DO NOW:
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
-        # Include auto-discovered test command if available
+        # Include auto-discovered test command with full GPT-5 analysis
         test_command_hint = ""
         if prep_context.get("test_command"):
             tc = prep_context["test_command"]
+            setup_cmds = tc.get('setup_commands', [])
+            env_vars = tc.get('env_vars', {})
+            skip_pats = tc.get('skip_patterns', [])
+
+            setup_section = ""
+            if setup_cmds:
+                setup_section = "\n  Setup commands (run BEFORE test command in run_tests.sh):\n"
+                for cmd in setup_cmds:
+                    setup_section += f"    - {cmd}\n"
+
+            env_section = ""
+            if env_vars:
+                env_section = "\n  ENV vars (add to Dockerfile as ENV lines):\n"
+                for k, v in env_vars.items():
+                    env_section += f"    ENV {k}={v}\n"
+
+            skip_section = ""
+            if skip_pats:
+                skip_section = "\n  Tests to skip in Docker (add to test command):\n"
+                for pat in skip_pats:
+                    skip_section += f"    - {pat}\n"
+
+            build_section = ""
+            if tc.get('needs_build_first') and tc.get('build_command'):
+                build_section = f"\n  Build before test: {tc['build_command']}\n"
+
             test_command_hint = f"""
 
-AUTO-DISCOVERED TEST COMMAND:
+AUTO-DISCOVERED TEST COMMAND (GPT-5 analyzed):
   Command: {tc.get('command', 'N/A')}
+  Framework: {tc.get('test_framework', 'unknown')}
   Source: {tc.get('source', 'N/A')}
   Confidence: {tc.get('confidence', 'N/A')}
-  
-Use this as your primary test command unless you find a better one.
+{setup_section}{env_section}{skip_section}{build_section}
+  Notes: {tc.get('notes', 'None')}
+
+IMPORTANT: Use this as your primary test command. The setup_commands MUST go in
+run_tests.sh BEFORE the test command. The ENV vars MUST go in the Dockerfile.
 """
         
         goal_prompt = f"""
