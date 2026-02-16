@@ -4,7 +4,7 @@ import subprocess
 import traceback
 import threading
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

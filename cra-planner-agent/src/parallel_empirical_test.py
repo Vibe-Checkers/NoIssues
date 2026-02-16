@@ -167,7 +167,7 @@ def compute_preparation_cost(prep_token_usage: Dict) -> Dict[str, float]:
 
 
 def parse_test_results(output: str) -> dict:
-    """
+    r"""
     Deterministically parse test framework output into structured pass/fail/skip counts.
     Handles: Maven/JUnit, Cargo, Jest, Mocha, Go test, pytest, CTest/automake.
 
