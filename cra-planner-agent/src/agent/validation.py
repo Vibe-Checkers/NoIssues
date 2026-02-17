@@ -20,7 +20,7 @@ class DockerBuildTester:
     that can occur with high parallel worker counts.
     """
 
-    def __init__(self, timeout: int = 1200, platform: str = None, serialize_builds: bool = False):
+    def __init__(self, timeout: int = 600, platform: str = None, serialize_builds: bool = False, builder_name: str = None):
         """
         Initialize Docker build tester.
 
@@ -29,13 +29,15 @@ class DockerBuildTester:
             platform: Optional platform to build for (e.g., "linux/amd64", "linux/arm64")
             serialize_builds: If True, use a global lock to prevent parallel builds.
                              Slower but prevents cache corruption entirely.
+            builder_name: Optional name of specific builder instance to use.
         """
         self.timeout = timeout
         self.platform = platform
         self.serialize_builds = serialize_builds
+        self.builder_name = builder_name
         self.docker_available = self._check_docker()
         if self.docker_available:
-            self._ensure_compatible_builder()
+            self._ensure_compatible_builder(builder_name)
 
     def _check_docker(self) -> bool:
         """Check if Docker is installed and accessible."""
@@ -60,49 +62,57 @@ class DockerBuildTester:
                 return False, f"Infrastructure health check failed: {e}"
         return False, "Docker daemon is not running or not accessible"
 
-    def _ensure_compatible_builder(self):
+    def _ensure_compatible_builder(self, builder_name: str = None):
         """
         Ensure that the current Docker Buildx builder supports local cache exports.
         The default 'docker' driver does NOT support this. We need a 'docker-container' driver.
         """
+        target_builder = builder_name or "noissues-managed-builder"
+        
         try:
             # 1. Check current builder driver
             result = subprocess.run(
-                ["docker", "buildx", "inspect"],
+                ["docker", "buildx", "inspect", target_builder],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
-            
-            # Look for Driver: docker (the limited one)
-            is_limited_driver = False
-            for line in result.stdout.splitlines():
-                if "Driver:" in line and "docker" in line.lower() and "container" not in line.lower():
-                    is_limited_driver = True
-                    break
-            
-            if not is_limited_driver:
+
+            # If targeted builder exists and is docker-container, just switch to it
+            if result.returncode == 0 and "Driver: docker-container" in result.stdout:
+                # Switch to it if it's the target
+                subprocess.run(["docker", "buildx", "use", target_builder], check=True)
                 return
 
-            logger.warning("[DOCKER] Default 'docker' driver does not support local cache isolation. Setting up compatible builder...")
+            # If no builder_name was passed, check if *current* builder is already good
+            if not builder_name:
+                inspect_current = subprocess.run(["docker", "buildx", "inspect"], capture_output=True, text=True)
+                is_limited = False
+                for line in inspect_current.stdout.splitlines():
+                     if "Driver:" in line and "docker" in line.lower() and "container" not in line.lower():
+                        is_limited = True
+                        break
+                if not is_limited:
+                    return
+
+            logger.warning(f"[DOCKER] Setting up compatible builder: {target_builder}...")
 
             # 2. Try to use an existing managed builder
-            builder_name = "noissues-managed-builder"
             use_result = subprocess.run(
-                ["docker", "buildx", "use", builder_name],
+                ["docker", "buildx", "use", target_builder],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
             
             if use_result.returncode == 0:
-                logger.info(f"[DOCKER] Switched to existing builder: {builder_name}")
+                logger.info(f"[DOCKER] Switched to existing builder: {target_builder}")
                 return
 
             # 3. Create it if it doesn't exist
-            logger.info(f"[DOCKER] Creating new 'docker-container' builder: {builder_name}")
+            logger.info(f"[DOCKER] Creating new 'docker-container' builder: {target_builder}")
             create_result = subprocess.run(
-                ["docker", "buildx", "create", "--name", builder_name, "--driver", "docker-container", "--use"],
+                ["docker", "buildx", "create", "--name", target_builder, "--driver", "docker-container", "--use"],
                 capture_output=True,
                 text=True,
                 timeout=20
@@ -168,7 +178,8 @@ class DockerBuildTester:
         return (
             ("parent snapshot" in error_lower and "does not exist" in error_lower) or
             ("failed to load cache key" in error_lower and "not found" in error_lower) or
-            ("failed to get state for index" in error_lower)
+            ("failed to get state for index" in error_lower) or
+            ("lease not found" in error_lower)
         )
 
     def build_dockerfile(self, dockerfile_path: str, context_path: str, image_name: str, 

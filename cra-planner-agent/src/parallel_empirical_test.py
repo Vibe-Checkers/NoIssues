@@ -627,6 +627,43 @@ class ParallelEmpiricalTester:
 
         # Thread-safe console output
         self.console_lock = threading.Lock()
+        
+        # Track active builders for cleanup
+        self.active_builders = []
+
+    def _setup_dedicated_builders(self):
+        """Create a dedicated Docker Buildx builder for each worker."""
+        print(f"\n[SETUP] Creating {self.max_workers} dedicated Docker builders for isolation...")
+        
+        for i in range(self.max_workers):
+            builder_name = f"noissues-worker-{i}"
+            try:
+                # Use the DockerBuildTester's logic to create/ensure builder exists
+                tester = DockerBuildTester(builder_name=builder_name)
+                if tester.docker_available:
+                    self.active_builders.append(builder_name)
+                    print(f"[SETUP] ✓ Ready: {builder_name}")
+                else:
+                    print(f"[SETUP] ✗ Failed to init: {builder_name}")
+            except Exception as e:
+                print(f"[SETUP] ✗ Error creating {builder_name}: {e}")
+        
+        if len(self.active_builders) < self.max_workers:
+            print(f"[SETUP] WARNING: Only {len(self.active_builders)}/{self.max_workers} builders ready.")
+
+    def _cleanup_builders(self):
+        """Remove dedicated builders to free resources."""
+        if not self.active_builders:
+            return
+            
+        print("\n[CLEANUP] Removing dedicated Docker builders...")
+        import subprocess
+        for builder in self.active_builders:
+            try:
+                subprocess.run(["docker", "buildx", "rm", builder], check=False, capture_output=True)
+                print(f"[CLEANUP] ✓ Removed {builder}")
+            except Exception as e:
+                print(f"[CLEANUP] ✗ Failed to remove {builder}: {e}")
 
         # Initialize results storage
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -729,26 +766,36 @@ class ParallelEmpiricalTester:
             self.log(slug, f"Failed to save artifacts: {e}", to_console=False)
             return None
 
-    def test_single_repository(self, repo_url: str, worker_id: int) -> Dict:
+    def process_repo(self, repo_data: Dict, builder_name: str = None) -> Dict:
         """
-        Test a single repository using the Learner Agent.
+        Process a single repository (clone -> agent -> build -> validate).
+        Runs in a worker thread.
+        
+        Args:
+            repo_data: Dictionary containing repo metadata
+            builder_name: Name of the dedicated Docker builder to use
         """
+        repo_url = repo_data["url"]
+        repo_name = repo_data["name"]
+        
+        # Initialize thread-local storage if needed, or update instance state
+        # Note: We need a fresh DockerBuildTester for this thread/worker with the specific builder
+        docker_tester_instance = DockerBuildTester(timeout=600, serialize_builds=False, builder_name=builder_name)
+        
         slug = repo_slug(repo_url)
-        repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
         result = {
             "repo_url": repo_url,
             "repo_slug": slug,
             "repo_name": repo_name,
-            "task_id": worker_id,
+            "task_id": threading.get_ident(), # Use thread ID as task ID
             "timestamp": datetime.now().isoformat(),
             "agent_analysis": {},
             "success": False
         }
 
         try:
-            thread_id = threading.get_ident()
             test_start_time = time.time()
-            self.log(repo_name, f"[Task {worker_id}] Starting test", to_console=True)
+            self.log(repo_name, f"[Task {threading.get_ident()}] Starting test with builder '{builder_name}'", to_console=True)
 
             # Step 1: Clone
             self.log(repo_name, "Cloning repository...", to_console=True)
@@ -792,7 +839,7 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, "Validation: Building Docker image...", to_console=False)
                 image_name = f"learner-{slug}:latest"
                 cache_dir = self.caches_dir / slug
-                build_res = self.docker_tester.build_dockerfile(
+                build_res = docker_tester_instance.build_dockerfile(
                     str(dockerfile_path),
                     path,
                     image_name,
@@ -801,7 +848,7 @@ class ParallelEmpiricalTester:
 
                 if build_res["success"]:
                     self.log(repo_name, "Validation: Build succeeded", to_console=False)
-                    self.docker_tester.cleanup_image(image_name)
+                    docker_tester_instance.cleanup_image(image_name)
                     return {"success": True}
                 else:
                     self.log(repo_name, f"Validation: Build failed at stage {build_res.get('stage')}", to_console=False)
@@ -873,14 +920,14 @@ class ParallelEmpiricalTester:
                 # 3. Build image
                 self.log(repo_name, "[VerifyBuild] Building Docker image", to_console=False)
                 cache_dir = self.caches_dir / slug
-                build_result = self.docker_tester.build_dockerfile(
+                build_result = docker_tester_instance.build_dockerfile(
                     str(dockerfile_path), repo_path, verify_image, cache_dir=str(cache_dir)
                 )
 
                 if not build_result.get("success"):
                     self.log(repo_name, f"[VerifyBuild] ✗ Build FAILED: {build_result.get('stage')}", to_console=False)
                     try:
-                        self.docker_tester.cleanup_image(verify_image)
+                        docker_tester_instance.cleanup_image(verify_image)
                     except Exception:
                         pass
 
@@ -936,10 +983,10 @@ class ParallelEmpiricalTester:
 
                 if run_tests_path.exists():
                     self.log(repo_name, "[VerifyBuild] run_tests.sh found — running test suite (timeout=300s)", to_console=False)
-                    run_result = self.docker_tester.run_container(
+                    run_result = docker_tester_instance.run_container(
                         verify_image, "bash /app/run_tests.sh", timeout=300
                     )
-                    self.docker_tester.cleanup_image(verify_image)
+                    docker_tester_instance.cleanup_image(verify_image)
 
                     raw_output = (run_result.get("output") or "").strip()
                     exit_code = run_result.get("exit_code", -1)
@@ -1002,7 +1049,7 @@ class ParallelEmpiricalTester:
                         }, indent=2)
                 else:
                     # No run_tests.sh — build-only, NOT complete
-                    self.docker_tester.cleanup_image(verify_image)
+                    docker_tester_instance.cleanup_image(verify_image)
                     return json.dumps({
                         "status": "incomplete",
                         "message": (
@@ -1060,7 +1107,7 @@ class ParallelEmpiricalTester:
                     
                     # Quick build (uses cache if nothing changed)
                     cache_dir_ric = self.caches_dir / slug
-                    build_result = self.docker_tester.build_dockerfile(
+                    build_result = docker_tester_instance.build_dockerfile(
                         str(dockerfile_path_ric), repo_path, container_image, cache_dir=str(cache_dir_ric)
                     )
                     if not build_result.get("success"):
@@ -1070,10 +1117,10 @@ class ParallelEmpiricalTester:
                         })
                     
                     # Run command
-                    run_result = self.docker_tester.run_container(
+                    run_result = docker_tester_instance.run_container(
                         container_image, command, timeout=60
                     )
-                    self.docker_tester.cleanup_image(container_image)
+                    docker_tester_instance.cleanup_image(container_image)
                     
                     output = run_result.get("output", "")
                     exit_code = run_result.get("exit_code", -1)
@@ -1263,7 +1310,7 @@ class ParallelEmpiricalTester:
 
             # Always cleanup to prevent disk/memory blowups
             try:
-                self._aggressive_cleanup(repo_name, repo_path, result)
+                self._aggressive_cleanup(repo_name, repo_path, result, docker_tester_instance)
             except Exception as e:
                 self.log(repo_name, f"Cleanup failed: {e}", to_console=False)
 
@@ -1458,7 +1505,7 @@ class ParallelEmpiricalTester:
             return {'missing': [], 'suggestions': {}}
 
 
-    def _aggressive_cleanup(self, repo_name: str, repo_path: Optional[str], result: Dict):
+    def _aggressive_cleanup(self, repo_name: str, repo_path: Optional[str], result: Dict, docker_tester_instance: DockerBuildTester):
         """
         Aggressive cleanup to prevent memory issues during parallel execution.
         Cleans up: repository files, Docker images, large variables, and triggers GC.
@@ -1479,7 +1526,7 @@ class ParallelEmpiricalTester:
             slug = result.get("repo_slug", repo_name.lower())
             image_name = f"learner-{slug}:latest"
             try:
-                self.docker_tester.cleanup_image(image_name)
+                docker_tester_instance.cleanup_image(image_name)
                 self.log(repo_name, f"Removed Docker image {image_name}", to_console=False)
             except Exception as e:
                 self.log(repo_name, f"Warning: Could not remove Docker image: {e}", to_console=False)
@@ -1566,15 +1613,17 @@ class ParallelEmpiricalTester:
 
         # Pre-test infrastructure health check
         print("\n[HEALTH CHECK] Verifying Docker infrastructure...")
-        healthy, health_message = self.docker_tester.check_infrastructure_health()
+        # Use a temporary DockerBuildTester for health check
+        temp_docker_tester = DockerBuildTester(timeout=600, serialize_builds=False)
+        healthy, health_message = temp_docker_tester.check_infrastructure_health()
 
         if not healthy:
             print(f"[HEALTH CHECK] FAILED: {health_message}")
             if "corrupted" in health_message.lower():
                 print("[HEALTH CHECK] Attempting to fix corruption with docker builder prune...")
-                if self.docker_tester.prune_buildkit_cache():
+                if temp_docker_tester.prune_buildkit_cache():
                     print("[HEALTH CHECK] Prune successful - rechecking infrastructure...")
-                    healthy, health_message = self.docker_tester.check_infrastructure_health()
+                    healthy, health_message = temp_docker_tester.check_infrastructure_health()
                     if healthy:
                         print(f"[HEALTH CHECK] PASSED: {health_message}")
                     else:
@@ -1589,13 +1638,25 @@ class ParallelEmpiricalTester:
 
         overall_start = time.time()
 
+        # 1. Setup Phase: Create dedicated builders
+        self._setup_dedicated_builders()
+
+        # Prepare repo data for processing
+        repos_data = []
+        for repo_url in repo_urls:
+            repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
+            repos_data.append({"url": repo_url, "name": repo_name})
+
         # Run tests in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_repo = {
-                executor.submit(self.test_single_repository, repo_url, worker_id): repo_url
-                for worker_id, repo_url in enumerate(repo_urls)
-            }
+            # Submit all tasks, assigning builders in a round-robin fashion
+            future_to_repo = {}
+            for i, repo_data in enumerate(repos_data):
+                builder_index = i % len(self.active_builders) if self.active_builders else 0
+                assigned_builder = self.active_builders[builder_index] if self.active_builders else None
+                
+                future = executor.submit(self.process_repo, repo_data, assigned_builder)
+                future_to_repo[future] = repo_data["url"]
 
             # Wait for completion
             for future in concurrent.futures.as_completed(future_to_repo):
@@ -1610,6 +1671,7 @@ class ParallelEmpiricalTester:
 
         # Final cleanup
         print("\n[CLEANUP] Running final cleanup...")
+        self._cleanup_builders() # Clean up dedicated builders
         self._final_cleanup()
 
         # Close master log
@@ -1753,7 +1815,8 @@ class ParallelEmpiricalTester:
 
             f.write(f"Test Run: {self.timestamp}\n")
             f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Parallel Workers: {self.max_workers}\n\n")
+            f.write(f"Parallel Workers: {self.max_workers}\n")
+            f.write(f"Dedicated Builders: {len(self.active_builders)}\n\n")
 
             f.write("OVERALL RESULTS\n")
             f.write("-"*80 + "\n")
