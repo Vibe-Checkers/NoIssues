@@ -130,7 +130,6 @@ def run_learner_agent(
     # Build Context with base LLM (not full agent)
     prep_context = build_initial_context(base_llm, repo_path)
     language = prep_context["language"]
-    meta_strategy = prep_context.get("meta_strategy", "")
     analysis_llm = _create_analysis_llm()
 
     # 2. Execution Loop with Refinement
@@ -159,38 +158,17 @@ REQUIRED ACTION:
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
-        # Objectives vary depending on whether a pre-analysis was produced
-        if meta_strategy:
-            objectives = """OBJECTIVES:
-1. A pre-analysis has already been done — DOCKERFILE STRATEGY is in CONTEXT below
-2. Write the Dockerfile DIRECTLY using the recommended base image and build steps
-3. Write .dockerignore to exclude unnecessary files
-4. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
-5. You MUST get a SUCCESS result from VerifyBuild before finishing"""
-            important_rules = """IMPORTANT RULES:
-- The DOCKERFILE STRATEGY below is pre-verified (base image confirmed on live Docker Hub)
-- Write the Dockerfile immediately — skip ListDirectory/ReadLocalFile unless a specific
-  detail in the strategy is ambiguous (e.g. exact requirements filename)
-- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)"""
-        else:
-            objectives = """OBJECTIVES:
+        # Define Goal Prompt
+        goal_prompt = f"""
+GOAL: Containerize the '{repo_name}' repository.
+
+OBJECTIVES:
 1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
 2. Based on ONLY the files that exist, determine build approach
 3. Create a production-ready 'Dockerfile' in the repository root
 4. Create a '.dockerignore' to exclude unnecessary files
 5. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
-6. You MUST get a SUCCESS result from VerifyBuild before finishing"""
-            important_rules = """IMPORTANT RULES:
-- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
-- Use ListDirectory FIRST, then only read files you know exist
-- Be efficient - don't waste API calls on trial-and-error file reads
-- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)"""
-
-        # Define Goal Prompt
-        goal_prompt = f"""
-GOAL: Containerize the '{repo_name}' repository.
-
-{objectives}
+6. You MUST get a SUCCESS result from VerifyBuild before finishing
 
 ERROR HANDLING WORKFLOW (When VerifyBuild fails):
 1. STOP. Do not edit the file yet.
@@ -204,7 +182,13 @@ ERROR HANDLING WORKFLOW (When VerifyBuild fails):
 4. Run VerifyBuild again
 5. Repeat until SUCCESS
 
-{important_rules}
+IMPORTANT RULES:
+- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
+- Use ListDirectory FIRST, then only read files you know exist
+- Be efficient - don't waste API calls on trial-and-error file reads
+- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)
+- The CONTEXT below includes a DOCKERFILE STRATEGY pre-analyzed by GPT-5 with a
+  verified base image — use it as your starting point when writing the Dockerfile
 
 CONTEXT:
 {prep_context['context_str']}
@@ -287,9 +271,33 @@ Begin!
                  lessons_learned.append(lesson)
                  continue
 
+            # Enforce SearchDockerError was called after every failed VerifyBuild.
+            # If the agent tried to self-fix without searching, inject a hard lesson.
+            last_failed_verify_idx = -1
+            search_called_after_fail = False
+            for idx, (action, observation) in enumerate(intermediate_steps):
+                if hasattr(action, 'tool') and 'VerifyBuild' in action.tool:
+                    try:
+                        obs_data = json.loads(str(observation))
+                        if obs_data.get("status") == "failed":
+                            last_failed_verify_idx = idx
+                            search_called_after_fail = False
+                    except Exception:
+                        pass
+                if (hasattr(action, 'tool') and 'SearchDockerError' in action.tool
+                        and last_failed_verify_idx >= 0 and idx > last_failed_verify_idx):
+                    search_called_after_fail = True
 
+            if last_failed_verify_idx >= 0 and not search_called_after_fail:
+                lesson = (
+                    f"Attempt {attempt}: VerifyBuild failed but you edited the Dockerfile "
+                    f"without calling SearchDockerError first. MANDATORY: after every "
+                    f"VerifyBuild failure you MUST call SearchDockerError before touching the file."
+                )
+                logger.warning(lesson)
+                lessons_learned.append(lesson)
 
-            # NEW: Extract technical insight from tool outputs
+            # Extract technical insight from tool outputs
             tech_lesson = extract_technical_lesson(intermediate_steps, analysis_llm)
             if tech_lesson:
                 lessons_learned.append(f"TECHNICAL INSIGHT: {tech_lesson}")
@@ -324,6 +332,10 @@ Begin!
             lesson = f"Attempt {attempt}: Agent crashed with error: {str(e)}"
             logger.error(lesson)
             lessons_learned.append(lesson)
+            # Executor-level shutdown errors won't recover across retries — bail early
+            if "interpreter shutdown" in str(e).lower() or "cannot schedule new futures" in str(e).lower():
+                logger.error("Non-recoverable executor error — stopping retries early")
+                break
             continue
     
     # All attempts exhausted
