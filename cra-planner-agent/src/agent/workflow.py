@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent
 from langchain_core.messages import SystemMessage, HumanMessage
-from .preparation import build_initial_context
+from .preparation import build_initial_context, _create_analysis_llm
 # from .tools import _set_report_directory
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def run_learner_agent(
     repo_path: str,
     repo_name: str,
     repo_url: str,
-    max_retries: int = 5,
+    max_retries: int = 3,
     callback_handler = None,
     validation_callback = None,
     extra_tools: list = None
@@ -130,7 +130,9 @@ def run_learner_agent(
     # Build Context with base LLM (not full agent)
     prep_context = build_initial_context(base_llm, repo_path)
     language = prep_context["language"]
-    
+    meta_strategy = prep_context.get("meta_strategy", "")
+    analysis_llm = _create_analysis_llm()
+
     # 2. Execution Loop with Refinement
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
     
@@ -157,17 +159,38 @@ REQUIRED ACTION:
 ═══════════════════════════════════════════════════════════════════════════════
 """
         
-        # Define Goal Prompt
-        goal_prompt = f"""
-GOAL: Containerize the '{repo_name}' repository.
-
-OBJECTIVES:
+        # Objectives vary depending on whether a pre-analysis was produced
+        if meta_strategy:
+            objectives = """OBJECTIVES:
+1. A pre-analysis has already been done — DOCKERFILE STRATEGY is in CONTEXT below
+2. Write the Dockerfile DIRECTLY using the recommended base image and build steps
+3. Write .dockerignore to exclude unnecessary files
+4. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
+5. You MUST get a SUCCESS result from VerifyBuild before finishing"""
+            important_rules = """IMPORTANT RULES:
+- The DOCKERFILE STRATEGY below is pre-verified (base image confirmed on live Docker Hub)
+- Write the Dockerfile immediately — skip ListDirectory/ReadLocalFile unless a specific
+  detail in the strategy is ambiguous (e.g. exact requirements filename)
+- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)"""
+        else:
+            objectives = """OBJECTIVES:
 1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
 2. Based on ONLY the files that exist, determine build approach
 3. Create a production-ready 'Dockerfile' in the repository root
 4. Create a '.dockerignore' to exclude unnecessary files
 5. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
-6. You MUST get a SUCCESS result from VerifyBuild before finishing
+6. You MUST get a SUCCESS result from VerifyBuild before finishing"""
+            important_rules = """IMPORTANT RULES:
+- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
+- Use ListDirectory FIRST, then only read files you know exist
+- Be efficient - don't waste API calls on trial-and-error file reads
+- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)"""
+
+        # Define Goal Prompt
+        goal_prompt = f"""
+GOAL: Containerize the '{repo_name}' repository.
+
+{objectives}
 
 ERROR HANDLING WORKFLOW (When VerifyBuild fails):
 1. STOP. Do not edit the file yet.
@@ -181,11 +204,7 @@ ERROR HANDLING WORKFLOW (When VerifyBuild fails):
 4. Run VerifyBuild again
 5. Repeat until SUCCESS
 
-IMPORTANT RULES:
-- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
-- Use ListDirectory FIRST, then only read files you know exist
-- Be efficient - don't waste API calls on trial-and-error file reads
-- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)
+{important_rules}
 
 CONTEXT:
 {prep_context['context_str']}
@@ -271,7 +290,7 @@ Begin!
 
 
             # NEW: Extract technical insight from tool outputs
-            tech_lesson = extract_technical_lesson(intermediate_steps, base_llm)
+            tech_lesson = extract_technical_lesson(intermediate_steps, analysis_llm)
             if tech_lesson:
                 lessons_learned.append(f"TECHNICAL INSIGHT: {tech_lesson}")
                 logger.info(f"Extracted technical lesson: {tech_lesson[:100]}...")

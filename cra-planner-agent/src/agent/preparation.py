@@ -4,10 +4,156 @@ import logging
 import yaml
 from pathlib import Path
 from typing import List, Dict, Optional, Any
+from dotenv import load_dotenv
+from langchain_openai import AzureChatOpenAI
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+from .tools import _docker_hub_list_tags, _get_expanded_platform_info
 
 logger = logging.getLogger(__name__)
+
+# Files to read per language for meta-analysis
+_LANGUAGE_KEY_FILES = {
+    'Python':  ['requirements.txt', 'pyproject.toml', 'setup.py', 'Pipfile'],
+    'Node.js': ['package.json'],
+    'Java':    ['pom.xml', 'build.gradle'],
+    'Kotlin':  ['build.gradle.kts'],
+    'Go':      ['go.mod'],
+    'Rust':    ['Cargo.toml'],
+    'Ruby':    ['Gemfile'],
+    'PHP':     ['composer.json'],
+    'Elixir':  ['mix.exs'],
+    'Dart':    ['pubspec.yaml'],
+    'C++':     ['CMakeLists.txt'],
+}
+
+# Docker Hub image names to query for each language
+_LANGUAGE_BASE_IMAGES = {
+    'Python':  ['python'],
+    'Node.js': ['node'],
+    'Java':    ['eclipse-temurin', 'openjdk'],
+    'Kotlin':  ['eclipse-temurin'],
+    'Go':      ['golang'],
+    'Rust':    ['rust'],
+    'Ruby':    ['ruby'],
+    'PHP':     ['php'],
+    'Elixir':  ['elixir'],
+    'Dart':    ['dart'],
+    'C++':     ['gcc'],
+    'Next.js': ['node'],
+    'Angular': ['node'],
+}
+
+def _fetch_verified_docker_tags(language: str) -> str:
+    """
+    Query Docker Hub for real available tags for the language's base image(s).
+    Returns a formatted string of tags with platform-compatibility markers,
+    or an empty string if the lookup fails.
+    """
+    image_names = _LANGUAGE_BASE_IMAGES.get(language, [])
+    if not image_names:
+        return ""
+
+    platform_info = _get_expanded_platform_info()
+    sections = []
+    for image_name in image_names:
+        try:
+            result = _docker_hub_list_tags(image_name, platform_info)
+            if result and "not found" not in result.lower():
+                sections.append(f"Docker Hub tags for '{image_name}':\n{result}")
+        except Exception:
+            pass
+
+    return "\n\n".join(sections)
+
+def _create_analysis_llm() -> AzureChatOpenAI:
+    """Create the GPT-5 analysis LLM, falling back to the main model if unconfigured."""
+    load_dotenv()
+    return AzureChatOpenAI(
+        azure_deployment=os.getenv(
+            "ANALYSIS_MODEL_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        ),
+        azure_endpoint=os.getenv(
+            "ANALYSIS_MODEL_ENDPOINT", os.getenv("AZURE_OPENAI_ENDPOINT")
+        ),
+        api_key=os.getenv(
+            "ANALYSIS_MODEL_API_KEY", os.getenv("AZURE_OPENAI_API_KEY")
+        ),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview"),
+        timeout=60,
+    )
+
+def generate_meta_strategy(repo_path: str, language: str) -> str:
+    """
+    Use GPT-5 to pre-analyze the repo and produce a concise Dockerfile strategy.
+
+    Reads the directory listing and primary dependency file, then asks GPT-5 for
+    a targeted strategy memo. This is injected into the agent's initial context so
+    it can skip most of its exploration phase and go straight to writing.
+
+    Returns an empty string on any failure (non-blocking).
+    """
+    intel_parts = []
+
+    # 1. Root directory listing
+    try:
+        items = []
+        for entry in sorted(os.scandir(repo_path), key=lambda e: (e.is_file(), e.name)):
+            kind = "DIR" if entry.is_dir() else "FILE"
+            items.append(f"  {kind}: {entry.name}")
+        intel_parts.append("ROOT STRUCTURE:\n" + "\n".join(items[:50]))
+    except Exception:
+        pass
+
+    # 2. Primary dependency file for the detected language (first one found wins)
+    for fname in _LANGUAGE_KEY_FILES.get(language, []):
+        fpath = os.path.join(repo_path, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read(3000)
+                intel_parts.append(f"{fname}:\n{content}")
+            except Exception:
+                pass
+            break  # one file is enough
+
+    if not intel_parts:
+        return ""
+
+    intel_str = "\n\n".join(intel_parts)
+
+    # Fetch real Docker Hub tags so GPT-5 can only pick from verified, live images
+    verified_tags = _fetch_verified_docker_tags(language)
+    tags_section = (
+        f"\nVERIFIED DOCKER HUB TAGS (live, [OK] = compatible with host platform):\n"
+        f"{verified_tags}\n"
+        f"IMPORTANT: You MUST pick your base image FROM THIS LIST ONLY. "
+        f"Do not suggest any image or tag not shown above.\n"
+        if verified_tags else ""
+    )
+
+    try:
+        analysis_llm = _create_analysis_llm()
+        user_prompt = (
+            f"Analyze this {language} repository and produce a Dockerfile strategy memo.\n\n"
+            f"REPOSITORY INTEL:\n{intel_str}\n"
+            f"{tags_section}\n"
+            "Produce a CONCISE strategy (max 200 words) covering:\n"
+            "1. Recommended base image (exact tag — must be from the verified list above)\n"
+            "2. System + language dependencies to install\n"
+            "3. Build steps in order\n"
+            "4. Entry point / start command\n"
+            "5. One key pitfall to avoid for this specific project\n\n"
+            "Base your answers strictly on the files and verified tags above."
+        )
+        response = analysis_llm.invoke([
+            SystemMessage(content="You are a senior DevOps engineer. Be concise and specific."),
+            HumanMessage(content=user_prompt),
+        ])
+        return response.content.strip()
+    except Exception as e:
+        logger.warning("GPT-5 meta-strategy generation failed: %s", e)
+        return ""
 
 def detect_project_language(repo_path: str) -> str:
     """
@@ -158,9 +304,18 @@ def build_initial_context(llm: BaseChatModel, repo_path: str) -> dict:
     guidelines = generate_language_guidelines(llm, language)
     workflows = summarize_github_workflows(repo_path)
 
+    # GPT-5 pre-analysis: gives the agent a targeted strategy before it starts,
+    # reducing wasted exploration iterations.
+    logger.info("Running GPT-5 meta-strategy pre-analysis...")
+    meta_strategy = generate_meta_strategy(repo_path, language)
+    meta_section = (
+        f"\nDOCKERFILE STRATEGY (Pre-analyzed by GPT-5 — follow this closely):\n{meta_strategy}\n"
+        if meta_strategy else ""
+    )
+
     context_str = f"""
 DETECTED LANGUAGE: {language}
-
+{meta_section}
 LANGUAGE GUIDELINES (Latest Best Practices):
 {guidelines}
 
@@ -169,5 +324,6 @@ CI/CD WORKFLOWS (Hints from .github):
 """
     return {
         "language": language,
-        "context_str": context_str
+        "context_str": context_str,
+        "meta_strategy": meta_strategy,  # empty string if generation failed
     }

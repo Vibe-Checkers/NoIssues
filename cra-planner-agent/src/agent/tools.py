@@ -670,10 +670,13 @@ def search_docker_error_structured(input_data: Any) -> str:
         if not search_results or "Search failed" in search_results or "No results" in search_results:
             return f"Could not find solutions for: {data.error_keywords}\n\nTry refining your error keywords or checking Docker documentation directly."
 
-        # Step 2: Use LLM to analyze and suggest fix
+        # Step 2: Use GPT-5 analysis model for higher-quality error diagnosis
         llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+            azure_deployment=os.getenv("ANALYSIS_MODEL_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT")),
+            azure_endpoint=os.getenv("ANALYSIS_MODEL_ENDPOINT", os.getenv("AZURE_OPENAI_ENDPOINT")),
+            api_key=os.getenv("ANALYSIS_MODEL_API_KEY", os.getenv("AZURE_OPENAI_API_KEY")),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview"),
+            timeout=60,
         )
 
         system_prompt = """You are a Docker expert debugging build errors.
