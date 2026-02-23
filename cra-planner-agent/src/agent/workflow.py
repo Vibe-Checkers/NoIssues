@@ -236,7 +236,8 @@ def run_learner_agent(
     repo_path: str,
     repo_name: str,
     repo_url: str,
-    max_retries: int = 5,
+    max_retries: int = 3,
+    max_iterations: int = 25,
     callback_handler=None,
     validation_callback=None,
     extra_tools: list = None,
@@ -256,6 +257,10 @@ def run_learner_agent(
         repo_name: Name of the repository.
         repo_url: URL of the repository.
         max_retries: Maximum number of attempts (default: 5).
+        max_iterations: Max tool calls per single attempt (default: 30).
+            Complex C++/CMake repos like folly need 20-30+ steps per attempt;
+            the previous default of 15 caused every attempt to silently exhaust
+            its step budget before VerifyBuild could be called.
         callback_handler: Optional callback handler for logging.
         validation_callback: Unused; kept for API compatibility.
         extra_tools: Additional tools to provide to the agent (e.g., VerifyBuild).
@@ -277,7 +282,8 @@ def run_learner_agent(
         repository_path=repo_path,
         repo_name=repo_name,
         verbose=True,
-        extra_tools=extra_tools
+        extra_tools=extra_tools,
+        max_iterations=max_iterations,
     )
 
     prep_context = build_initial_context(base_llm, repo_path)

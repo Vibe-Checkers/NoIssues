@@ -972,7 +972,7 @@ class ParallelEmpiricalTester:
                 repo_path=repo_path,
                 repo_name=repo_name,
                 repo_url=repo_url,
-                max_retries=5,  # 5 attempts with feedback injection
+                max_retries=3,  # 3 attempts × 25 steps = 75 max tool calls
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,
                 extra_tools=[verify_tool]

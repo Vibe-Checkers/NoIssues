@@ -1,5 +1,6 @@
 
 import os
+import re
 import sys
 import json
 import logging
@@ -316,6 +317,72 @@ def _docker_hub_verify_tag(image_name: str, tag: str, platform_info: dict) -> st
     except Exception as e:
         return f"Error verifying: {e}"
 
+def _validate_dockerfile_from_lines(content: str) -> Optional[str]:
+    """
+    Validate all FROM lines in a Dockerfile against Docker Hub.
+
+    Returns None if every image:tag is verified (or unverifiable due to variable
+    substitution / scratch / network error).  Returns a human-readable error
+    string — suitable for returning directly to the ReAct agent — if any tag
+    is confirmed NOT to exist on Docker Hub.
+    """
+    platform_info = _get_expanded_platform_info()
+    errors = []
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        # Match: FROM [--flag=val …] <image_ref> [AS <alias>]
+        m = re.match(
+            r'^FROM\s+(?:--\w+=\S+\s+)*(\S+)(?:\s+AS\s+\S+)?\s*$',
+            line,
+            re.IGNORECASE,
+        )
+        if not m:
+            continue
+
+        image_ref = m.group(1)
+
+        # Can't verify variable-substitution refs at write time
+        if '$' in image_ref:
+            continue
+
+        # Docker's special sentinel — always valid
+        if image_ref.lower() == 'scratch':
+            continue
+
+        # Split image:tag — use the last colon in the final path segment so
+        # registry hosts with ports (registry.example.com:5000/img:tag) work.
+        last_segment = image_ref.split('/')[-1]
+        if ':' in last_segment:
+            idx = image_ref.rfind(':')
+            image_name, tag = image_ref[:idx], image_ref[idx + 1:]
+        else:
+            image_name, tag = image_ref, 'latest'
+
+        try:
+            result = _docker_hub_verify_tag(image_name, tag, platform_info)
+        except Exception:
+            # Network / timeout — don't block the write on infra failures
+            continue
+
+        if 'NOT FOUND' in result:
+            errors.append(f"  • {image_ref}  →  {result}")
+
+    if not errors:
+        return None
+
+    return (
+        "WRITE BLOCKED — the following base image(s) do NOT exist on Docker Hub:\n"
+        + "\n".join(errors)
+        + "\n\n"
+        "You MUST verify base images before writing the Dockerfile.\n"
+        "REQUIRED STEPS:\n"
+        "  1. Call DockerImageSearch(query=\"tags:<image_name>\") to list real tags.\n"
+        "  2. Choose a tag marked [OK] for your platform.\n"
+        "  3. Rewrite the FROM line with the verified tag, then call WriteToFile again."
+    )
+
+
 def _docker_hub_search(term: str) -> str:
     import requests
     url = "https://hub.docker.com/v2/search/repositories"
@@ -463,6 +530,16 @@ class RepositoryTools:
     def _write_impl(self, file_path: str, content: str) -> str:
         try:
             path = Path(_resolve_path(file_path, self.repo_root))
+
+            # Hard gate: reject Dockerfiles that reference non-existent base images.
+            # This forces the agent to run DockerImageSearch *before* writing FROM lines.
+            filename = path.name
+            if filename == 'Dockerfile' or filename.startswith('Dockerfile.'):
+                validation_error = _validate_dockerfile_from_lines(content)
+                if validation_error:
+                    logger.warning("WriteToFile blocked: invalid FROM line(s) in %s", file_path)
+                    return validation_error
+
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
@@ -534,7 +611,7 @@ class RepositoryTools:
             return f"Error finding files: {e}"
 
     def grep_files_structured(self, input_data: Any) -> str:
-        import re, fnmatch
+        import fnmatch
         try:
             if isinstance(input_data, GrepFilesInput): data = input_data
             elif isinstance(input_data, dict): data = GrepFilesInput(**input_data)
