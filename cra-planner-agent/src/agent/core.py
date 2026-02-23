@@ -184,6 +184,13 @@ IMPORTANT:
 CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
 ═══════════════════════════════════════════════════════════════════════════════
 
+PHASE 0 - BASE IMAGE DISCOVERY (MANDATORY FIRST STEP):
+  0. Use DockerImageSearch to confirm your planned base image tag EXISTS before writing Dockerfile.
+     Example: DockerImageSearch(query="maven 3.8 openjdk 17 slim")
+     NEVER write FROM <image>:<tag> without first confirming the tag exists.
+     If DockerImageSearch returns no results for a tag, try a different version.
+     This step prevents the most common "manifest unknown" build failures.
+
 PHASE 1 - ANALYZE:
   1. ListDirectory to see project structure
   2. ReadLocalFile to check package.json, requirements.txt, pom.xml, etc.
@@ -195,7 +202,7 @@ PHASE 2 - CREATE:
 
 PHASE 3 - VERIFY (MANDATORY):
   6. VerifyBuild to test the Dockerfile
-  
+
 PHASE 4 - IF BUILD FAILS (MANDATORY LOOP):
   7. Read the error message carefully
   8. IMMEDIATELY use SearchDockerError(error_keywords="...", agent_context="...") to get a fix
@@ -228,6 +235,10 @@ Fix: Use --platform=linux/amd64 in FROM statement
 
 Error: "COPY failed: file not found"
 Fix: Check actual file names with ListDirectory, fix COPY paths
+
+Error: "manifest unknown" or "not found" or "pull access denied"
+Fix: The base image tag does not exist. Use DockerImageSearch FIRST (Phase 0).
+     Example: DockerImageSearch(query="node 18 alpine") to see valid tags.
 
 ═══════════════════════════════════════════════════════════════════════════════
 

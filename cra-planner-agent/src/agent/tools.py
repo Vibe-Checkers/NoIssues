@@ -670,9 +670,11 @@ def search_docker_error_structured(input_data: Any) -> str:
         if not search_results or "Search failed" in search_results or "No results" in search_results:
             return f"Could not find solutions for: {data.error_keywords}\n\nTry refining your error keywords or checking Docker documentation directly."
 
-        # Step 2: Use LLM to analyze and suggest fix
+        # Step 2: Use LLM to analyze and suggest fix.
+        # Prefer the large deployment for richer analysis; fall back to the default deployment.
+        _analysis_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_LARGE", os.getenv("AZURE_OPENAI_DEPLOYMENT"))
         llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=_analysis_deployment,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION")
         )
 

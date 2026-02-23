@@ -146,8 +146,10 @@ class LLMFunctionalVerifier:
     Generates and analyzes functional smoke tests for containers.
     """
     def __init__(self):
+        # Use the large deployment for analysis tasks if available
+        _deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_LARGE", os.getenv("AZURE_OPENAI_DEPLOYMENT"))
         self.llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=_deployment,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION")
         )
 
@@ -273,8 +275,10 @@ class LLMErrorAnalyzer:
     Replaces static regex matching with semantic understanding.
     """
     def __init__(self):
+        # Use the large deployment for analysis tasks if available
+        _deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_LARGE", os.getenv("AZURE_OPENAI_DEPLOYMENT"))
         self.llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=_deployment,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
         )
 
@@ -350,8 +354,10 @@ class LLMDockerfileValidator:
     Provides explanation of what was verified and whether the Dockerfile is appropriate.
     """
     def __init__(self):
+        # Use the large deployment for analysis tasks if available
+        _deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_LARGE", os.getenv("AZURE_OPENAI_DEPLOYMENT"))
         self.llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_deployment=_deployment,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION")
         )
 
@@ -435,6 +441,40 @@ A Dockerfile is NOT suitable if it:
                 "confidence": "low",
                 "concerns": ["LLM validation failed"]
             }, log_entry
+
+
+def estimate_build_timeout(repo_path: str) -> int:
+    """
+    Choose a Docker build timeout based on project complexity signals.
+
+    Heuristics (independent of language detection, runs from the repo on disk):
+      - Extreme monorepos (>5 Java modules OR >50K files): 1800s
+      - Complex builds (multi-module Java, multi-CMake, Rust): 1200s
+      - Default: 600s
+
+    Thread-safe: reads filesystem only, no shared state.
+    """
+    repo = Path(repo_path)
+
+    java_modules = len(list(repo.rglob("pom.xml"))) + len(list(repo.rglob("build.gradle")))
+    cmake_files = len(list(repo.rglob("CMakeLists.txt")))
+    rust_workspace = (repo / "Cargo.toml").exists()
+
+    try:
+        file_count = sum(
+            1 for f in repo.rglob("*")
+            if f.is_file() and not any(p.startswith(".") for p in f.parts)
+        )
+    except Exception:
+        file_count = 0
+
+    if java_modules >= 5 or file_count > 50_000:
+        return 1800
+
+    if java_modules >= 2 or cmake_files >= 3 or rust_workspace:
+        return 1200
+
+    return 600
 
 
 class ParallelEmpiricalTester:
@@ -729,8 +769,12 @@ class ParallelEmpiricalTester:
                 # Capture auxiliary logs from LLM helpers
                 aux_logs = []
 
-                self.log(repo_name, "[VerifyBuild] Building Docker image", to_console=False)
-                result = self.docker_tester.build_dockerfile(
+                # Fix 6: Adaptive timeout — create a fresh DockerBuildTester per call to
+                # avoid mutating shared state across concurrent workers.
+                _adaptive_timeout = estimate_build_timeout(repo_path)
+                self.log(repo_name, f"[VerifyBuild] Building Docker image (timeout={_adaptive_timeout}s)", to_console=False)
+                _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
+                result = _per_call_tester.build_dockerfile(
                     str(dockerfile_path),
                     repo_path,
                     verify_image
@@ -754,7 +798,7 @@ class ParallelEmpiricalTester:
 
                         # 2. Run Container
                         self.log(repo_name, f"[VerifyBuild] Running container with test command", to_console=False)
-                        run_result = self.docker_tester.run_container(verify_image, test_cmd, timeout=20)
+                        run_result = _per_call_tester.run_container(verify_image, test_cmd, timeout=20)
 
                         # 3. Analyze Output
                         self.log(repo_name, "[VerifyBuild] Analyzing smoke test output via LLM", to_console=False)
@@ -775,10 +819,18 @@ class ParallelEmpiricalTester:
                              )
                              aux_logs.append(suitability_log)
 
-                             self.docker_tester.cleanup_image(verify_image)
+                             _per_call_tester.cleanup_image(verify_image)
+
+                             # Fix 1A: embed verified Dockerfile content so workflow.py can
+                             # restore it if the agent writes cosmetic changes after this point.
+                             try:
+                                 with open(dockerfile_path, 'r', encoding='utf-8') as _df:
+                                     _verified_snapshot = _df.read()
+                             except Exception:
+                                 _verified_snapshot = None
 
                              # Return response WITHOUT revealing smoke test command
-                             return json.dumps({
+                             success_payload = {
                                 "status": "success",
                                 "message": "✓ Docker build succeeded and container is functional.",
                                 "verification": {
@@ -790,7 +842,10 @@ class ParallelEmpiricalTester:
                                     "concerns": suitability.get("concerns", [])
                                 },
                                 # "auxiliary_logs": aux_logs # Removed to save context
-                            }, indent=2)
+                             }
+                             if _verified_snapshot is not None:
+                                 success_payload["_verified_dockerfile_snapshot"] = _verified_snapshot
+                             return json.dumps(success_payload, indent=2)
                         else:
                             self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
 
@@ -826,7 +881,7 @@ class ParallelEmpiricalTester:
                         # Fallback if verification infra fails - treat as failure
                         self.log(repo_name, f"[VerifyBuild] Smoke test error: {e}", to_console=False)
                         print(f"[Warning] Functional verification failed: {e}")
-                        self.docker_tester.cleanup_image(verify_image)
+                        _per_call_tester.cleanup_image(verify_image)
 
                         # Read Dockerfile for validation
                         with open(dockerfile_path, 'r') as f:
@@ -863,7 +918,7 @@ class ParallelEmpiricalTester:
 
                     # Cleanup verify image on build failure
                     try:
-                        self.docker_tester.cleanup_image(verify_image)
+                        _per_call_tester.cleanup_image(verify_image)
                     except:
                         pass
 
