@@ -739,13 +739,15 @@ def search_docker_error_structured(input_data: Any) -> str:
         if not data.error_keywords or not data.error_keywords.strip():
             return "ERROR: Please provide error keywords to search for solutions."
 
-        # Step 1: Search for solutions
+        # Step 1: Search for solutions (best-effort — analysis still runs if search fails)
         query = f"docker {data.error_keywords} solution site:stackoverflow.com OR site:github.com OR site:docs.docker.com"
         search_results = search_web_structured({"query": query})
-
-        # Validate search results
-        if not search_results or "Search failed" in search_results or "No results" in search_results:
-            return f"Could not find solutions for: {data.error_keywords}\n\nTry refining your error keywords or checking Docker documentation directly."
+        search_available = bool(
+            search_results
+            and "Search failed" not in search_results
+            and "No results" not in search_results
+            and "Input error" not in search_results
+        )
 
         # Step 2: Use LLM to analyze and suggest fix.
         # Prefer the large deployment for richer analysis; fall back to the default deployment.
@@ -784,8 +786,11 @@ Be concise and practical. Focus on the most common solution first."""
         if data.dockerfile_content and data.dockerfile_content.strip():
             user_prompt_parts.append(f"\nDOCKERFILE CONTENT:\n{data.dockerfile_content}")
 
-        # Add search results
-        user_prompt_parts.append(f"\nSEARCH RESULTS FROM WEB:\n{search_results[:3000]}")
+        # Add search results only when the search actually succeeded
+        if search_available:
+            user_prompt_parts.append(f"\nSEARCH RESULTS FROM WEB:\n{search_results[:3000]}")
+        else:
+            user_prompt_parts.append("\n(Web search unavailable — analyse from error log and Dockerfile only.)")
 
         # Add agent context if provided
         if hasattr(data, 'agent_context') and data.agent_context and data.agent_context.strip():
@@ -807,22 +812,18 @@ Be concise and practical. Focus on the most common solution first."""
                 logger.warning("LLM response missing required sections, using raw response")
                 content = f"**Root Cause:** Analysis incomplete\n**Fix:** {content}\n**Example:** See fix above"
 
-            # Return both search results and LLM analysis
-            return f"""=== AI ANALYSIS ===
-{content}
+            sources_section = (
+                f"=== SEARCH SOURCES (for reference) ===\n{search_results[:1000]}"
+                if search_available
+                else "(Web search was unavailable; analysis is based on error log and Dockerfile only.)"
+            )
+            return f"=== AI ANALYSIS ===\n{content}\n\n{sources_section}\n"
 
-=== SEARCH SOURCES (for reference) ===
-{search_results[:1000]}
-"""
         except Exception as llm_error:
-            # Fallback to just search results if LLM fails
+            # Fallback to search results (if any) when LLM fails
             logger.warning(f"LLM analysis failed: {llm_error}")
-            return f"""[AI analysis unavailable: {str(llm_error)}]
-
-=== SEARCH RESULTS ===
-{search_results}
-
-Please manually review the search results above for solutions."""
+            fallback = search_results if search_available else "(Neither web search nor LLM analysis available.)"
+            return f"[AI analysis unavailable: {str(llm_error)}]\n\n{fallback}"
 
     except Exception as e:
         logger.error(f"SearchDockerError failed: {e}")
