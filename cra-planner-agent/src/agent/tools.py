@@ -302,8 +302,27 @@ def _docker_hub_list_tags(image_name: str, platform_info: dict) -> str:
     except Exception as e:
         return f"Error listing tags: {e}"
 
+def _is_docker_hub_image(image_name: str) -> bool:
+    """Return True if the image reference points to Docker Hub (no registry prefix or docker.io)."""
+    if "/" not in image_name:
+        return True  # e.g. "python", "node" — official Docker Hub images
+    first_segment = image_name.split("/")[0]
+    # Docker Hub namespaced images have no dots/colons in the first segment
+    # (e.g. "library/python", "bitnami/redis"). Registry hosts contain dots
+    # (e.g. "ghcr.io/owner/img", "mcr.microsoft.com/dotnet/sdk").
+    if "." in first_segment or ":" in first_segment:
+        return False
+    # Explicit docker.io prefix
+    if first_segment in ("docker.io", "index.docker.io"):
+        return True
+    return True  # no dots → Docker Hub user namespace
+
+
 def _docker_hub_verify_tag(image_name: str, tag: str, platform_info: dict) -> str:
     import requests
+    # Skip verification for non-Docker-Hub registries (ghcr.io, mcr.microsoft.com, quay.io, etc.)
+    if not _is_docker_hub_image(image_name):
+        return f"SKIPPED: {image_name}:{tag} is hosted on a non-Docker-Hub registry (cannot verify via Docker Hub API)."
     api_image_name = f"library/{image_name}" if "/" not in image_name else image_name
     url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags/{tag}"
     try:
@@ -329,8 +348,13 @@ def _validate_dockerfile_from_lines(content: str) -> Optional[str]:
     platform_info = _get_expanded_platform_info()
     errors = []
 
-    for raw_line in content.splitlines():
+    # Join backslash-continuation lines before parsing FROM directives
+    joined_content = re.sub(r'\\\s*\n\s*', ' ', content)
+
+    for raw_line in joined_content.splitlines():
         line = raw_line.strip()
+        # Strip inline comments (e.g. "FROM python:3.11 # base image")
+        line = re.sub(r'\s+#.*$', '', line)
         # Match: FROM [--flag=val …] <image_ref> [AS <alias>]
         m = re.match(
             r'^FROM\s+(?:--\w+=\S+\s+)*(\S+)(?:\s+AS\s+\S+)?\s*$',
@@ -348,6 +372,10 @@ def _validate_dockerfile_from_lines(content: str) -> Optional[str]:
 
         # Docker's special sentinel — always valid
         if image_ref.lower() == 'scratch':
+            continue
+
+        # Skip digest references (e.g. python@sha256:abc123) — can't verify via tag API
+        if '@' in image_ref:
             continue
 
         # Split image:tag — use the last colon in the final path segment so
@@ -548,9 +576,19 @@ class RepositoryTools:
             return f"Error writing file: {e}"
 
     def read_local_file_structured(self, input_data: Any) -> str:
+        _MAX_READ_BYTES = 512 * 1024  # 512 KB — prevents OOM on giant files
         try:
             data = _parse_input(input_data, ReadLocalFileInput, 'file_path')
             path = _resolve_path(data.file_path, self.repo_root)
+            file_size = os.path.getsize(path)
+            if file_size > _MAX_READ_BYTES:
+                with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    truncated = f.read(_MAX_READ_BYTES)
+                return (
+                    f"{truncated}\n\n"
+                    f"[TRUNCATED — file is {file_size:,} bytes, "
+                    f"showing first {_MAX_READ_BYTES:,} bytes]"
+                )
             with open(path, 'r', encoding='utf-8') as f:
                 return f.read()
         except Exception as e:

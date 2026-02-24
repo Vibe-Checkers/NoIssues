@@ -46,6 +46,7 @@ from .tools import (
 logger = logging.getLogger(__name__)
 
 _api_semaphore = threading.Semaphore(2)
+_async_api_semaphore = asyncio.Semaphore(2)
 
 class GPT5NanoWrapper(BaseChatModel):
     """Wrapper for gpt-5-nano that strips unsupported parameters and rate-limits API calls."""
@@ -64,7 +65,7 @@ class GPT5NanoWrapper(BaseChatModel):
         """Rate-limited async invoke for compatibility with bound tools."""
         # Remove unsupported parameters
         kwargs.pop('stop', None)
-        with _api_semaphore:
+        async with _async_api_semaphore:
             return await self.llm.ainvoke(input, config=config, **kwargs)
 
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
@@ -100,7 +101,7 @@ def _get_host_platform() -> tuple:
             return 'linux/arm64', 'ARM64 (Apple Silicon)'
         return 'linux/amd64', 'AMD64 (Intel Mac)'
     elif system == 'linux':
-        if machine in ['aarch64', 'base', 'arm64']:
+        if machine in ['aarch64', 'arm64']:
              return 'linux/arm64', 'ARM64 (Linux)'
         return 'linux/amd64', 'AMD64 (Linux)'
     elif system == 'windows':
@@ -112,20 +113,14 @@ def create_learner_agent(
     max_iterations: int = 15,
     verbose: bool = True,
     repository_path: str = None,
-    repo_name: str = None,
-    detected_language: str = None,
     extra_tools: List[Tool] = None
 ):
     """
     Create a LEARNER agent.
-    
+
     This agent is NOT scripted. It receives a Goal and Context, and uses tools to achieve it.
     """
     load_dotenv()
-    
-    # 1. Setup Path Context
-    # REMOVED: _set_repository_base_path(repository_path) - context is now bound to tools
-    pass
     
     # 2. Config
     api_key = os.getenv("AZURE_OPENAI_API_KEY")

@@ -54,7 +54,7 @@ _EXTENSION_MAP: Dict[str, str] = {
     ".rb":  "Ruby",
     ".php": "PHP",
     ".cpp": "C++", ".cxx": "C++", ".cc": "C++", ".hpp": "C++",
-    ".c":   "C",   ".h":   "C",
+    ".c":   "C",   ".h":   "C/C++",
     ".js":  "Node.js", ".jsx": "Node.js",
     ".ts":  "Node.js", ".tsx": "Node.js",
 }

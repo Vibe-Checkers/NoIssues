@@ -55,6 +55,14 @@ _SYNTAX_PATTERNS = [
     r"syntax error",
     r"unknown flag",
 ]
+_UNFIXABLE_PATTERNS = [
+    # Dependency versions that don't exist in any public registry
+    r"(?:no matching version|version not found|does not exist in the npm registry)",
+    # Toolchains requiring unreleased/unavailable JDK versions
+    r"cannot find a java installation.*languageversion\s*=\s*(\d+)",
+    # Private registry auth required
+    r"(?:unauthorized|authentication required).*(?:pull|registry)",
+]
 
 
 def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) -> dict:
@@ -64,7 +72,7 @@ def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) 
     Returns:
         {
           "type": one of IMAGE_NOT_FOUND | APT_NOT_FOUND | COMPLIANCE | TIMEOUT
-                         | SYNTAX | UNKNOWN,
+                         | SYNTAX | UNFIXABLE_DEPENDENCY | UNKNOWN,
           "unfixable": bool,  # True only when retrying is structurally pointless
           "hint": str         # category description injected into next attempt's prompt
         }
@@ -77,6 +85,18 @@ def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) 
             break
 
     combined_lower = (" ".join(lessons_learned) + " " + error_text).lower()
+
+    # Unfixable: dependency/toolchain requirements that cannot be satisfied
+    if any(_re.search(p, combined_lower) for p in _UNFIXABLE_PATTERNS):
+        return {
+            "type": "UNFIXABLE_DEPENDENCY",
+            "unfixable": True,
+            "hint": (
+                "The build requires a dependency or toolchain version that is not "
+                "publicly available (e.g., unpublished npm package, unreleased JDK, "
+                "private registry). Retrying will not resolve this."
+            )
+        }
 
     # Compliance / QA check failure — give the agent one attempt with the hint
     # rather than breaking early, since the agent may be able to pass the skip flag.
@@ -256,8 +276,8 @@ def run_learner_agent(
         repo_path: Path to the cloned repository.
         repo_name: Name of the repository.
         repo_url: URL of the repository.
-        max_retries: Maximum number of attempts (default: 5).
-        max_iterations: Max tool calls per single attempt (default: 30).
+        max_retries: Maximum number of attempts (default: 3).
+        max_iterations: Max tool calls per single attempt (default: 25).
             Complex C++/CMake repos like folly need 20-30+ steps per attempt;
             the previous default of 15 caused every attempt to silently exhaust
             its step budget before VerifyBuild could be called.
@@ -280,7 +300,6 @@ def run_learner_agent(
 
     executor, handler, base_llm = create_learner_agent(
         repository_path=repo_path,
-        repo_name=repo_name,
         verbose=True,
         extra_tools=extra_tools,
         max_iterations=max_iterations,
@@ -292,6 +311,14 @@ def run_learner_agent(
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
 
     lessons_learned: List[str] = []
+    _seen_lessons: set = set()  # deduplication guard
+
+    def _add_lesson(text: str) -> None:
+        """Append a lesson only if its content hasn't been seen before."""
+        if text not in _seen_lessons:
+            _seen_lessons.add(text)
+            lessons_learned.append(text)
+
     dockerfile_path = Path(repo_path) / "Dockerfile"
     dockerignore_path = Path(repo_path) / ".dockerignore"
 
@@ -439,7 +466,7 @@ Begin!
                     f"You MUST verify your Dockerfile before finishing."
                 )
                 logger.warning(lesson)
-                lessons_learned.append(lesson)
+                _add_lesson(lesson)
                 continue
 
             # Fix 1B: agent wrote AFTER a passing VerifyBuild → restore snapshot
@@ -476,7 +503,7 @@ Begin!
                         f"(step {last_verify_index}). You must verify LAST."
                     )
                     logger.warning(lesson)
-                    lessons_learned.append(lesson)
+                    _add_lesson(lesson)
                     continue
 
             # Extract technical insight from tool outputs
@@ -484,7 +511,7 @@ Begin!
                 intermediate_steps, base_llm, use_llm=use_llm_lessons
             )
             if tech_lesson:
-                lessons_learned.append(f"TECHNICAL INSIGHT: {tech_lesson}")
+                _add_lesson(f"TECHNICAL INSIGHT: {tech_lesson}")
                 logger.info(f"Extracted technical lesson: {tech_lesson[:100]}...")
 
             if not last_verify_success:
@@ -495,11 +522,11 @@ Begin!
                         f"[Classifier] Failure classified as UNFIXABLE "
                         f"({classification['type']}). Aborting remaining attempts."
                     )
-                    lessons_learned.append(f"UNFIXABLE: {classification['hint']}")
+                    _add_lesson(f"UNFIXABLE: {classification['hint']}")
                     break
 
                 if classification["hint"]:
-                    lessons_learned.append(
+                    _add_lesson(
                         f"DIAGNOSIS ({classification['type']}): {classification['hint']}"
                     )
 
@@ -508,7 +535,7 @@ Begin!
                     f"Type: {classification['type']}. Fix and verify again."
                 )
                 logger.warning(lesson)
-                lessons_learned.append(lesson)
+                _add_lesson(lesson)
                 continue
 
             # Sanity-check: Dockerfile should always exist after a successful verify
@@ -518,7 +545,7 @@ Begin!
                     f"You MUST use WriteToFile to create a Dockerfile."
                 )
                 logger.warning(lesson)
-                lessons_learned.append(lesson)
+                _add_lesson(lesson)
                 continue
 
             logger.info("✓ VerifyBuild PASSED! Dockerfile successfully built and verified.")
@@ -533,7 +560,7 @@ Begin!
         except Exception as e:
             lesson = f"Attempt {attempt}: Agent crashed with error: {str(e)}"
             logger.error(lesson)
-            lessons_learned.append(lesson)
+            _add_lesson(lesson)
             continue
 
     logger.error(f"All {max_retries} attempts failed.")

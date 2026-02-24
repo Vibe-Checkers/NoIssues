@@ -141,9 +141,14 @@ class DockerBuildTester:
             return self._do_build(dockerfile_path, context_path, image_name, retry_on_cache_error)
 
     def _do_build(self, dockerfile_path: str, context_path: str, image_name: str,
-                  retry_on_cache_error: bool = True, _is_retry: bool = False) -> Dict:
+                  retry_on_cache_error: bool = True,
+                  _transient_retried: bool = False,
+                  _cache_retried: bool = False,
+                  _overall_start: float = None) -> Dict:
         """Internal build method with retry logic for cache corruption."""
         start_time = time.time()
+        if _overall_start is None:
+            _overall_start = start_time
 
         try:
             cmd = ["docker", "build"]
@@ -163,7 +168,7 @@ class DockerBuildTester:
             env["DOCKER_BUILDKIT"] = "1"
 
             platform_info = f" (platform: {self.platform})" if self.platform else ""
-            retry_info = " [RETRY after cache prune]" if _is_retry else ""
+            retry_info = " [RETRY]" if (_transient_retried or _cache_retried) else ""
             print(f"[DOCKER BUILD]{retry_info} Running: {' '.join(cmd)}{platform_info}")
 
             # Execute build
@@ -174,10 +179,10 @@ class DockerBuildTester:
                 timeout=self.timeout,
                 env=env
             )
-            
+
             # Transient Network Error Retry Logic
             # Detects: apt/pip timeouts, temporary DNS issues, registry 503s
-            if result.returncode != 0 and not _is_retry:
+            if result.returncode != 0 and not _transient_retried:
                 err_lower = (result.stderr or "").lower() + (result.stdout or "").lower()
                 transient_keywords = [
                     "temporary failure resolving", "name resolution temporarily failed",
@@ -185,17 +190,20 @@ class DockerBuildTester:
                     "failed to fetch", "503 service unavailable", "504 gateway time-out",
                     "eai_again", "unable to connect"
                 ]
-                
+
                 is_transient = any(k in err_lower for k in transient_keywords)
-                
+
                 if is_transient:
                     logger.warning("[DOCKER] Detected transient network error. Retrying build in 5s...")
                     time.sleep(5)
-                    # Retry cleanly
-                    return self._do_build(dockerfile_path, context_path, image_name, 
-                                        retry_on_cache_error=retry_on_cache_error, _is_retry=True)
+                    # Retry cleanly — only mark transient as retried
+                    return self._do_build(
+                        dockerfile_path, context_path, image_name,
+                        retry_on_cache_error=retry_on_cache_error,
+                        _transient_retried=True, _cache_retried=_cache_retried,
+                        _overall_start=_overall_start)
 
-            duration = time.time() - start_time
+            duration = time.time() - _overall_start
 
             if result.returncode == 0:
                 print(f"[DOCKER BUILD] Success! Duration: {duration:.2f}s")
@@ -207,16 +215,19 @@ class DockerBuildTester:
             else:
                 # Same error analysis as before...
                 full_error = result.stderr or result.stdout or "Unknown error"
-                
-                # Check for cache corruption and auto-recover
-                if retry_on_cache_error and not _is_retry and self._is_cache_corruption_error(full_error):
+
+                # Check for cache corruption and auto-recover (independent of transient retry)
+                if retry_on_cache_error and not _cache_retried and self._is_cache_corruption_error(full_error):
                     logger.warning("[DOCKER] Detected BuildKit cache corruption, attempting recovery...")
                     if self.prune_buildkit_cache():
                         # Wait a moment for Docker to stabilize
                         time.sleep(2)
-                        # Retry the build
-                        return self._do_build(dockerfile_path, context_path, image_name, 
-                                             retry_on_cache_error=False, _is_retry=True)
+                        # Retry the build — only mark cache as retried
+                        return self._do_build(
+                            dockerfile_path, context_path, image_name,
+                            retry_on_cache_error=False,
+                            _transient_retried=_transient_retried, _cache_retried=True,
+                            _overall_start=_overall_start)
                     else:
                         logger.error("[DOCKER] Cache prune failed, returning original error")
                 
@@ -242,7 +253,7 @@ class DockerBuildTester:
                     "duration_seconds": duration,
                     "stdout": result.stdout[-2000:] if result.stdout else "",
                     "stderr": result.stderr[-2000:] if result.stderr else None,
-                    "was_retry": _is_retry
+                    "was_retry": _transient_retried or _cache_retried
                 }
 
         except subprocess.TimeoutExpired:
