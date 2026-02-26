@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 _http_client = None
 _http_client_lock = threading.Lock()
 
+# Thread-local dedup state for SearchDockerError.
+# Each worker thread gets its own history set, automatically independent.
+_search_dedup = threading.local()
+
 def _get_http_client() -> httpx.Client:
     """Get or create the singleton HTTP client (thread-safe)."""
     global _http_client
@@ -776,6 +780,22 @@ def search_docker_error_structured(input_data: Any) -> str:
         # Validate input
         if not data.error_keywords or not data.error_keywords.strip():
             return "ERROR: Please provide error keywords to search for solutions."
+
+        # Dedup: reject identical queries within the same thread/repo run
+        normalized_query = data.error_keywords.strip().lower()
+        if not hasattr(_search_dedup, "history"):
+            _search_dedup.history = set()
+        if normalized_query in _search_dedup.history:
+            return json.dumps({
+                "status": "deduplicated",
+                "message": (
+                    f"You already searched for '{data.error_keywords}'. "
+                    "Review the previous result instead of searching again. "
+                    "Try a DIFFERENT query with different keywords, or try "
+                    "a different approach entirely."
+                ),
+            })
+        _search_dedup.history.add(normalized_query)
 
         # Step 1: Search for solutions (best-effort — analysis still runs if search fails)
         query = f"docker {data.error_keywords} solution site:stackoverflow.com OR site:github.com OR site:docs.docker.com"

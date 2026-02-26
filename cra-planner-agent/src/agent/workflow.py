@@ -256,6 +256,7 @@ def run_learner_agent(
     repo_path: str,
     repo_name: str,
     repo_url: str,
+    repo_classification: dict = None,
     max_retries: int = 3,
     max_iterations: int = 25,
     callback_handler=None,
@@ -305,8 +306,24 @@ def run_learner_agent(
         max_iterations=max_iterations,
     )
 
-    prep_context = build_initial_context(base_llm, repo_path)
+    prep_context = build_initial_context(base_llm, repo_path,
+                                         repo_classification=repo_classification)
     language = prep_context["language"]
+
+    # Build classification context for the agent prompt
+    classification_context = ""
+    if repo_classification:
+        classification_context = f"""
+## Repository Classification (pre-analyzed)
+- Type: {repo_classification.get('repo_type', 'unknown')}
+- Language: {repo_classification.get('primary_language', 'Unknown')}
+- Build System: {repo_classification.get('build_system', 'unknown')}
+- Is Monorepo: {repo_classification.get('is_monorepo', False)} ({repo_classification.get('module_count', 1)} modules)
+- Guidance: {repo_classification.get('dockerfile_hints', 'N/A')}
+
+Use this classification to guide your Dockerfile design. Do NOT create an
+ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
+"""
 
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
 
@@ -378,7 +395,7 @@ REQUIRED ACTION:
 
         goal_prompt = f"""
 GOAL: Containerize the '{repo_name}' repository.
-
+{classification_context}
 OBJECTIVES:
 1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
 2. Based on ONLY the files that exist, determine build approach

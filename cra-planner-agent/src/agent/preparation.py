@@ -48,15 +48,38 @@ _BUILD_INDICATORS: List[tuple] = [
 _EXTENSION_MAP: Dict[str, str] = {
     ".py":  "Python",
     ".java": "Java",
-    ".kt":  "Kotlin",
+    ".kt":  "Kotlin",   ".kts": "Kotlin",
     ".rs":  "Rust",
     ".go":  "Go",
     ".rb":  "Ruby",
     ".php": "PHP",
     ".cpp": "C++", ".cxx": "C++", ".cc": "C++", ".hpp": "C++",
+    ".cmake": "C++",
     ".c":   "C",   ".h":   "C/C++",
     ".js":  "Node.js", ".jsx": "Node.js",
     ".ts":  "Node.js", ".tsx": "Node.js",
+    ".scala": "Scala",
+    ".swift": "Swift",
+    ".m":   "Objective-C",
+    ".mm":  "Objective-C++",
+    ".gradle": "Java",
+}
+
+# Config-file-to-language mapping — higher priority than extension counting.
+# Checked in detect_project_language() as Priority 0 (before build indicators).
+_CONFIG_FILE_LANGUAGE: Dict[str, str] = {
+    "pom.xml":           "Java",
+    "build.gradle":      "Java",
+    "build.gradle.kts":  "Kotlin",
+    "Cargo.toml":        "Rust",
+    "go.mod":            "Go",
+    "CMakeLists.txt":    "C++",
+    "pyproject.toml":    "Python",
+    "setup.py":          "Python",
+    "package.json":      "JavaScript",
+    "tsconfig.json":     "TypeScript",
+    "Gemfile":           "Ruby",
+    "mix.exs":           "Elixir",
 }
 
 
@@ -497,17 +520,24 @@ def format_manifest_warnings(manifest: Dict[str, Any]) -> str:
 # Context Builder
 # ---------------------------------------------------------------------------
 
-def build_initial_context(llm: BaseChatModel, repo_path: str) -> dict:
+def build_initial_context(llm: BaseChatModel, repo_path: str,
+                         repo_classification: dict = None) -> dict:
     """
     Build the full preparation context for the Learner Agent.
 
     Runs:
-      1. Language detection (4-pass)
+      1. Language detection (classification-first, then 4-pass heuristic)
       2. Language guidelines (LLM call)
       3. CI/CD workflow extraction (structured)
       4. Build manifest analysis (version pins, build tool warnings)
     """
-    language = detect_project_language(repo_path)
+    # Use classification language if available and confident
+    if (repo_classification
+            and repo_classification.get("primary_language", "Unknown") != "Unknown"):
+        language = repo_classification["primary_language"]
+        logger.info(f"[Prep] Using classification language: {language}")
+    else:
+        language = detect_project_language(repo_path)
     logger.info(f"[Prep] Building context for language: {language}")
 
     guidelines   = generate_language_guidelines(llm, language)

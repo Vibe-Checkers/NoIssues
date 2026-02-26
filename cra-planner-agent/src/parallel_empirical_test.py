@@ -443,9 +443,11 @@ A Dockerfile is NOT suitable if it:
             }, log_entry
 
 
-def estimate_build_timeout(repo_path: str) -> int:
+def estimate_build_timeout(repo_path: str, classification: dict = None) -> int:
     """
     Choose a Docker build timeout based on project complexity signals.
+
+    Uses classification (T1) when available, falls back to filesystem heuristics.
 
     Heuristics (independent of language detection, runs from the repo on disk):
       - Extreme monorepos (>5 Java modules OR >50K files): 1800s
@@ -454,6 +456,25 @@ def estimate_build_timeout(repo_path: str) -> int:
 
     Thread-safe: reads filesystem only, no shared state.
     """
+    # Classification-based fast path
+    if classification:
+        repo_type = classification.get("repo_type", "")
+        lang = classification.get("primary_language", "")
+        module_count = classification.get("module_count", 1)
+
+        if repo_type == "documentation_only":
+            return 120  # Should never build, but if it does, don't wait
+
+        if module_count >= 5:
+            return 1800  # Large monorepo
+
+        if lang in ("Java", "Kotlin", "Scala") and module_count >= 2:
+            return 1200  # Multi-module JVM
+
+        if repo_type == "native_library" and lang in ("C++", "C", "Rust"):
+            return 1200  # Native compilation is slow
+
+    # Filesystem heuristic fallback
     repo = Path(repo_path)
 
     java_modules = len(list(repo.rglob("pom.xml"))) + len(list(repo.rglob("build.gradle")))
@@ -641,7 +662,32 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Clone failed: {e}")
                 return result
 
-            # Step 1.5: Check for existing valid Dockerfile (Pre-check)
+            # Step 1.5: Repository Classification (T1)
+            from agent.classification import RepoClassifier
+            try:
+                classifier = RepoClassifier()
+                classification = classifier.classify(repo_path, repo_name)
+                result["classification"] = classification
+                self.log(repo_name,
+                         f"Classified: {classification['repo_type']} "
+                         f"({classification['primary_language']}, "
+                         f"strategy={classification['verification_strategy']})",
+                         to_console=True)
+            except Exception as e:
+                self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
+                classification = None
+
+            # Early skip for documentation-only repos
+            if classification and classification.get("repo_type") == "documentation_only":
+                self.log(repo_name, "Documentation-only repo — skipping build", to_console=True)
+                result["success"] = False
+                result["skip_reason"] = "documentation_only"
+                self.update_progress(repo_name, "⊘ Skipped (docs-only)")
+                self._aggressive_cleanup(repo_name, repo_path, result)
+                self._save_incremental_results(result)
+                return result
+
+            # Step 1.6: Check for existing valid Dockerfile (Pre-check)
             if self._check_existing_dockerfile(repo_path, repo_name, slug, result):
                 self.log(repo_name, "✓ Existing Dockerfile is valid - Skipping Agent", to_console=True)
                 # Save artifacts for the existing valid Dockerfile
@@ -771,7 +817,7 @@ class ParallelEmpiricalTester:
 
                 # Fix 6: Adaptive timeout — create a fresh DockerBuildTester per call to
                 # avoid mutating shared state across concurrent workers.
-                _adaptive_timeout = estimate_build_timeout(repo_path)
+                _adaptive_timeout = estimate_build_timeout(repo_path, classification)
                 self.log(repo_name, f"[VerifyBuild] Building Docker image (timeout={_adaptive_timeout}s)", to_console=False)
                 _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
                 result = _per_call_tester.build_dockerfile(
@@ -790,9 +836,16 @@ class ParallelEmpiricalTester:
                         with open(dockerfile_path, 'r') as f:
                             df_content = f.read()
 
-                        # 1. Generate Command
+                        # 1. Generate Command (strategy-aware when classification available)
                         self.log(repo_name, "[VerifyBuild] Generating smoke test command via LLM", to_console=False)
-                        test_cmd, cmd_log = verifier.generate_verification_command(df_content, repo_path.split('/')[-1])
+                        if classification:
+                            from agent.verification_strategies import StrategyAwareVerifier
+                            strategy_verifier = StrategyAwareVerifier()
+                            test_cmd, cmd_log = strategy_verifier.generate_test_command(
+                                df_content, classification, repo_name=repo_path.split('/')[-1])
+                            self.log(repo_name, f"[VerifyBuild] Strategy: {classification.get('verification_strategy', 'unknown')}", to_console=False)
+                        else:
+                            test_cmd, cmd_log = verifier.generate_verification_command(df_content, repo_path.split('/')[-1])
                         aux_logs.append(cmd_log)
                         self.log(repo_name, f"[VerifyBuild] Generated test command: {test_cmd}", to_console=False)
 
@@ -972,6 +1025,7 @@ class ParallelEmpiricalTester:
                 repo_path=repo_path,
                 repo_name=repo_name,
                 repo_url=repo_url,
+                repo_classification=classification,
                 max_retries=3,  # 3 attempts × 25 steps = 75 max tool calls
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,

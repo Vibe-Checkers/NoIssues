@@ -236,6 +236,19 @@ Fix: The base image tag does not exist. Use DockerImageSearch FIRST (Phase 0).
      Example: DockerImageSearch(query="node 18 alpine") to see valid tags.
 
 ═══════════════════════════════════════════════════════════════════════════════
+MULTI-MODULE JAVA PROJECTS (Maven/Gradle):
+═══════════════════════════════════════════════════════════════════════════════
+
+When the classification shows is_monorepo=true with Maven/Gradle:
+1. Use FindFiles or ListDirectory to map the module structure (find pom.xml files)
+2. The ROOT pom.xml is usually an aggregator — it orchestrates, it does NOT produce a JAR
+3. Build with: mvn package -DskipTests -pl <target-module> -am
+   - -pl <module>: build specific module
+   - -am: also make dependencies (resolves SNAPSHOT versions)
+4. NEVER try to mvn install first then build separately — SNAPSHOT jars only exist in reactor
+5. For the Dockerfile, copy the ENTIRE project, build with mvn, then copy out the target JAR
+
+═══════════════════════════════════════════════════════════════════════════════
 
 Use the following format:
 
