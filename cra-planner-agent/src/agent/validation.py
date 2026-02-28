@@ -196,12 +196,14 @@ class DockerBuildTester:
                 if is_transient:
                     logger.warning("[DOCKER] Detected transient network error. Retrying build in 5s...")
                     time.sleep(5)
-                    # Retry cleanly — only mark transient as retried
+                    # Retry cleanly — reset timeout clock so the retry gets
+                    # a full timeout window instead of inheriting the
+                    # remaining budget from the failed attempt.
                     return self._do_build(
                         dockerfile_path, context_path, image_name,
                         retry_on_cache_error=retry_on_cache_error,
                         _transient_retried=True, _cache_retried=_cache_retried,
-                        _overall_start=_overall_start)
+                        _overall_start=time.time())
 
             duration = time.time() - _overall_start
 

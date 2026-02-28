@@ -232,7 +232,7 @@ RULES:
         except Exception as e:
             logger.error(f"Strategy-aware verification LLM call failed: {e}")
             log_entry["error"] = str(e)
-            # Defensive fallback: 'true' always succeeds, so the build
-            # result stands on its own (same as current LLMFunctionalVerifier
-            # fallback behaviour).
-            return "true", log_entry
+            # Conservative fallback: fail rather than silently promoting a
+            # potentially broken container to "success".
+            log_entry["verification_skipped"] = True
+            return "exit 1", log_entry

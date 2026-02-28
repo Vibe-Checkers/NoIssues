@@ -214,7 +214,8 @@ BAD EXAMPLES (DO NOT DO THIS):
         except Exception as e:
             print(f"[Verifier] LLM generation failed: {e}")
             log_entry["error"] = str(e)
-            return "true", log_entry # Fallback: always pass
+            log_entry["verification_skipped"] = True
+            return "exit 1", log_entry  # Conservative: fail rather than silently pass
 
     def verify_output(self, command: str, output: str, exit_code: int) -> Tuple[Dict, Dict]:
         """
@@ -636,6 +637,7 @@ class ParallelEmpiricalTester:
         try:
             thread_id = threading.get_ident()
             test_start_time = time.time()
+
             self.log(repo_name, f"[Task {worker_id}] Starting test", to_console=True)
 
             # Step 1: Clone
@@ -820,13 +822,20 @@ class ParallelEmpiricalTester:
                 _adaptive_timeout = estimate_build_timeout(repo_path, classification)
                 self.log(repo_name, f"[VerifyBuild] Building Docker image (timeout={_adaptive_timeout}s)", to_console=False)
                 _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
-                result = _per_call_tester.build_dockerfile(
+
+                # Reset search dedup per-attempt so that if the error context
+                # changed between retries, the agent can re-search the same
+                # keywords and get potentially different/updated results.
+                from agent.tools import _search_dedup
+                _search_dedup.history = set()
+
+                build_result = _per_call_tester.build_dockerfile(
                     str(dockerfile_path),
                     repo_path,
                     verify_image
                 )
 
-                if result.get("success"):
+                if build_result.get("success"):
                     self.log(repo_name, "[VerifyBuild] Docker build succeeded, running smoke test", to_console=False)
                     # Phase 2: Functional Verification (Smoke Test)
                     try:
@@ -967,7 +976,7 @@ class ParallelEmpiricalTester:
                         }, indent=2)
 
                 else:
-                    self.log(repo_name, f"[VerifyBuild] ✗ Docker build FAILED at stage: {result.get('stage')}", to_console=False)
+                    self.log(repo_name, f"[VerifyBuild] ✗ Docker build FAILED at stage: {build_result.get('stage')}", to_console=False)
 
                     # Cleanup verify image on build failure
                     try:
@@ -976,7 +985,7 @@ class ParallelEmpiricalTester:
                         pass
 
                     # Extract compact error info
-                    error_msg = result.get('error_message', '')
+                    error_msg = build_result.get('error_message', '')
                     error_lines = error_msg.split('\n') if error_msg else []
 
                     # Return truncated error log for context to save tokens
@@ -985,7 +994,7 @@ class ParallelEmpiricalTester:
                     # LLM-Based Error Analysis
                     self.log(repo_name, "[VerifyBuild] Running LLM error analysis", to_console=False)
                     analyzer = LLMErrorAnalyzer()
-                    analysis, analysis_log = analyzer.analyze_error(result.get('error_message', ''), result.get('failed_command', ''))
+                    analysis, analysis_log = analyzer.analyze_error(build_result.get('error_message', ''), build_result.get('failed_command', ''))
                     aux_logs.append(analysis_log)
                     self.log(repo_name, f"[VerifyBuild] Error cause: {analysis.get('cause', 'Unknown')}", to_console=False)
 
@@ -999,12 +1008,12 @@ class ParallelEmpiricalTester:
                     # Build compact response
                     compact_error = {
                         "status": "failed",
-                        "stage": result.get('stage', 'UNKNOWN'),
-                        "failed_command": result.get('failed_command', 'Unknown command'),
-                        "error_snippet": result.get('error_snippet', 'See tail_lines'),
+                        "stage": build_result.get('stage', 'UNKNOWN'),
+                        "failed_command": build_result.get('failed_command', 'Unknown command'),
+                        "error_snippet": build_result.get('error_snippet', 'See tail_lines'),
                         "error_analysis": error_features, # Replaced static ErrorPatternDetector with rich analysis
                         "tail_lines": tail_lines,
-                        "search_keywords": analysis.get("search_keywords", f"docker build error {result.get('failed_command', '')}")
+                        "search_keywords": analysis.get("search_keywords", f"docker build error {build_result.get('failed_command', '')}")
                         # Removed auxiliary_logs to save context
                     }
 
@@ -1327,13 +1336,28 @@ class ParallelEmpiricalTester:
 
         self.log(repo_name, "Found existing Dockerfile. Testing validity...", to_console=True)
         
+        # Smart build context heuristic: if the Dockerfile contains parent-relative
+        # COPY paths (e.g. COPY ../src /app), use the repo root as context since
+        # those paths depend on it. Otherwise, use the Dockerfile's parent directory.
+        try:
+            dockerfile_content = dockerfile_path.read_text(errors="replace")
+            has_parent_copy = any(
+                ".." in line
+                for line in dockerfile_content.splitlines()
+                if line.strip().upper().startswith(("COPY", "ADD"))
+            )
+        except Exception:
+            has_parent_copy = False  # safe default
+
+        build_context = repo_path if has_parent_copy else str(dockerfile_path.parent)
+
         # Try to build it
         image_name = f"learner-{slug}:latest"
         build_start = time.time()
         
         build_res = self.docker_tester.build_dockerfile(
             str(dockerfile_path),
-            repo_path,
+            build_context,
             image_name
         )
         

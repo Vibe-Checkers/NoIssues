@@ -299,6 +299,7 @@ def run_learner_agent(
 
     logger.info(f"Starting analysis for {repo_name}...")
 
+    # Initial agent creation — provides base_llm for build_initial_context
     executor, handler, base_llm = create_learner_agent(
         repository_path=repo_path,
         verbose=True,
@@ -340,7 +341,19 @@ ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
     dockerignore_path = Path(repo_path) / ".dockerignore"
 
     for attempt in range(1, max_retries + 1):
-        logger.info(f"=== Attempt {attempt}/{max_retries} ===")
+        # Adaptive iteration budget: give later attempts more room
+        # so complex repos don't exhaust steps on initial exploration.
+        current_max_iterations = max_iterations + (attempt - 1) * 10
+        logger.info(f"=== Attempt {attempt}/{max_retries} (max_iterations={current_max_iterations}) ===")
+
+        # Re-create agent on retries so it gets the updated budget
+        if attempt > 1:
+            executor, handler, base_llm = create_learner_agent(
+                repository_path=repo_path,
+                verbose=True,
+                extra_tools=extra_tools,
+                max_iterations=current_max_iterations,
+            )
 
         # Save previous Dockerfile BEFORE deleting it so we can:
         # (a) restore the verified snapshot on Fix-1B, and
@@ -393,6 +406,11 @@ REQUIRED ACTION:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+            # Cap feedback to prevent prompt bloat on later attempts
+            MAX_FEEDBACK_CHARS = 4000
+            if len(feedback_section) > MAX_FEEDBACK_CHARS:
+                feedback_section = feedback_section[:MAX_FEEDBACK_CHARS] + "\n... [feedback truncated]\n"
+
         goal_prompt = f"""
 GOAL: Containerize the '{repo_name}' repository.
 {classification_context}
@@ -442,6 +460,11 @@ Begin!
             output = result.get("output", "")
             intermediate_steps = result.get("intermediate_steps", [])
 
+            steps_used = len(intermediate_steps)
+            logger.info(
+                f"[Attempt {attempt}] steps_used={steps_used}/{current_max_iterations} "
+                f"(utilization={steps_used/current_max_iterations*100:.0f}%)"
+            )
             logger.info(f"Agent output: {output[:500]}...")
 
             # Track VerifyBuild and WriteToFile positions to enforce ordering

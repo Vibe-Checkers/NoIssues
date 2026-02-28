@@ -141,6 +141,126 @@ class RepoClassifier:
 
         return signals
 
+    def _try_rule_based_classification(self, signals: Dict, repo_name: str) -> Optional[Dict]:
+        """
+        Fast path for obvious repo types, skipping the LLM call entirely.
+        Returns classification dict or None if ambiguous.
+        """
+        configs = set(signals.get("config_files", {}).keys())
+        entries = set(signals.get("top_level_entries", []))
+        hints = signals.get("entrypoint_hints", {})
+
+        # Documentation-only: no code files at all
+        code_extensions = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".rb"}
+        has_code = any(
+            any(e.endswith(ext) for ext in code_extensions)
+            for e in entries if not e.endswith("/")
+        )
+        if not has_code and not configs:
+            return {
+                "repo_type": "documentation_only",
+                "confidence": "high",
+                "primary_language": "None",
+                "build_system": "none",
+                "verification_strategy": "build_only",
+                "package_name": None,
+                "binary_name": None,
+                "library_name": None,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "No source code files detected — documentation or config only.",
+                "dockerfile_hints": "No build step needed. Consider a minimal image that just copies docs.",
+            }
+
+        # Go with cmd/ dir → CLI tool
+        if "go.mod" in configs and hints.get("has_cmd_dir"):
+            return {
+                "repo_type": "cli_tool",
+                "confidence": "high",
+                "primary_language": "Go",
+                "build_system": "go",
+                "verification_strategy": "binary_run",
+                "package_name": None,
+                "binary_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "library_name": None,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "Go project with cmd/ directory — standard CLI tool structure.",
+                "dockerfile_hints": "Use multi-stage: golang:alpine for build, scratch or alpine for runtime. Build with 'go build -o /app ./cmd/...'.",
+            }
+
+        # Rust with src/main.rs → CLI tool
+        if "Cargo.toml" in configs and hints.get("has_src_main_rs"):
+            return {
+                "repo_type": "cli_tool",
+                "confidence": "high",
+                "primary_language": "Rust",
+                "build_system": "cargo",
+                "verification_strategy": "binary_run",
+                "package_name": None,
+                "binary_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "library_name": None,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "Rust project with src/main.rs — standard binary crate.",
+                "dockerfile_hints": "Use multi-stage: rust:alpine for build, alpine for runtime. Build with 'cargo build --release'.",
+            }
+
+        # Java + Maven (pom.xml + src/main/java/) → library or web_service
+        if "pom.xml" in configs and hints.get("has_src_main_java"):
+            return {
+                "repo_type": "library",
+                "confidence": "high",
+                "primary_language": "Java",
+                "build_system": "maven",
+                "verification_strategy": "import_test",
+                "package_name": None,
+                "binary_name": None,
+                "library_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "Java project with pom.xml and standard Maven directory layout.",
+                "dockerfile_hints": "Use multi-stage: maven:eclipse-temurin for build, eclipse-temurin:jre for runtime. Build with 'mvn package -DskipTests'.",
+            }
+
+        # Node.js (package.json without compiled-language markers)
+        compiled_markers = {"go.mod", "Cargo.toml", "pom.xml", "build.gradle"}
+        if "package.json" in configs and not (configs & compiled_markers):
+            return {
+                "repo_type": "library",
+                "confidence": "medium",
+                "primary_language": "JavaScript",
+                "build_system": "npm",
+                "verification_strategy": "import_test",
+                "package_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "binary_name": None,
+                "library_name": None,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "Node.js project with package.json and no compiled-language build files.",
+                "dockerfile_hints": "Use node:lts-alpine. Run 'npm ci' for reproducible installs. If it has a build script, run 'npm run build'.",
+            }
+
+        # Python (setup.py or pyproject.toml without compiled-language markers)
+        python_configs = {"setup.py", "pyproject.toml", "setup.cfg"}
+        if (configs & python_configs) and not (configs & compiled_markers):
+            return {
+                "repo_type": "library",
+                "confidence": "medium",
+                "primary_language": "Python",
+                "build_system": "pip",
+                "verification_strategy": "import_test",
+                "package_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "binary_name": None,
+                "library_name": None,
+                "is_monorepo": False,
+                "module_count": 1,
+                "rationale": "Python project with standard packaging config files.",
+                "dockerfile_hints": "Use python:3.11-slim. Install with 'pip install -e .' or 'pip install .'.",
+            }
+
+        return None  # Ambiguous — fall through to LLM
+
     def classify(self, repo_path: str, repo_name: str) -> Dict:
         """
         Classify the repository and determine verification strategy.
@@ -162,6 +282,12 @@ class RepoClassifier:
             }
         """
         signals = self.gather_signals(repo_path)
+
+        # Rule-based fast path for obvious repos — skip LLM and save tokens
+        fast_path = self._try_rule_based_classification(signals, repo_name)
+        if fast_path:
+            logger.info(f"[Classifier] Fast-path classification for {repo_name}: {fast_path['repo_type']}")
+            return fast_path
 
         prompt = f"""You are classifying a software repository to determine:
 1. What TYPE of project this is

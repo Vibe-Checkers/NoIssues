@@ -173,6 +173,14 @@ class FormattedOutputHandler(BaseCallbackHandler):
             self.token_usage["output"] += output_tokens
             self.token_usage["total"] += total
 
+            # Attach per-step token cost to the most recent transcript entry
+            if self.transcript:
+                self.transcript[-1]["step_token_usage"] = {
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "total": total,
+                }
+
             # Log token usage for this call
             msg = f"[TOKENS] Input: {input_tokens}, Output: {output_tokens}, Total: {total}"
             self._write_log(msg)
@@ -326,6 +334,11 @@ def _docker_hub_verify_tag(image_name: str, tag: str, platform_info: dict) -> st
     import requests
     # Skip verification for non-Docker-Hub registries (ghcr.io, mcr.microsoft.com, quay.io, etc.)
     if not _is_docker_hub_image(image_name):
+        logger.warning(
+            "Cannot verify non-Docker-Hub image %s:%s — "
+            "skipping tag validation (registry may be ghcr.io, mcr, quay, etc.)",
+            image_name, tag
+        )
         return f"SKIPPED: {image_name}:{tag} is hosted on a non-Docker-Hub registry (cannot verify via Docker Hub API)."
     api_image_name = f"library/{image_name}" if "/" not in image_name else image_name
     url = f"https://hub.docker.com/v2/repositories/{api_image_name}/tags/{tag}"

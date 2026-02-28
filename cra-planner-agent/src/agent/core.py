@@ -71,16 +71,34 @@ class GPT5NanoWrapper(BaseChatModel):
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
         """Fallback for LangChain versions that call _generate directly."""
         kwargs.pop('stop', None)
+        _stop_sequences = stop  # Save for post-hoc truncation
         with _api_semaphore:
             # Ensure the bound object has _generate before calling
             if hasattr(self.llm, '_generate'):
-                return self.llm._generate(messages, **kwargs)
+                chat_result = self.llm._generate(messages, **kwargs)
             else:
                 # Fallback to invoke if _generate is not available
-                result = self.llm.invoke(messages, **kwargs)
+                raw = self.llm.invoke(messages, **kwargs)
                 # Convert to ChatResult if needed
                 from langchain_core.outputs import ChatGeneration
-                return ChatResult(generations=[ChatGeneration(message=result)])
+                chat_result = ChatResult(generations=[ChatGeneration(message=raw)])
+        # Post-hoc truncation at stop sequences so ReAct parsing works
+        # even though gpt-5-nano doesn't support native stop sequences.
+        if _stop_sequences and chat_result.generations:
+            for gen in chat_result.generations:
+                text = gen.message.content
+                if not isinstance(text, str):
+                    continue
+                earliest = len(text)
+                for seq in _stop_sequences:
+                    idx = text.find(seq)
+                    if idx != -1 and idx < earliest:
+                        earliest = idx
+                if earliest < len(text):
+                    # Strip trailing whitespace so the ReAct parser doesn't
+                    # trip on stray newlines before the stop token boundary.
+                    gen.message.content = text[:earliest].rstrip()
+        return chat_result
 
     @property
     def _llm_type(self) -> str:
