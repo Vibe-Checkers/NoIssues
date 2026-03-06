@@ -326,6 +326,26 @@ Use this classification to guide your Dockerfile design. Do NOT create an
 ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
 """
 
+    # Early termination for very large monorepos (>50 modules) — building all
+    # modules from scratch in Docker within 3 attempts is unrealistic.
+    if repo_classification and repo_classification.get('is_monorepo', False):
+        module_count = repo_classification.get('module_count', 1)
+        if module_count > 50:
+            logger.warning(
+                f"Monorepo with {module_count} modules — too large to build entirely. "
+                f"Skipping agent execution."
+            )
+            return {
+                "status": "failure",
+                "report_dir": str(report_dir),
+                "dockerfile": None,
+                "attempts": 0,
+                "language": language,
+                "error": f"Monorepo too large ({module_count} modules). "
+                         f"Target a specific runnable module instead.",
+                "skip_reason": "monorepo_too_large",
+            }
+
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
 
     lessons_learned: List[str] = []
@@ -387,8 +407,8 @@ ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
                     f"\nDOCKERFILE FROM PREVIOUS ATTEMPT "
                     f"(do not copy this verbatim — it failed; study it to avoid repeating mistakes):\n"
                     f"```dockerfile\n"
-                    f"{previous_dockerfile_content[:3000]}"
-                    f"{'...(truncated)' if len(previous_dockerfile_content) > 3000 else ''}"
+                    f"{previous_dockerfile_content[:1500]}"
+                    f"{'...(truncated)' if len(previous_dockerfile_content) > 1500 else ''}"
                     f"\n```\n"
                 )
 
@@ -406,8 +426,9 @@ REQUIRED ACTION:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-            # Cap feedback to prevent prompt bloat on later attempts
-            MAX_FEEDBACK_CHARS = 4000
+            # Cap feedback to prevent prompt bloat on later attempts.
+            # Keep only the most recent lessons if there are many.
+            MAX_FEEDBACK_CHARS = 2500
             if len(feedback_section) > MAX_FEEDBACK_CHARS:
                 feedback_section = feedback_section[:MAX_FEEDBACK_CHARS] + "\n... [feedback truncated]\n"
 
@@ -510,7 +531,9 @@ Begin!
                 continue
 
             # Fix 1B: agent wrote AFTER a passing VerifyBuild → restore snapshot
-            if last_write_index > last_verify_index:
+            # Only trigger when the last verify SUCCEEDED. If verify failed,
+            # writing a new Dockerfile is the correct behavior (not a violation).
+            if last_verify_success and last_write_index > last_verify_index:
                 restored = False
                 if last_verify_index >= 0:
                     _, verify_obs = intermediate_steps[last_verify_index]
@@ -540,7 +563,8 @@ Begin!
                     lesson = (
                         f"Attempt {attempt}: You modified the Dockerfile "
                         f"(step {last_write_index}) AFTER verifying it "
-                        f"(step {last_verify_index}). You must verify LAST."
+                        f"(step {last_verify_index}). You must verify LAST. "
+                        f"[ordering_violation=true_positive, last_verify_success={last_verify_success}]"
                     )
                     logger.warning(lesson)
                     _add_lesson(lesson)
@@ -555,6 +579,12 @@ Begin!
                 logger.info(f"Extracted technical lesson: {tech_lesson[:100]}...")
 
             if not last_verify_success:
+                # Log when agent wrote after a failed verify (budget exhaustion)
+                if last_write_index > last_verify_index:
+                    logger.info(
+                        f"Attempt {attempt}: iteration budget exhausted before final verify "
+                        f"(last write at step {last_write_index}, last verify at step {last_verify_index})"
+                    )
                 classification = classify_failure(lessons_learned, intermediate_steps)
 
                 if classification["unfixable"]:

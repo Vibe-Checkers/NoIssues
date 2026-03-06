@@ -686,7 +686,7 @@ class ParallelEmpiricalTester:
                 result["skip_reason"] = "documentation_only"
                 self.update_progress(repo_name, "⊘ Skipped (docs-only)")
                 self._aggressive_cleanup(repo_name, repo_path, result)
-                self._save_incremental_results(result)
+                # Don't save here — the finally block handles append + JSONL
                 return result
 
             # Step 1.6: Check for existing valid Dockerfile (Pre-check)
@@ -706,10 +706,7 @@ class ParallelEmpiricalTester:
                 except Exception as e:
                     self.log(repo_name, f"Cleanup failed: {e}", to_console=False)
                 
-                # Append result and return
-                with self.results_lock:
-                    self.results.append(result)
-                    self._save_incremental_results(result)
+                # Don't save here — the finally block handles append + JSONL
                 return result
 
             # Step 2: Run Learner Agent with Validation Callback
