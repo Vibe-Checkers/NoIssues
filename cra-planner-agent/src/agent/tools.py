@@ -411,7 +411,12 @@ def _validate_dockerfile_from_lines(content: str) -> Optional[str]:
             continue
 
         if 'NOT FOUND' in result:
-            errors.append(f"  • {image_ref}  →  {result}")
+            # Fetch available tags so the agent can pick a valid one immediately
+            try:
+                tag_list = _docker_hub_list_tags(image_name, platform_info)
+            except Exception:
+                tag_list = "(could not fetch available tags)"
+            errors.append(f"  • {image_ref}  →  {result}\n    {tag_list}")
 
     if not errors:
         return None
@@ -420,11 +425,8 @@ def _validate_dockerfile_from_lines(content: str) -> Optional[str]:
         "WRITE BLOCKED — the following base image(s) do NOT exist on Docker Hub:\n"
         + "\n".join(errors)
         + "\n\n"
-        "You MUST verify base images before writing the Dockerfile.\n"
-        "REQUIRED STEPS:\n"
-        "  1. Call DockerImageSearch(query=\"tags:<image_name>\") to list real tags.\n"
-        "  2. Choose a tag marked [OK] for your platform.\n"
-        "  3. Rewrite the FROM line with the verified tag, then call WriteToFile again."
+        "Pick a valid tag from the list above (prefer ones marked [OK] for your platform),\n"
+        "rewrite the FROM line, and call WriteToFile again."
     )
 
 
@@ -1003,11 +1005,5 @@ def create_structured_tools(repo_root: str) -> list:
             func=fetch_web_page_structured,
             description="Fetch and extract relevant content from a web page.",
             args_schema=FetchWebPageInput
-        ),
-        StructuredTool(
-            name="DockerImageSearch",
-            func=docker_image_search_structured,
-            description="Search Docker Hub for images or verify tag existence.",
-            args_schema=DockerImageSearchInput
         ),
     ]

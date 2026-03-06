@@ -197,13 +197,6 @@ IMPORTANT:
 CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 0 - BASE IMAGE DISCOVERY (MANDATORY FIRST STEP):
-  0. Use DockerImageSearch to confirm your planned base image tag EXISTS before writing Dockerfile.
-     Example: DockerImageSearch(query="maven 3.8 openjdk 17 slim")
-     NEVER write FROM <image>:<tag> without first confirming the tag exists.
-     If DockerImageSearch returns no results for a tag, try a different version.
-     This step prevents the most common "manifest unknown" build failures.
-
 PHASE 1 - ANALYZE:
   1. ListDirectory to see project structure
   2. ReadLocalFile to check package.json, requirements.txt, pom.xml, etc.
@@ -250,8 +243,8 @@ Error: "COPY failed: file not found"
 Fix: Check actual file names with ListDirectory, fix COPY paths
 
 Error: "manifest unknown" or "not found" or "pull access denied"
-Fix: The base image tag does not exist. Use DockerImageSearch FIRST (Phase 0).
-     Example: DockerImageSearch(query="node 18 alpine") to see valid tags.
+Fix: The base image tag does not exist. WriteToFile will block invalid tags and show
+     available alternatives — pick a valid tag from that list and rewrite the FROM line.
 
 ═══════════════════════════════════════════════════════════════════════════════
 MULTI-MODULE JAVA PROJECTS (Maven/Gradle):

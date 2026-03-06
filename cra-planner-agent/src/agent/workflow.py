@@ -133,8 +133,8 @@ def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) 
             "unfixable": False,
             "hint": (
                 "The base image tag does not exist on Docker Hub. "
-                "Use DockerImageSearch to find a valid tag BEFORE rewriting the Dockerfile. "
-                "Example: DockerImageSearch(query='node 18 alpine') lists real available tags."
+                "WriteToFile will block invalid tags and show available alternatives — "
+                "pick a valid tag from that list and rewrite the FROM line."
             )
         }
 

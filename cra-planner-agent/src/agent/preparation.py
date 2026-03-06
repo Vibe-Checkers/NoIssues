@@ -442,7 +442,7 @@ def analyze_build_manifests(repo_path: str) -> Dict[str, Any]:
                     result["java_version"] = m.group(1)
                     result["warnings"].append(
                         f"Project requires Java {m.group(1)} (build.gradle toolchain). "
-                        f"Use DockerImageSearch to find a JDK {m.group(1)} base image."
+                        f"Use a JDK {m.group(1)} base image (e.g. eclipse-temurin:{m.group(1)}-jdk)."
                     )
                 break
             except Exception:
