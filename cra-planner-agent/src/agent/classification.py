@@ -235,36 +235,77 @@ README (excerpt):
 CONFIG FILE CONTENTS:
 {json.dumps(signals.get('config_files', {}), indent=2)[:2500]}
 
-CLASSIFICATION RULES:
-- "library": produces an importable package, NOT a standalone executable
-- "native_library": C/C++/Rust library producing .so/.a/.dylib files
-- "cli_tool": produces a binary or script meant to be run directly (check for bin/, console_scripts, __main__.py, cmd/ directory)
-- "web_service": starts an HTTP/gRPC server
-- "framework": provides scaffolding for OTHER apps (like Spring Boot, Django, Ansible)
-- "monorepo": contains 3+ independent modules/packages with separate build configs
-- "documentation_only": no compilable source code, just docs/configs
-- "data_pipeline": ML training, ETL, batch processing
+CLASSIFICATION TYPES (read each carefully before deciding):
 
-IMPORTANT DISTINCTIONS:
-- Projects with bin/ directories or console_scripts entrypoints are CLI tools, NOT libraries
-- Ansible, Terraform, etc. are frameworks/CLI tools, NOT libraries — even though they are pip-installable
-- For Node.js: read the "name" field from package.json for package_name (e.g. "chart.js" not "Chart.js")
-- For Python: read the "name" field from pyproject.toml/setup.cfg for package_name
-- If a project has heavy test devDependencies (cypress, playwright, puppeteer), note this in dockerfile_hints
+"library"
+  The project's primary output is an importable package consumed by OTHER code via
+  require(), import, or dependency declaration. It does NOT produce a standalone
+  executable. The end user never runs it directly — they add it as a dependency.
+  Examples: axios, lodash, requests, numpy, chart.js, guava, boost.
+  Key signals: package.json with NO bin field, setup.py/pyproject.toml with NO
+  console_scripts, no cmd/ or bin/ directory, README says "install" and "import".
+  Verification: import_test — import the package and print version/exports.
+  package_name: read from package.json "name" field or pyproject.toml "name" field,
+  NOT from the GitHub repo name (e.g. "chart.js" not "Chart.js").
 
-VERIFICATION STRATEGY RULES:
-- "import_test": for libraries — import the package in the language runtime and print version/symbols
-- "binary_run": for CLI tools — execute the binary with --version or --help
-- "link_test": for native libraries — verify with ldd, nm, or ctypes
-- "server_probe": for web services — start process, sleep 3s, check alive, kill
-- "build_only": for monorepos, frameworks, or projects where build success IS the test
-- "multi_target": for monorepos with multiple independent artifacts
+"native_library"
+  C/C++/Rust project producing shared (.so/.dll) or static (.a/.lib) library files.
+  The output is linked by other programs, not executed directly.
+  Examples: zlib, openssl, libcurl, abseil-cpp.
+  Key signals: CMakeLists.txt with add_library(), Makefile producing .so/.a files.
+  Verification: link_test — verify with ldd, nm, or ctypes.
 
-For multi-module Maven projects: do NOT build the aggregator POM alone.
-Either build a specific module that produces a JAR (mvn -pl <module> -am package)
-or use 'mvn package -DskipTests' at root to build all modules.
-SNAPSHOT dependencies are reactor-internal — they resolve during a full build,
-not when building isolated modules.
+"cli_tool"
+  The project produces a binary or script the user runs directly from the command line.
+  It has a clear entrypoint: a main() function, bin/ directory, console_scripts, or
+  cmd/ directory with main.go.
+  Examples: kubectl, ripgrep, black, eslint, terraform.
+  Key signals: bin/ directory, console_scripts in setup.cfg/pyproject.toml, cmd/ dir
+  with main.go, src/main.rs, "bin" field in package.json pointing to a JS entrypoint.
+  IMPORTANT: a "bin" field in package.json does NOT make a project a CLI tool if the
+  package is primarily used as an importable library (e.g. axios has no CLI binary).
+  Only classify as cli_tool if the project's PRIMARY purpose is direct execution.
+  Verification: binary_run — execute with --version or --help.
+
+"web_service"
+  The project starts a long-running HTTP/gRPC/WebSocket server process.
+  Examples: express apps, Spring Boot services, FastAPI apps, Rails apps.
+  Key signals: listen() calls, server.start(), @app.route, port bindings.
+  Verification: server_probe — start process, sleep 3s, check it's alive, kill.
+
+"framework"
+  The project provides scaffolding, plugins, or runtime infrastructure for OTHER
+  applications to build on. It is not a simple library (too large/complex), not a
+  CLI tool (though it may include CLI commands), and not a web service itself.
+  Examples: Django, Spring Boot, Ansible, Rails, Angular, React.
+  Key signals: plugin architecture, extensive documentation about building apps WITH it,
+  configuration system, middleware/pipeline concepts.
+  Verification: build_only — successful build is the test.
+
+"monorepo"
+  Contains 3+ independent modules/packages with separate build configurations.
+  Each module could be its own project.
+  Examples: Activiti (68 Maven modules), Babel (many npm packages), Android (hundreds).
+  Key signals: multiple pom.xml files, packages/ or modules/ directory, workspaces in
+  package.json, multiple build.gradle files.
+  For Maven monorepos: use 'mvn package -DskipTests -Drat.skip=true' at root.
+  SNAPSHOT dependencies are reactor-internal — they resolve during a full build.
+  Verification: multi_target or build_only.
+
+"documentation_only"
+  No compilable source code — just docs, configs, or markdown files.
+  Verification: build_only (trivial).
+
+"data_pipeline"
+  ML training, ETL, batch processing, or data transformation projects.
+  Examples: training scripts, Airflow DAGs, Spark jobs.
+  Verification: build_only.
+
+ADDITIONAL GUIDANCE:
+- If the project has heavy test devDependencies (cypress, playwright, puppeteer),
+  note this in dockerfile_hints — suggest --omit=dev or --ignore-scripts.
+- For Node.js libraries: use 'npm ci --omit=dev' to skip test infrastructure.
+- For Python libraries: use 'pip install .' (not pip install -e .[dev]).
 
 Return ONLY valid JSON:
 {{
