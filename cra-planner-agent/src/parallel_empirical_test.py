@@ -679,6 +679,28 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
                 classification = None
 
+            # Step 1.55: 7-Dimension Taxonomy Classification
+            from agent.taxonomy import get_taxonomy
+            try:
+                taxonomy_signals = getattr(classifier, '_last_signals', None) if classification else None
+                taxonomy = get_taxonomy(
+                    repo_url=repo_url,
+                    repo_path=repo_path,
+                    signals=taxonomy_signals,
+                )
+                if taxonomy:
+                    result["taxonomy"] = taxonomy
+                    self.log(repo_name,
+                             f"Taxonomy: domain={taxonomy['domain']}, "
+                             f"build_tool={taxonomy['build_tool']}, "
+                             f"automation={taxonomy['automation_level']}",
+                             to_console=True)
+                else:
+                    self.log(repo_name, "Taxonomy: not in CSV, will use live classification in agent", to_console=True)
+            except Exception as e:
+                self.log(repo_name, f"Taxonomy classification failed: {e}", to_console=True)
+                taxonomy = None
+
             # Early skip for documentation-only repos
             if classification and classification.get("repo_type") == "documentation_only":
                 self.log(repo_name, "Documentation-only repo — skipping build", to_console=True)
@@ -1032,6 +1054,7 @@ class ParallelEmpiricalTester:
                 repo_name=repo_name,
                 repo_url=repo_url,
                 repo_classification=classification,
+                taxonomy=taxonomy,
                 max_retries=3,  # 3 attempts × 25 steps = 75 max tool calls
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,

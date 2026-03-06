@@ -310,6 +310,7 @@ class RepoClassifier:
             }
         """
         signals = self.gather_signals(repo_path)
+        self._last_signals = signals  # Expose for reuse by taxonomy classifier
 
         # Rule-based fast path for obvious repos — skip LLM and save tokens
         fast_path = self._try_rule_based_classification(signals, repo_name)

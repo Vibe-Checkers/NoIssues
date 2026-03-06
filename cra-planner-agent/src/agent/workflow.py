@@ -9,7 +9,9 @@ from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent
 from langchain_core.messages import SystemMessage, HumanMessage
-from .preparation import build_initial_context
+from .preparation import build_initial_context, detect_project_language
+from .taxonomy import get_taxonomy
+from .metaprompt import generate_metaprompt_context
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +259,7 @@ def run_learner_agent(
     repo_name: str,
     repo_url: str,
     repo_classification: dict = None,
+    taxonomy: dict = None,
     max_retries: int = 3,
     max_iterations: int = 25,
     callback_handler=None,
@@ -307,9 +310,36 @@ def run_learner_agent(
         max_iterations=max_iterations,
     )
 
-    prep_context = build_initial_context(base_llm, repo_path,
-                                         repo_classification=repo_classification)
-    language = prep_context["language"]
+    # --- Taxonomy-driven context (replaces build_initial_context) ---
+
+    # Language detection (kept for return value)
+    if (repo_classification
+            and repo_classification.get("primary_language", "Unknown") != "Unknown"):
+        language = repo_classification["primary_language"]
+    else:
+        language = detect_project_language(repo_path)
+
+    # Resolve taxonomy if not provided (live LLM fallback)
+    if taxonomy is None:
+        taxonomy = get_taxonomy(
+            repo_url=repo_url,
+            llm=base_llm,
+            repo_path=repo_path,
+        )
+
+    # Generate metaprompt-driven context from taxonomy
+    if taxonomy:
+        metaprompt_context = generate_metaprompt_context(
+            llm=base_llm,
+            repo_name=repo_name,
+            taxonomy=taxonomy,
+        )
+    else:
+        # Final fallback: use legacy context builder
+        prep_context = build_initial_context(base_llm, repo_path,
+                                             repo_classification=repo_classification)
+        metaprompt_context = prep_context["context_str"]
+        language = prep_context["language"]
 
     # Build classification context for the agent prompt
     classification_context = ""
@@ -357,6 +387,20 @@ infrastructure. Follow these rules:
                          f"Target a specific runnable module instead.",
                 "skip_reason": "monorepo_too_large",
             }
+
+    # Build taxonomy context for the agent prompt
+    taxonomy_context = ""
+    if taxonomy:
+        taxonomy_context = f"""
+## Repository Taxonomy (7-Dimension Analysis)
+- Domain: {taxonomy.get('domain', 'unknown')}
+- Build Tool: {taxonomy.get('build_tool', 'unknown')}
+- Automation Level: {taxonomy.get('automation_level', 'unknown')}
+- Environment Specificity: {taxonomy.get('environment_specificity', 'unknown')}
+- Dependency Transparency: {taxonomy.get('dependency_transparency', 'unknown')}
+- Tooling Complexity: {taxonomy.get('tooling_complexity', 'unknown')}
+- Reproducibility Support: {taxonomy.get('reproducibility_support', 'unknown')}
+"""
 
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
 
@@ -447,6 +491,7 @@ REQUIRED ACTION:
         goal_prompt = f"""
 GOAL: Containerize the '{repo_name}' repository.
 {classification_context}
+{taxonomy_context}
 OBJECTIVES:
 1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
 2. Based on ONLY the files that exist, determine build approach
@@ -473,8 +518,8 @@ IMPORTANT RULES:
 - Be efficient - don't waste API calls on trial-and-error file reads
 - ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)
 
-CONTEXT:
-{prep_context['context_str']}
+CONTEXT (AI-Generated from Repository Taxonomy):
+{metaprompt_context}
 {feedback_section}
 You have full autonomy. Use your tools to explore, build, and VERIFY.
 Do NOT ask for user permission. Just do it.
