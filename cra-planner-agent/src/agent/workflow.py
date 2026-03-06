@@ -370,7 +370,12 @@ infrastructure. Follow these rules:
 
     # Early termination for very large monorepos (>50 modules) — building all
     # modules from scratch in Docker within 3 attempts is unrealistic.
-    if repo_classification and repo_classification.get('is_monorepo', False):
+    # Check both is_monorepo flag and repo_type (LLM may set one but not the other)
+    is_monorepo = (
+        repo_classification.get('is_monorepo', False)
+        or repo_classification.get('repo_type') == 'monorepo'
+    ) if repo_classification else False
+    if is_monorepo:
         module_count = repo_classification.get('module_count', 1)
         if module_count > 50:
             logger.warning(

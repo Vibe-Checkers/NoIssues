@@ -683,8 +683,10 @@ class ParallelEmpiricalTester:
             from agent.taxonomy import get_taxonomy
             try:
                 taxonomy_signals = getattr(classifier, '_last_signals', None) if classification else None
+                taxonomy_llm = getattr(classifier, 'llm', None) if classification else None
                 taxonomy = get_taxonomy(
                     repo_url=repo_url,
+                    llm=taxonomy_llm,
                     repo_path=repo_path,
                     signals=taxonomy_signals,
                 )

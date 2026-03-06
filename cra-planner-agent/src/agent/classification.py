@@ -116,9 +116,25 @@ class RepoClassifier:
             signals["top_level_entries"] = []
 
         # 4. Entrypoint heuristics
+        has_bin_dir = (repo / "bin").is_dir()
+        # Detect console_scripts in setup.cfg or pyproject.toml (Python CLI tools)
+        has_console_scripts = False
+        for cfg_name in ("setup.cfg", "pyproject.toml", "setup.py"):
+            cfg_path = repo / cfg_name
+            if cfg_path.exists():
+                try:
+                    cfg_text = cfg_path.read_text(errors="ignore")[:2000]
+                    if "console_scripts" in cfg_text:
+                        has_console_scripts = True
+                        break
+                except Exception:
+                    pass
+
         signals["entrypoint_hints"] = {
             "has_main_py": (repo / "main.py").exists() or (repo / "app.py").exists(),
             "has_cmd_dir": (repo / "cmd").is_dir(),
+            "has_bin_dir": has_bin_dir,
+            "has_console_scripts": has_console_scripts,
             "has_src_main_rs": (repo / "src" / "main.rs").exists(),
             "has_src_main_java": (repo / "src" / "main").is_dir(),
             "has_manage_py": (repo / "manage.py").exists(),
@@ -143,14 +159,12 @@ class RepoClassifier:
 
     def _try_rule_based_classification(self, signals: Dict, repo_name: str) -> Optional[Dict]:
         """
-        Fast path for obvious repo types, skipping the LLM call entirely.
-        Returns classification dict or None if ambiguous.
+        Fast path only for trivially obvious cases. Everything else goes to LLM.
         """
         configs = set(signals.get("config_files", {}).keys())
         entries = set(signals.get("top_level_entries", []))
-        hints = signals.get("entrypoint_hints", {})
 
-        # Documentation-only: no code files at all
+        # Documentation-only: no code files at all — doesn't need LLM
         code_extensions = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".rb"}
         has_code = any(
             any(e.endswith(ext) for ext in code_extensions)
@@ -172,122 +186,7 @@ class RepoClassifier:
                 "dockerfile_hints": "No build step needed. Consider a minimal image that just copies docs.",
             }
 
-        # Go with cmd/ dir → CLI tool
-        if "go.mod" in configs and hints.get("has_cmd_dir"):
-            return {
-                "repo_type": "cli_tool",
-                "confidence": "high",
-                "primary_language": "Go",
-                "build_system": "go",
-                "verification_strategy": "binary_run",
-                "package_name": None,
-                "binary_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
-                "library_name": None,
-                "is_monorepo": False,
-                "module_count": 1,
-                "rationale": "Go project with cmd/ directory — standard CLI tool structure.",
-                "dockerfile_hints": "Use multi-stage: golang:alpine for build, scratch or alpine for runtime. Build with 'go build -o /app ./cmd/...'.",
-            }
-
-        # Rust with src/main.rs → CLI tool
-        if "Cargo.toml" in configs and hints.get("has_src_main_rs"):
-            return {
-                "repo_type": "cli_tool",
-                "confidence": "high",
-                "primary_language": "Rust",
-                "build_system": "cargo",
-                "verification_strategy": "binary_run",
-                "package_name": None,
-                "binary_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
-                "library_name": None,
-                "is_monorepo": False,
-                "module_count": 1,
-                "rationale": "Rust project with src/main.rs — standard binary crate.",
-                "dockerfile_hints": "Use multi-stage: rust:alpine for build, alpine for runtime. Build with 'cargo build --release'.",
-            }
-
-        # Java + Maven (pom.xml + src/main/java/) → library or web_service
-        if "pom.xml" in configs and hints.get("has_src_main_java"):
-            return {
-                "repo_type": "library",
-                "confidence": "high",
-                "primary_language": "Java",
-                "build_system": "maven",
-                "verification_strategy": "import_test",
-                "package_name": None,
-                "binary_name": None,
-                "library_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
-                "is_monorepo": False,
-                "module_count": 1,
-                "rationale": "Java project with pom.xml and standard Maven directory layout.",
-                "dockerfile_hints": "Use multi-stage: maven:eclipse-temurin for build, eclipse-temurin:jre for runtime. Build with 'mvn package -DskipTests'.",
-            }
-
-        # Node.js (package.json without compiled-language markers)
-        compiled_markers = {"go.mod", "Cargo.toml", "pom.xml", "build.gradle"}
-        if "package.json" in configs and not (configs & compiled_markers):
-            # Read package name from package.json's "name" field (e.g. "chart.js")
-            # instead of deriving from repo name (e.g. "Chart.js")
-            npm_pkg_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
-            try:
-                pkg_content = signals.get("config_files", {}).get("package.json", "")
-                if pkg_content:
-                    import json as _json
-                    pkg_data = _json.loads(pkg_content)
-                    if pkg_data.get("name"):
-                        npm_pkg_name = pkg_data["name"]
-            except Exception:
-                pass
-            return {
-                "repo_type": "library",
-                "confidence": "medium",
-                "primary_language": "JavaScript",
-                "build_system": "npm",
-                "verification_strategy": "import_test",
-                "package_name": npm_pkg_name,
-                "binary_name": None,
-                "library_name": None,
-                "is_monorepo": False,
-                "module_count": 1,
-                "rationale": "Node.js project with package.json and no compiled-language build files.",
-                "dockerfile_hints": "Use node:lts-alpine. Run 'npm ci' for reproducible installs. If it has a build script, run 'npm run build'.",
-            }
-
-        # Python (setup.py or pyproject.toml without compiled-language markers)
-        python_configs = {"setup.py", "pyproject.toml", "setup.cfg"}
-        if (configs & python_configs) and not (configs & compiled_markers):
-            # Try to read package name from pyproject.toml or setup.cfg
-            py_pkg_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
-            try:
-                cfg_files = signals.get("config_files", {})
-                if "pyproject.toml" in cfg_files:
-                    import re as _re
-                    m = _re.search(r'name\s*=\s*["\']([^"\']+)["\']', cfg_files["pyproject.toml"])
-                    if m:
-                        py_pkg_name = m.group(1)
-                elif "setup.cfg" in cfg_files:
-                    import re as _re
-                    m = _re.search(r'name\s*=\s*(\S+)', cfg_files["setup.cfg"])
-                    if m:
-                        py_pkg_name = m.group(1)
-            except Exception:
-                pass
-            return {
-                "repo_type": "library",
-                "confidence": "medium",
-                "primary_language": "Python",
-                "build_system": "pip",
-                "verification_strategy": "import_test",
-                "package_name": py_pkg_name,
-                "binary_name": None,
-                "library_name": None,
-                "is_monorepo": False,
-                "module_count": 1,
-                "rationale": "Python project with standard packaging config files.",
-                "dockerfile_hints": "Use python:3.11-slim. Install with 'pip install -e .' or 'pip install .'.",
-            }
-
-        return None  # Ambiguous — fall through to LLM
+        return None  # All real repos go to LLM for accurate classification
 
     def classify(self, repo_path: str, repo_name: str) -> Dict:
         """
@@ -339,12 +238,19 @@ CONFIG FILE CONTENTS:
 CLASSIFICATION RULES:
 - "library": produces an importable package, NOT a standalone executable
 - "native_library": C/C++/Rust library producing .so/.a/.dylib files
-- "cli_tool": produces a binary or script meant to be run directly
+- "cli_tool": produces a binary or script meant to be run directly (check for bin/, console_scripts, __main__.py, cmd/ directory)
 - "web_service": starts an HTTP/gRPC server
-- "framework": provides scaffolding for OTHER apps (like Spring Boot, Django)
+- "framework": provides scaffolding for OTHER apps (like Spring Boot, Django, Ansible)
 - "monorepo": contains 3+ independent modules/packages with separate build configs
 - "documentation_only": no compilable source code, just docs/configs
 - "data_pipeline": ML training, ETL, batch processing
+
+IMPORTANT DISTINCTIONS:
+- Projects with bin/ directories or console_scripts entrypoints are CLI tools, NOT libraries
+- Ansible, Terraform, etc. are frameworks/CLI tools, NOT libraries — even though they are pip-installable
+- For Node.js: read the "name" field from package.json for package_name (e.g. "chart.js" not "Chart.js")
+- For Python: read the "name" field from pyproject.toml/setup.cfg for package_name
+- If a project has heavy test devDependencies (cypress, playwright, puppeteer), note this in dockerfile_hints
 
 VERIFICATION STRATEGY RULES:
 - "import_test": for libraries — import the package in the language runtime and print version/symbols
@@ -367,7 +273,7 @@ Return ONLY valid JSON:
     "primary_language": "<e.g. Python, Java, C++, Go, Rust, JavaScript>",
     "build_system": "<e.g. cmake, setuptools, cargo, maven, gradle, npm>",
     "verification_strategy": "<one of: {json.dumps(VERIFICATION_STRATEGIES)}>",
-    "package_name": "<importable name for import_test, or null>",
+    "package_name": "<importable name for import_test — read from package.json/pyproject.toml 'name' field, NOT from repo name>",
     "binary_name": "<executable name for binary_run, or null>",
     "library_name": "<.so/.a name for link_test, or null>",
     "is_monorepo": true/false,
