@@ -368,30 +368,29 @@ infrastructure. Follow these rules:
 - The smoke test only needs to import the library — no test suite execution.
 """
 
-    # Early termination for very large monorepos (>50 modules) — building all
-    # modules from scratch in Docker within 3 attempts is unrealistic.
-    # Check both is_monorepo flag and repo_type (LLM may set one but not the other)
+    # Inject targeted build strategy for large monorepos instead of skipping them.
     is_monorepo = (
         repo_classification.get('is_monorepo', False)
         or repo_classification.get('repo_type') == 'monorepo'
     ) if repo_classification else False
-    if is_monorepo:
+    if is_monorepo and repo_classification.get('module_count', 1) > 10:
         module_count = repo_classification.get('module_count', 1)
-        if module_count > 50:
-            logger.warning(
-                f"Monorepo with {module_count} modules — too large to build entirely. "
-                f"Skipping agent execution."
-            )
-            return {
-                "status": "failure",
-                "report_dir": str(report_dir),
-                "dockerfile": None,
-                "attempts": 0,
-                "language": language,
-                "error": f"Monorepo too large ({module_count} modules). "
-                         f"Target a specific runnable module instead.",
-                "skip_reason": "monorepo_too_large",
-            }
+        build_system = repo_classification.get('build_system', 'unknown')
+        logger.info(
+            f"Large monorepo ({module_count} modules, {build_system}) — "
+            f"injecting targeted build strategy."
+        )
+        classification_context += f"""
+## Monorepo Build Strategy ({module_count} modules)
+This is a large monorepo. Do NOT attempt to build every module individually. Instead:
+1. Run the ROOT build command with tests and QA checks skipped:
+   Maven:  mvn package -DskipTests -Dcheckstyle.skip -Drat.skip=true -Dpmd.skip=true -Dspotbugs.skip=true
+   Gradle: ./gradlew build -x test -x checkstyleMain -x spotbugsMain
+2. If the root build times out, target ONE specific runnable module:
+   Maven:  mvn package -DskipTests -pl <module-name> -am
+   Gradle: ./gradlew :<module>:build -x test
+3. ALWAYS skip compliance/QA plugins (RAT, checkstyle, PMD, spotbugs) — they are not needed for containerization.
+"""
 
     # Build taxonomy context for the agent prompt
     taxonomy_context = ""
