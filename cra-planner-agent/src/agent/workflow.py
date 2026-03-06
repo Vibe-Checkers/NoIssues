@@ -314,9 +314,10 @@ def run_learner_agent(
     # Build classification context for the agent prompt
     classification_context = ""
     if repo_classification:
+        repo_type = repo_classification.get('repo_type', 'unknown')
         classification_context = f"""
 ## Repository Classification (pre-analyzed)
-- Type: {repo_classification.get('repo_type', 'unknown')}
+- Type: {repo_type}
 - Language: {repo_classification.get('primary_language', 'Unknown')}
 - Build System: {repo_classification.get('build_system', 'unknown')}
 - Is Monorepo: {repo_classification.get('is_monorepo', False)} ({repo_classification.get('module_count', 1)} modules)
@@ -324,6 +325,17 @@ def run_learner_agent(
 
 Use this classification to guide your Dockerfile design. Do NOT create an
 ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
+"""
+        if repo_type == "library":
+            classification_context += """
+## Library Build Strategy
+This is a LIBRARY — you only need to build the library itself, NOT its test
+infrastructure. Follow these rules:
+- Use `npm ci --omit=dev` or `npm ci --ignore-scripts` for Node.js libraries
+  to skip heavy test devDependencies (Cypress, Playwright, Puppeteer, Selenium)
+  that require Electron/Chromium downloads and fail in Docker.
+- For Python libraries, use `pip install .` (not `pip install -e .[dev]`).
+- The smoke test only needs to import the library — no test suite execution.
 """
 
     # Early termination for very large monorepos (>50 modules) — building all

@@ -226,13 +226,25 @@ class RepoClassifier:
         # Node.js (package.json without compiled-language markers)
         compiled_markers = {"go.mod", "Cargo.toml", "pom.xml", "build.gradle"}
         if "package.json" in configs and not (configs & compiled_markers):
+            # Read package name from package.json's "name" field (e.g. "chart.js")
+            # instead of deriving from repo name (e.g. "Chart.js")
+            npm_pkg_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
+            try:
+                pkg_content = signals.get("config_files", {}).get("package.json", "")
+                if pkg_content:
+                    import json as _json
+                    pkg_data = _json.loads(pkg_content)
+                    if pkg_data.get("name"):
+                        npm_pkg_name = pkg_data["name"]
+            except Exception:
+                pass
             return {
                 "repo_type": "library",
                 "confidence": "medium",
                 "primary_language": "JavaScript",
                 "build_system": "npm",
                 "verification_strategy": "import_test",
-                "package_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "package_name": npm_pkg_name,
                 "binary_name": None,
                 "library_name": None,
                 "is_monorepo": False,
@@ -244,13 +256,29 @@ class RepoClassifier:
         # Python (setup.py or pyproject.toml without compiled-language markers)
         python_configs = {"setup.py", "pyproject.toml", "setup.cfg"}
         if (configs & python_configs) and not (configs & compiled_markers):
+            # Try to read package name from pyproject.toml or setup.cfg
+            py_pkg_name = repo_name.split("/")[-1] if "/" in repo_name else repo_name
+            try:
+                cfg_files = signals.get("config_files", {})
+                if "pyproject.toml" in cfg_files:
+                    import re as _re
+                    m = _re.search(r'name\s*=\s*["\']([^"\']+)["\']', cfg_files["pyproject.toml"])
+                    if m:
+                        py_pkg_name = m.group(1)
+                elif "setup.cfg" in cfg_files:
+                    import re as _re
+                    m = _re.search(r'name\s*=\s*(\S+)', cfg_files["setup.cfg"])
+                    if m:
+                        py_pkg_name = m.group(1)
+            except Exception:
+                pass
             return {
                 "repo_type": "library",
                 "confidence": "medium",
                 "primary_language": "Python",
                 "build_system": "pip",
                 "verification_strategy": "import_test",
-                "package_name": repo_name.split("/")[-1] if "/" in repo_name else repo_name,
+                "package_name": py_pkg_name,
                 "binary_name": None,
                 "library_name": None,
                 "is_monorepo": False,

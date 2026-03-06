@@ -364,6 +364,15 @@ def analyze_build_manifests(repo_path: str) -> Dict[str, Any]:
                     f"Copy the scripts/ directory into the image BEFORE running install."
                 )
             dev_deps = pkg.get("devDependencies") or {}
+            heavy_test_deps = {"cypress", "playwright", "puppeteer", "selenium-webdriver"}
+            detected_heavy = heavy_test_deps & set(dev_deps.keys())
+            if detected_heavy:
+                result["warnings"].append(
+                    f"CAUTION: Heavy browser-test devDependencies detected: {detected_heavy}. "
+                    f"These require Electron/Chromium downloads that fail in Docker "
+                    f"(insufficient /dev/shm). For a library build, use "
+                    f"'npm ci --omit=dev' or 'npm ci --ignore-scripts' to skip them."
+                )
             if "husky" in dev_deps or "husky" in (pkg.get("dependencies") or {}):
                 result["has_husky"] = True
                 result["warnings"].append(
