@@ -65,14 +65,25 @@ if str(src_dir) not in sys.path:
 try:
     from .agent.core import _get_host_platform
     from .agent.validation import DockerBuildTester
+    from .agent.motherdocker_client import MotherDockerClient
 except ImportError:
     from agent.core import _get_host_platform
     from agent.validation import DockerBuildTester
+    from agent.motherdocker_client import MotherDockerClient
 
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 print("[STARTUP] All imports loaded successfully!")
+
+# Build backend toggle: set USE_MOTHERDOCKER=true in .env to use remote builds
+USE_MOTHERDOCKER = os.getenv("USE_MOTHERDOCKER", "false").lower() in ("true", "1", "yes")
+MOTHERDOCKER_API_URL = os.getenv("MOTHERDOCKER_API_URL", "http://localhost:8000")
+
+if USE_MOTHERDOCKER:
+    print(f"[STARTUP] Build backend: MOTHERDOCKER ({MOTHERDOCKER_API_URL})")
+else:
+    print("[STARTUP] Build backend: LOCAL DOCKER")
 
 # Token pricing (USD per 1K tokens). Override via env to match your Azure SKU.
 PROMPT_COST_PER_1K = float(os.getenv("AZURE_GPT5NANO_PROMPT_COST_PER_1K", "0"))
@@ -525,7 +536,11 @@ class ParallelEmpiricalTester:
         self.artifacts_dir.mkdir(exist_ok=True)
         self.structured_logs_dir.mkdir(exist_ok=True)
 
-        self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=True)
+        if USE_MOTHERDOCKER:
+            self.docker_tester = MotherDockerClient(api_url=MOTHERDOCKER_API_URL, timeout=600)
+        else:
+            self.docker_tester = DockerBuildTester(timeout=600, serialize_builds=True)
+        self.use_motherdocker = USE_MOTHERDOCKER
 
         # Thread-safe console output
         self.console_lock = threading.Lock()
@@ -838,11 +853,14 @@ class ParallelEmpiricalTester:
                 # Capture auxiliary logs from LLM helpers
                 aux_logs = []
 
-                # Fix 6: Adaptive timeout — create a fresh DockerBuildTester per call to
+                # Fix 6: Adaptive timeout — create a fresh tester per call to
                 # avoid mutating shared state across concurrent workers.
                 _adaptive_timeout = estimate_build_timeout(repo_path, classification)
                 self.log(repo_name, f"[VerifyBuild] Building Docker image (timeout={_adaptive_timeout}s)", to_console=False)
-                _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
+                if self.use_motherdocker:
+                    _per_call_tester = MotherDockerClient(api_url=MOTHERDOCKER_API_URL, timeout=_adaptive_timeout)
+                else:
+                    _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
 
                 # Reset search dedup per-attempt so that if the error context
                 # changed between retries, the agent can re-search the same
