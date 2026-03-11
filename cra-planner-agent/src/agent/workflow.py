@@ -65,6 +65,43 @@ _UNFIXABLE_PATTERNS = [
     # Private registry auth required
     r"(?:unauthorized|authentication required).*(?:pull|registry)",
 ]
+_RATE_LIMIT_PATTERNS = [
+    r"rate limit",
+    r"too many requests",
+    r"\b429\b",
+    r"throttl",
+]
+_DEPENDENCY_RESOLUTION_PATTERNS = [
+    r"could not resolve dependencies",
+    r"npm ERR!.*ERESOLVE",
+    r"pip.*no matching distribution",
+    r"failed to resolve",
+    r"dependency .* not found",
+]
+_NETWORK_CONNECTIVITY_PATTERNS = [
+    r"connection reset by peer",
+    r"temporary failure in name resolution",
+    r"network is unreachable",
+    r"could not resolve host",
+    r"connection timed out",
+]
+_PERMISSION_DENIED_PATTERNS = [
+    r"permission denied",
+    r"eacces",
+    r"operation not permitted",
+]
+_CONFIGURATION_ERROR_PATTERNS = [
+    r"invalid arg",
+    r"missing env variable",
+    r"unrecognized option",
+    r"invalid configuration",
+]
+_RESOURCE_LIMIT_PATTERNS = [
+    r"out of memory",
+    r"\bkilled\b",
+    r"\boom\b",
+    r"cannot allocate memory",
+]
 
 
 def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) -> dict:
@@ -74,7 +111,10 @@ def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) 
     Returns:
         {
           "type": one of IMAGE_NOT_FOUND | APT_NOT_FOUND | COMPLIANCE | TIMEOUT
-                         | SYNTAX | UNFIXABLE_DEPENDENCY | UNKNOWN,
+                         | SYNTAX | UNFIXABLE_DEPENDENCY | RATE_LIMIT
+                         | DEPENDENCY_RESOLUTION_FAILED | NETWORK_CONNECTIVITY
+                         | PERMISSION_DENIED | CONFIGURATION_ERROR
+                         | RESOURCE_LIMIT | UNKNOWN,
           "unfixable": bool,  # True only when retrying is structurally pointless
           "hint": str         # category description injected into next attempt's prompt
         }
@@ -163,6 +203,77 @@ def classify_failure(lessons_learned: List[str], intermediate_steps: List[Any]) 
                 "The Dockerfile has a syntax error. Read the full Dockerfile carefully. "
                 "Common causes: here-doc formatting, stray characters outside RUN blocks, "
                 "or COPY --from referencing an undefined build stage."
+            )
+        }
+
+    # Rate limiting (registry/API throttling)
+    if any(_re.search(p, combined_lower) for p in _RATE_LIMIT_PATTERNS):
+        return {
+            "type": "RATE_LIMIT",
+            "unfixable": False,
+            "hint": (
+                "The build hit a rate limit from a package registry or API. "
+                "Strategies: use a different registry mirror, reduce parallel downloads, "
+                "or add retry logic with backoff in RUN commands."
+            )
+        }
+
+    # Dependency resolution failure
+    if any(_re.search(p, combined_lower) for p in _DEPENDENCY_RESOLUTION_PATTERNS):
+        return {
+            "type": "DEPENDENCY_RESOLUTION_FAILED",
+            "unfixable": False,
+            "hint": (
+                "The package manager cannot resolve dependencies. "
+                "Check version constraints, try relaxing pinned versions, "
+                "or use --legacy-peer-deps for npm ERESOLVE errors."
+            )
+        }
+
+    # Network connectivity issues
+    if any(_re.search(p, combined_lower) for p in _NETWORK_CONNECTIVITY_PATTERNS):
+        return {
+            "type": "NETWORK_CONNECTIVITY",
+            "unfixable": False,
+            "hint": (
+                "The build failed due to a transient network error. "
+                "This is usually temporary — retry the build, or add "
+                "retry flags to package manager commands."
+            )
+        }
+
+    # Permission denied
+    if any(_re.search(p, combined_lower) for p in _PERMISSION_DENIED_PATTERNS):
+        return {
+            "type": "PERMISSION_DENIED",
+            "unfixable": False,
+            "hint": (
+                "The build failed due to a file permission issue. "
+                "Add RUN chmod +x for scripts, or ensure the correct "
+                "USER directive is set before the failing command."
+            )
+        }
+
+    # Configuration error
+    if any(_re.search(p, combined_lower) for p in _CONFIGURATION_ERROR_PATTERNS):
+        return {
+            "type": "CONFIGURATION_ERROR",
+            "unfixable": False,
+            "hint": (
+                "The build failed due to a misconfigured argument or environment variable. "
+                "Check ARG/ENV directives and build tool flags for typos or unsupported options."
+            )
+        }
+
+    # Resource limit (OOM, killed)
+    if any(_re.search(p, combined_lower) for p in _RESOURCE_LIMIT_PATTERNS):
+        return {
+            "type": "RESOURCE_LIMIT",
+            "unfixable": False,
+            "hint": (
+                "The build was killed due to memory exhaustion. "
+                "Strategies: use a lighter base image, reduce parallelism in build commands "
+                "(e.g., make -j1), or split the build into smaller stages."
             )
         }
 

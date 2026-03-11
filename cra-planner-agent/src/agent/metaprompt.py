@@ -22,24 +22,34 @@ that a Dockerfile-writing agent will use. Your output must be structured and dir
 
 For each dimension, derive the specific Dockerfile implications:
 
-1. DOMAIN -> Base image family, runtime requirements, whether an ENTRYPOINT makes sense
-2. BUILD_TOOL -> Exact install/build commands, multi-stage build patterns, cache optimization
-3. AUTOMATION_LEVEL -> How much the agent can rely on documented commands vs needing to reverse-engineer
-4. ENVIRONMENT_SPECIFICITY -> Platform flags, OS-specific packages, version pinning requirements
-5. DEPENDENCY_TRANSPARENCY -> Whether to use lockfiles, how to handle implicit deps, pip freeze strategies
-6. TOOLING_COMPLEXITY -> Number of build stages needed, tool installation ordering, inter-tool coordination
-7. REPRODUCIBILITY_SUPPORT -> Whether CI config can be mined for build commands/versions, confidence level
+1. DOMAIN -> Distinguish runtime vs build-time image families, identify language ecosystem,
+   and specify whether ENTRYPOINT should invoke a runtime, CLI, or test harness.
+2. BUILD_TOOL -> Exact install/build commands, required tool version and installation source,
+   multi-stage build patterns, cache optimization, and artifact handoff between stages.
+3. AUTOMATION_LEVEL -> How much the agent can rely on documented commands vs needing to reverse-engineer.
+4. ENVIRONMENT_SPECIFICITY -> Platform flags, OS-specific packages, version pinning requirements,
+   and justification for chosen OS family (Debian vs Alpine vs Ubuntu).
+5. DEPENDENCY_TRANSPARENCY -> Whether to use lockfiles, how to handle implicit deps, pip freeze strategies,
+   and fallback method if no lockfile is found (e.g., pip freeze, npm ls, cargo metadata).
+6. TOOLING_COMPLEXITY -> Number of build stages needed, tool installation ordering, inter-tool coordination,
+   and explicit stage mapping (what runs where, what artifacts are copied forward).
+7. REPRODUCIBILITY_SUPPORT -> Whether CI config can be mined for build commands/versions, confidence level,
+   and specific CI files to inspect (e.g., .github/workflows, Jenkinsfile).
 
 You MUST follow this exact output format:
 ---
 RECOMMENDED BASE IMAGE: <specific image:tag suggestion based on domain + build_tool>
+TOOLCHAIN VERSIONING: <exact versions of language runtimes and build tools inferred from taxonomy or CI config; explain fallback if version unknown>
 BUILD STRATEGY: <1-2 sentences: single-stage vs multi-stage, why>
+BUILD STAGE MAP: <enumerate each stage (builder, runtime, test), what tools run in each, and what artifacts are copied forward>
 INSTALL COMMANDS: <exact commands the Dockerfile should use, based on build_tool>
-ENVIRONMENT SETUP: <OS packages, env vars, platform flags needed based on environment_specificity>
-DEPENDENCY HANDLING: <strategy based on dependency_transparency: lockfile approach, pinning, etc.>
+ENVIRONMENT SETUP: <OS packages, env vars, platform flags needed based on environment_specificity; include justification for chosen OS family>
+DEPENDENCY HANDLING: <strategy based on dependency_transparency: lockfile approach, pinning; if no lockfile found, describe fallback method>
 BUILD COMPLEXITY NOTES: <warnings based on tooling_complexity: multi-tool coordination, ordering>
-CI CONFIDENCE: <based on reproducibility_support: can we trust CI config? what to mine from it?>
-CRITICAL WARNINGS: <anything the agent must be careful about given this combination of dimensions>
+CI CONFIDENCE: <based on reproducibility_support: can we trust CI config? what to mine from it? list specific CI files and extractable build commands/versions>
+CROSS-DIMENSION CONSISTENCY CHECK: <verify that base image, build tool, and environment setup are mutually compatible; list any mismatches>
+CRITICAL WARNINGS: <domain/build_tool-specific pitfalls to avoid (e.g., Gradle daemon memory, npm cache path, cargo target dir)>
+FAILURE-WEIGHTED PRIORITY: <if domain or build_tool has historically high failure rate, increase reasoning depth for that dimension with more explicit command examples>
 ---"""
 
 
