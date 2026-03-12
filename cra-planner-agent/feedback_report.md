@@ -1,6 +1,6 @@
 # Agent Feedback Report
 
-Generated: 2026-03-11T12:06:41
+Generated: 2026-03-12T19:49:43
 
 ## Data Summary
 - Transcripts analyzed: 498
@@ -11,13 +11,12 @@ Generated: 2026-03-11T12:06:41
 ## Failure Analysis
 
 ### Distribution
-- **RATE_LIMIT**: 231
-- **UNKNOWN**: 101
-- **SYNTAX**: 38
-- **FILE_COPY_MISSING**: 25
+- **RATE_LIMIT**: 254
+- **UNKNOWN**: 84
+- **SYNTAX**: 37
+- **FILE_COPY_MISSING**: 22
 - **NO_SPACE**: 12
 - **IMAGE_NOT_FOUND**: 4
-- **TIMEOUT**: 2
 - **COMPLIANCE**: 1
 
 ## Tool Usage
@@ -52,20 +51,24 @@ Generated: 2026-03-11T12:06:41
 
 ## Success Patterns
 - Total: 82
-- First attempt: 24
+- First attempt: 33
 - Avg steps: 26.7
 - Avg tokens: 406183
 
 ### By Language
-- Python: 12
+- Python: 17
+- JavaScript: 7
+- Go: 6
 - Rust: 4
-- JavaScript: 4
 - TypeScript: 4
 - C++: 3
 - C: 3
+- Java: 2
+- TypeScript/JavaScript: 2
 - PHP: 2
 - unknown: 2
-- TypeScript/JavaScript: 1
+- Shell: 1
+- TypeScript/JavaScript and Python: 1
 - SCSS: 1
 - None: 1
 - Python, C, C++, Fortran: 1
@@ -86,87 +89,88 @@ Generated: 2026-03-11T12:06:41
 - Tokens wasted on failures: 216,707,844
 
 ## LLM: Failure Analysis
-Excellent — this dataset gives us enough signal to do a structured failure analysis.  
-Below is a full breakdown addressing each requested point.
+Excellent — this dataset gives us enough signal to perform a structured failure analysis.  
+Below is a detailed breakdown addressing each requested item.
 
 ---
 
 ## 1. Root Cause Analysis per Failure Type
 
-### **RATE_LIMIT (231)**
-**Symptoms:** “Unknown error,” “failed to build,” intermittent success across retries.  
-**Root Cause:** The agent or its Docker build environment is hitting API or registry rate limits (e.g., GitHub, npm, Docker Hub). Repeated requests for dependency downloads or image pulls exceed quota.  
-**Contributing factors:**
-- No caching or throttling logic.
-- Parallel builds amplify request volume.
-- Lack of retry/backoff strategy.
+### **RATE_LIMIT (254)**
+**Symptoms:** “Unknown error” or “failed to build” with no clear Docker command failure.  
+**Root cause:**  
+- The agent or its build orchestrator exceeded API or resource limits (e.g., Docker Hub pulls, OpenAI API calls, or CI concurrency).  
+- Often these appear as transient infrastructure errors rather than logic errors in the Dockerfile.
+
+**Underlying issue:**  
+Not a content-generation failure; rather, the agent retried too aggressively or lacked backoff logic.
 
 ---
 
-### **UNKNOWN (101)**
-**Symptoms:** “Unknown error - check full log,” inconsistent stage reporting.  
-**Root Cause:** Unclassified build errors—often due to missing error parsing logic or incomplete log capture.  
-**Contributing factors:**
-- Log parser fails to map error text to known categories.
-- Dockerfile syntax or runtime exceptions not matched to classifier patterns.
-- Some may overlap with FILE_COPY_MISSING or NO_SPACE but go unrecognized.
+### **UNKNOWN (84)**
+**Symptoms:** “Unknown error - check full log” without a clear failed command.  
+**Root cause:**  
+- The classifier cannot parse the failure message.  
+- Could be due to truncated logs, missing error tokens, or multi-line errors not matched by regex.  
+- Some may actually be runtime or syntax errors misclassified.
+
+**Underlying issue:**  
+Classifier coverage gaps; lack of structured error parsing.
 
 ---
 
-### **SYNTAX (38)**
-**Symptoms:** “failed to read dockerfile,” “invalid instruction,” “COPY command references missing file.”  
-**Root Cause:** Generated Dockerfiles contain invalid syntax or misplaced directives.  
-**Contributing factors:**
-- Agent lacks robust Dockerfile linting before execution.
-- Misinterpretation of project structure (e.g., copying non-existent paths).
-- Missing newline or quoting errors.
+### **SYNTAX (37)**
+**Symptoms:** Dockerfile syntax invalid, or COPY/ADD commands malformed.  
+**Root cause:**  
+- The agent generated Dockerfiles with missing backslashes, invalid directives, or misordered instructions.  
+- Sometimes caused by mixing shell syntax with Dockerfile syntax.
+
+**Underlying issue:**  
+Prompt insufficiently constrains Dockerfile formatting and validation; no syntax linting before build.
 
 ---
 
-### **FILE_COPY_MISSING (25)**
-**Symptoms:** “COPY command references missing file,” “failed to compute cache key.”  
-**Root Cause:** The agent assumes certain files exist (e.g., `package.json`, `requirements.txt`) but they’re absent in repo.  
-**Contributing factors:**
-- Insufficient repo inspection before writing COPY commands.
-- No fallback logic when expected files are missing.
+### **FILE_COPY_MISSING (22)**
+**Symptoms:** “COPY command references missing file.”  
+**Root cause:**  
+- The agent assumes source files exist in the build context but they don’t.  
+- Often happens when the repo structure is not fully analyzed before writing COPY commands.
+
+**Underlying issue:**  
+Agent lacks file-system awareness or pre-check for existence of referenced paths.
 
 ---
 
 ### **NO_SPACE (12)**
-**Symptoms:** “failed to update builder last activity time,” “write /home: no space left on device.”  
-**Root Cause:** Disk exhaustion in build environment.  
-**Contributing factors:**
-- Large builds (e.g., TensorFlow, privacy libraries).
-- No cleanup between builds.
-- Insufficient disk quota monitoring.
+**Symptoms:** “failed to update builder last activity time: write /home…”  
+**Root cause:**  
+- Disk quota or ephemeral storage exhausted during build.  
+- Large builds or multiple concurrent builds fill up temporary storage.
+
+**Underlying issue:**  
+Infrastructure resource exhaustion, not Dockerfile logic.
 
 ---
 
 ### **IMAGE_NOT_FOUND (4)**
-**Symptoms:** “Failed to pull base image,” “repository does not exist.”  
-**Root Cause:** Agent references non-existent or private base images.  
-**Contributing factors:**
-- Outdated image tags.
-- Incorrect registry path.
-- No validation of image availability before use.
+**Symptoms:** “Failed to pull base image.”  
+**Root cause:**  
+- The agent references non-existent or private base images.  
+- Example: `ziglang/zig:0.11.0` not available on Docker Hub.
 
----
-
-### **TIMEOUT (2)**
-**Symptoms:** “Docker build exceeded 600s timeout.”  
-**Root Cause:** Long-running builds (e.g., compiling large codebases) exceed allowed time.  
-**Contributing factors:**
-- No incremental build caching.
-- Missing precompiled dependencies.
+**Underlying issue:**  
+Agent does not validate image availability before using it.
 
 ---
 
 ### **COMPLIANCE (1)**
-**Symptoms:** “Unknown error,” likely policy violation (e.g., license, security).  
-**Root Cause:** Generated Dockerfile violates compliance rules (e.g., downloading from untrusted sources).  
-**Contributing factors:**
-- No compliance check before build.
-- Insufficient prompt constraints.
+**Symptoms:** Build blocked for policy reasons (e.g., non-compliant content).  
+**Root cause:**  
+- Generated Dockerfile or build context violated compliance rules (e.g., license, prohibited content).  
+- Rare but critical.
+
+**Underlying issue:**  
+Prompt or repo scanning did not include compliance checks.
 
 ---
 
@@ -174,402 +178,457 @@ Below is a full breakdown addressing each requested point.
 
 | Failure Type | Prompt Additions |
 |---------------|------------------|
-| **RATE_LIMIT** | “Minimize external network calls. Use official base images and package managers efficiently. Avoid unnecessary downloads; prefer cached layers.” |
-| **UNKNOWN** | “If an error occurs, classify it based on Docker build stage (syntax, file copy, image pull, runtime). Always include explicit error messages in output.” |
-| **SYNTAX** | “Validate Dockerfile syntax before output. Ensure each directive (FROM, COPY, RUN, CMD) follows Dockerfile specification.” |
-| **FILE_COPY_MISSING** | “Inspect repository contents before writing COPY commands. Only reference files that exist. If missing, skip COPY or add conditional logic.” |
-| **NO_SPACE** | “Prefer lightweight base images and clean intermediate build artifacts. Use multi-stage builds to reduce disk usage.” |
-| **IMAGE_NOT_FOUND** | “Verify that base images exist on Docker Hub or are public. Avoid custom or private image references.” |
-| **TIMEOUT** | “Optimize build steps for speed. Use prebuilt binaries or smaller dependency sets. Avoid long compilation tasks.” |
-| **COMPLIANCE** | “Use only official, trusted sources and open-source dependencies. Avoid downloading from unknown URLs.” |
+| **RATE_LIMIT** | “If build or API requests fail due to rate limits, implement exponential backoff and retry after delay. Avoid excessive concurrent builds.” |
+| **UNKNOWN** | “Always output structured error messages with clear stage and command context. When parsing logs, ensure multi-line errors are captured.” |
+| **SYNTAX** | “Validate Dockerfile syntax using `dockerfile-lint` or `hadolint` before build. Ensure each instruction follows official Dockerfile grammar.” |
+| **FILE_COPY_MISSING** | “Before writing COPY/ADD commands, verify that referenced files exist in the repository. If missing, skip or generate placeholder.” |
+| **NO_SPACE** | “Monitor disk usage and clean intermediate images. Use smaller base images and multi-stage builds to reduce space.” |
+| **IMAGE_NOT_FOUND** | “Check that base images exist and are publicly accessible before referencing them. Prefer official images from Docker Hub.” |
+| **COMPLIANCE** | “Ensure generated Dockerfiles and build steps comply with open-source licensing and security policies. Avoid proprietary or restricted content.” |
 
 ---
 
 ## 3. New Failure Categories to Add to the Classifier
 
-| New Category | Description | Example Trigger |
-|---------------|--------------|----------------|
-| **DEPENDENCY_RESOLUTION_FAILED** | Build fails because package manager cannot find or install dependencies. | npm install / pip install errors |
-| **NETWORK_CONNECTIVITY** | Transient network errors not due to rate limits. | “connection reset by peer,” “temporary failure in name resolution” |
-| **PERMISSION_DENIED** | Build fails due to file permission or access issues. | “chmod: operation not permitted,” “permission denied” |
-| **CONFIGURATION_ERROR** | Misconfigured environment variables or build args. | “invalid ARG,” “missing ENV variable” |
-| **RUNTIME_PORT_CONFLICT** | Container runs but fails smoke test due to port binding issues. | “address already in use” |
-| **RESOURCE_LIMIT** | CPU/memory exhaustion distinct from NO_SPACE. | “killed: out of memory” |
+1. **NETWORK_TIMEOUT** – Distinguish from RATE_LIMIT; covers transient network or registry connectivity issues.  
+2. **DEPENDENCY_INSTALL_FAILED** – When `apt-get`, `npm install`, etc. fail due to missing packages or version conflicts.  
+3. **PERMISSION_DENIED** – When file copy or chmod fails due to permission issues in build context.  
+4. **INVALID_BASE_IMAGE_TAG** – Specific subtype of IMAGE_NOT_FOUND where tag exists but is invalid or deprecated.  
+5. **LINT_ERROR** – Syntax or formatting issues detected pre-build (to separate from runtime SYNTAX).  
+6. **TEST_SCRIPT_FAILED** – For runtime smoke tests that fail due to incorrect entrypoint or missing dependencies.  
+7. **RESOURCE_EXHAUSTION** – General category for NO_SPACE, memory, or CPU quota exceeded.
 
 ---
 
 ## 4. Whether New Tools Would Help Address Specific Failures
 
-| Failure Type | Helpful Tools | Rationale |
-|---------------|----------------|------------|
-| **RATE_LIMIT** | Caching proxy or dependency mirror; retry/backoff library | Reduces API calls and mitigates throttling |
-| **UNKNOWN** | Enhanced log parser / structured error classifier | Improves error categorization |
-| **SYNTAX** | Dockerfile linter (e.g., `hadolint`) | Detects syntax errors before build |
-| **FILE_COPY_MISSING** | Repo file inspector tool | Confirms file existence before COPY |
-| **NO_SPACE** | Disk quota monitor / cleanup script | Prevents disk exhaustion |
-| **IMAGE_NOT_FOUND** | Image registry validator | Checks image availability before build |
-| **TIMEOUT** | Build profiler / caching system | Identifies slow steps and reuses layers |
-| **COMPLIANCE** | Policy scanner (e.g., Open Policy Agent) | Ensures compliance before build |
-| **New Categories** | Dependency resolver, network monitor | Improves robustness and classification accuracy |
+| Failure Type | Helpful Tools |
+|---------------|---------------|
+| **RATE_LIMIT** | **Yes** – Add a rate-limiting middleware or build queue manager (e.g., Redis-based throttler). |
+| **UNKNOWN** | **Yes** – Structured log parser (e.g., regex-based classifier or JSON log emitter). |
+| **SYNTAX** | **Yes** – Integrate `hadolint` or Dockerfile parser to validate syntax before build. |
+| **FILE_COPY_MISSING** | **Yes** – File existence checker integrated with repo tree scanning. |
+| **NO_SPACE** | **Yes** – Disk quota monitor and cleanup tool (e.g., `docker system prune` automation). |
+| **IMAGE_NOT_FOUND** | **Yes** – Image registry validator (Docker Hub API check). |
+| **COMPLIANCE** | **Yes** – License scanner (e.g., `scancode-toolkit`) and policy enforcement layer. |
 
 ---
 
-### Summary
+### Summary Table
 
-- **Primary systemic issue:** RATE_LIMIT (56%) — infrastructure-level, not agent logic.
-- **Second major issue:** UNKNOWN (24%) — classifier and logging gaps.
-- **Agent-level improvements:** Syntax validation, file existence checks, image verification.
-- **Classifier expansion:** Add 6 new categories for better granularity.
-- **Tooling recommendation:** Introduce linting, caching, and structured error parsing to reduce both agent and environment failures.
+| Failure Type | Root Cause | Prompt Fix | New Tool Needed |
+|---------------|-------------|-------------|-----------------|
+| RATE_LIMIT | API/resource throttling | Add retry/backoff logic | ✅ |
+| UNKNOWN | Unparsed logs | Structured error output | ✅ |
+| SYNTAX | Invalid Dockerfile | Enforce linting | ✅ |
+| FILE_COPY_MISSING | Missing files | Verify existence | ✅ |
+| NO_SPACE | Disk exhaustion | Optimize builds | ✅ |
+| IMAGE_NOT_FOUND | Invalid base image | Validate image | ✅ |
+| COMPLIANCE | Policy violation | Add compliance checks | ✅ |
 
 ---
 
-Would you like me to draft example *prompt templates* incorporating these additions (e.g., “Dockerfile-generation prompt v2”)? That would make the improvements directly usable.
+### Overall Recommendation
+
+- **Classifier improvements:** Add fine-grained categories for network, dependency, and permission failures.  
+- **Prompt improvements:** Explicitly instruct the agent to validate syntax, file existence, and image availability before build.  
+- **Tooling:** Integrate lightweight pre-build checks (lint, file scan, registry validation) and post-build smoke tests with structured error reporting.  
+- **Infrastructure:** Implement rate-limit handling and resource monitoring to reduce transient failures.
+
+---
+
+This structured approach should reduce the 414 total failures significantly — especially the 254 RATE_LIMIT and 84 UNKNOWN cases — by combining better prompt constraints, classifier refinement, and pre-build validation tooling.
 
 ## LLM: Success Synthesis
-Here’s a structured analysis of the successful Dockerfile-generation transcripts you provided:
+Here’s a structured analysis based on the successful Dockerfile-generation transcripts and the aggregate statistics you provided:
 
 ---
 
-## 1. Common Winning Strategies (Tool Usage Patterns)
+## **1. Common Winning Strategies (Tool Usage Patterns Leading to Success)**
 
-Across 82 successful runs, several consistent strategies emerge:
+Across 82 successful runs, several consistent patterns emerge:
 
 ### **A. Early Repository Inspection**
-- **Tool:** `ListDirectory`
-- **Purpose:** Determine project structure, language, and build system before writing anything.
-- **Pattern:** Always used as the first or second step in successful runs.
-- **Effect:** Reduces guesswork and prevents incorrect base image selection.
+- **ListDirectory** is almost always the first step (appears in 9/10 top start sequences).
+- Successful agents begin by mapping the repo structure before making any assumptions.
+- This enables correct identification of language and build system (Python, Go, Rust, C, etc.).
 
-### **B. Targeted File Reading**
-- **Tool:** `ReadLocalFile`
-- **Purpose:** Inspect key configuration files (`setup.py`, `Cargo.toml`, `Makefile`, `package.json`) to infer build instructions.
-- **Effect:** Leads to more accurate Dockerfile commands (e.g., `pip install .`, `cargo build --release`).
+### **B. Targeted File Reads**
+- **ReadLocalFile** is used selectively—only after identifying key files like `setup.py`, `Cargo.toml`, or `Makefile`.
+- Successful agents avoid reading too many files; they focus on one or two decisive ones.
 
 ### **C. Incremental Dockerfile Construction**
-- **Tool:** `WriteToFile`
-- **Pattern:** Often used twice — first to create a draft Dockerfile, then to refine or add `.dockerignore`.
-- **Effect:** Allows iterative improvement and optimization (e.g., slimming images, adding multi-stage builds).
+- **WriteToFile** often occurs twice:
+  - First to create an initial Dockerfile draft.
+  - Second to refine or add supporting files (`.dockerignore`, build optimizations).
+- This two-stage writing pattern correlates strongly with success.
 
 ### **D. Validation and Iteration**
-- **Tool:** `VerifyBuild`
-- **Purpose:** Test the Dockerfile by performing a real or simulated build.
-- **Effect:** Confirms correctness and triggers refinement if errors occur.
+- **VerifyBuild** is used to confirm correctness early.
+- When errors occur, successful agents use **SearchDockerError** to interpret build logs and then **WriteToFile** again to fix issues.
+- This “verify → search → fix → verify” loop is a hallmark of robust agents.
 
-### **E. Error Recovery and Refinement**
-- **Tool:** `SearchDockerError`
-- **Purpose:** Parse build logs for specific failure causes.
-- **Effect:** Enables targeted fixes (e.g., missing dependencies, incorrect COPY paths).
-
----
-
-## 2. Optimal Tool-Call Sequences by Project Type
-
-| **Project Type** | **Typical Sequence** | **Notes / Rationale** |
-|------------------|----------------------|------------------------|
-| **Python (library/framework)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild → SearchDockerError → WriteToFile → VerifyBuild` | Reads `setup.py` or `pyproject.toml`; uses slim Python base; adds `.dockerignore` after first build. |
-| **Rust (native library)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild` | Reads `Cargo.toml`; uses multi-stage build with pinned Rust toolchain. |
-| **C/C++ (autotools or cmake)** | `ListDirectory → WriteToFile → WriteToFile → VerifyBuild → SearchDockerError → WriteToFile → VerifyBuild` | Starts with Ubuntu base; adds build tools; refines after error search. |
-| **Node.js / Web** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild → SearchDockerError → VerifyBuild` | Reads `package.json`; uses multi-stage build (builder + runtime). |
-| **Simple CLI tools (e.g., s3cmd)** | `ListDirectory → WriteToFile → VerifyBuild` | Minimal sequence; single-stage build sufficient. |
+### **E. Minimalism and Reproducibility**
+- Successful Dockerfiles use slim base images (`python:3.11-slim`, `golang:1.20-alpine`, etc.).
+- They include `.dockerignore` files to reduce context size and improve build speed.
 
 ---
 
-## 3. “Golden Example” Few-Shot Snippets for System Prompt
+## **2. Optimal Tool-Call Sequences by Project Type**
 
-These represent ideal reasoning + tool usage patterns to include as demonstrations.
+| **Project Type** | **Optimal Sequence** | **Notes** |
+|------------------|----------------------|------------|
+| **Python (library/framework)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild → SearchDockerError → WriteToFile → VerifyBuild` | Reads `setup.py` or `pyproject.toml`; uses slim Python base; multi-stage builds for dependencies. |
+| **Go (CLI tool)** | `ListDirectory → WriteToFile → WriteToFile → VerifyBuild` | Often creates `.dockerignore`; uses `golang:1.20-alpine`; single-stage build for binaries. |
+| **Rust (native library)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild` | Reads `Cargo.toml`; uses multi-stage builds with pinned Rust toolchain. |
+| **C/C++ (library)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild` | Reads `Makefile` or `configure.ac`; uses Ubuntu or Debian base; installs build-essential. |
+| **Mixed JS/Python (desktop/web app)** | `ListDirectory → ReadLocalFile → WriteToFile → VerifyBuild → SearchDockerError → WriteToFile → VerifyBuild` | Two-stage build: Node.js builder + Python runtime; error search used to fix dependency issues. |
 
 ---
 
-### **Example 1: Python Library (s3cmd)**
+## **3. “Golden Example” Few-Shot Snippets for System Prompt**
+
+These represent concise, high-quality exemplars of successful reasoning and tool usage.
+
+---
+
+### **Example 1: Python Library (s3tools/s3cmd)**
 ```
 Thought: I will inspect the repository structure to determine language and packaging files.
 Action: ListDirectory
-Thought: The project uses Python; I will create a lean Dockerfile using python:3.11-slim.
+Thought: I see setup.py — this is a Python package. I’ll create a lean Dockerfile using python:3.11-slim.
 Action: WriteToFile (Dockerfile)
-Thought: I will validate the Dockerfile by running a build.
+Thought: I’ll verify the build to ensure dependencies install correctly.
 Action: VerifyBuild
 ```
 
 ---
 
-### **Example 2: Rust Native Tool (git)**
+### **Example 2: Go CLI Tool (filosottile/mkcert)**
 ```
-Thought: I will inspect the repository to identify files and language.
+Thought: I will inspect the repository to tailor the Dockerfile.
 Action: ListDirectory
-Thought: I will read Cargo.toml to determine crate details and dependencies.
+Thought: This is a Go CLI tool. I’ll create a multi-stage Dockerfile using golang:1.20-alpine.
+Action: WriteToFile (Dockerfile)
+Thought: To optimize build context, I’ll add a .dockerignore file.
+Action: WriteToFile (.dockerignore)
+Action: VerifyBuild
+```
+
+---
+
+### **Example 3: Rust Library (git/git)**
+```
+Thought: I will inspect the repository structure to identify files and languages.
+Action: ListDirectory
+Thought: Cargo.toml found — this is a Rust project. I’ll read it to determine crate details.
 Action: ReadLocalFile (Cargo.toml)
-Thought: I will create a two-stage Dockerfile with a builder using Rust 1.49.0 and a minimal runtime stage.
+Thought: I’ll create a two-stage Dockerfile with a pinned Rust toolchain to build and copy artifacts.
 Action: WriteToFile (Dockerfile)
 Action: VerifyBuild
 ```
 
 ---
 
-### **Example 3: C Library (libevent)**
+### **Example 4: Mixed JS/Python App (zen-browser/desktop)**
 ```
-Thought: I will inspect the project layout to identify build system files.
+Thought: I will inspect the repository structure.
 Action: ListDirectory
-Thought: I will read the Makefile to confirm build targets.
-Action: ReadLocalFile (Makefile)
-Thought: I will create a multi-stage Dockerfile to build and install the library efficiently.
+Thought: Contains both Node.js and Python components. I’ll create a two-stage Dockerfile.
 Action: WriteToFile (Dockerfile)
 Action: VerifyBuild
-```
-
----
-
-### **Example 4: Web App (zen-browser)**
-```
-Thought: I will inspect the repository to identify Node.js project files.
-Action: ListDirectory
-Thought: I will read package.json to determine build commands.
-Action: ReadLocalFile (package.json)
-Thought: I will create a two-stage Dockerfile with a builder and a lightweight runtime.
-Action: WriteToFile (Dockerfile)
-Action: VerifyBuild
-Thought: I will check build logs for errors and refine the Dockerfile.
+Thought: Build failed; I’ll search for Docker error logs to identify missing dependencies.
 Action: SearchDockerError
+Thought: I’ll fix the dependency issue and retry.
 Action: WriteToFile (Dockerfile)
 Action: VerifyBuild
 ```
 
 ---
 
-### **Example 5: Complex Python Framework (Django)**
+### **Example 5: C Library (libevent/libevent)**
 ```
-Thought: I will inspect the repository to determine language and dependencies.
+Thought: I will inspect the project layout with ListDirectory.
 Action: ListDirectory
-Thought: I will read setup.py to understand installation requirements.
-Action: ReadLocalFile (setup.py)
-Thought: I will create a multi-stage Dockerfile optimized for production.
-Action: WriteToFile (Dockerfile)
-Action: VerifyBuild
-Thought: I will search for build errors and refine the Dockerfile.
-Action: SearchDockerError
+Thought: Found configure.ac — this uses autotools. I’ll read it to confirm build steps.
+Action: ReadLocalFile (configure.ac)
+Thought: I’ll create a multi-stage Dockerfile using Ubuntu 22.04 to build and install the library.
 Action: WriteToFile (Dockerfile)
 Action: VerifyBuild
 ```
 
 ---
 
-## 4. Key Decision Points Differentiating Success vs. Failure
+## **4. Key Decision Points Differentiating Successful vs. Failing Agents**
 
-| **Decision Point** | **Successful Agents** | **Failing Agents** |
-|--------------------|----------------------|--------------------|
-| **Initial Inspection** | Always start with `ListDirectory` to ground reasoning in actual repo structure. | Skip inspection and guess language or base image. |
-| **File Reading** | Read key build/config files before writing Dockerfile. | Write Dockerfile blindly without confirming build system. |
-| **Incremental Writing** | Use multiple `WriteToFile` calls (Dockerfile + .dockerignore). | Overwrite Dockerfile repeatedly or fail to refine. |
-| **Validation** | Always perform `VerifyBuild` before declaring success. | Skip build verification or misinterpret build logs. |
-| **Error Handling** | Use `SearchDockerError` to identify and fix specific issues. | Retry builds without analyzing errors, leading to repeated failure. |
-| **Language Detection** | Infer language from file patterns (`setup.py`, `Cargo.toml`, `Makefile`, etc.). | Assume default language or base image incorrectly. |
-
----
-
-✅ **Summary Insight:**
-Successful Dockerfile-generation agents follow a **structured, evidence-driven workflow**:
-> *Inspect → Infer → Construct → Validate → Refine.*
-
-Failures typically skip one or more of these phases, especially **inspection** or **error analysis**.
+| **Decision Point** | **Successful Behavior** | **Failing Behavior** |
+|--------------------|-------------------------|----------------------|
+| **Initial inspection** | Always runs `ListDirectory` before writing anything. | Skips inspection; guesses language incorrectly. |
+| **File reading** | Reads only relevant files (`setup.py`, `Cargo.toml`, etc.). | Reads too many files or irrelevant ones, wasting tokens. |
+| **Dockerfile writing** | Writes incrementally, often twice, refining after verification. | Writes once without validation; errors remain uncorrected. |
+| **Error handling** | Uses `SearchDockerError` to interpret and fix build failures. | Ignores errors or retries blindly. |
+| **Build verification** | Always runs `VerifyBuild` before finalizing. | Omits verification, leading to untested Dockerfiles. |
+| **Optimization** | Adds `.dockerignore` and uses slim base images. | Uses heavy base images or omits context optimization. |
 
 ---
 
-Would you like me to produce a condensed “prompt insert” version of the golden examples (formatted for direct inclusion in a system prompt)?
+✅ **Summary Insight:**  
+Successful Dockerfile-generation agents follow a disciplined, inspection-first, iterative refinement workflow. They use minimal, targeted tool calls, validate early, and fix issues intelligently using error search and re-write cycles. The most predictive success marker is the presence of both `VerifyBuild` and `SearchDockerError` in the sequence, indicating active debugging and validation.
 
 ## LLM: Prompt Improvement Suggestions
-Excellent — we’ll make targeted, data-driven improvements to reduce the top failure causes (rate limit, premature Dockerfile writes, ignored search advice, base image guessing loops, syntax errors).  
-Below are **diff-ready snippets** grouped by section.
+Excellent — we have enough telemetry to make targeted, diff‑ready improvements.  
+Below are **specific additions and modifications** to improve compliance, reduce anti‑patterns, and increase success rate.
 
 ---
 
-## 1. 🔒 New Rules for the **ABSOLUTE RULES** section
-
-```diff
-+6. You MUST NOT write a Dockerfile before completing PHASE 1 (ListDirectory + ReadLocalFile). Premature writes are forbidden.
-+7. When SearchDockerError returns advice, you MUST apply that advice exactly before any new VerifyBuild.
-+8. You MUST NOT change the base image tag unless SearchDockerError or VerifyBuild explicitly indicates a tag or platform issue.
-+9. If VerifyBuild fails more than twice for the same error message, stop guessing and escalate by re-running SearchDockerError with expanded context.
-+10. You MUST include all required COPY source files verified by ListDirectory before VerifyBuild.
-```
+## 1️⃣  New Rules to Add to **ABSOLUTE RULES**
 
 **Rationale:**  
-Addresses “premature_dockerfile_write”, “search_advice_ignored”, “base_image_guessing_loop”, and “file_copy_missing”.
-
----
-
-## 2. 🩺 New entries for **COMMON FIX PATTERNS**
+Failures show repeated violations of search advice, premature writes, and guessing base images.  
+We’ll add explicit enforcement and cooldowns.
 
 ```diff
-+Error: "EACCES" or "permission denied" during build
-+Fix: Add RUN chmod +x <script> or ensure non-root user has permissions.
-
-+Error: "rate limit exceeded" or "too many requests"
-+Fix: Add a short sleep/retry mechanism or switch to a different registry mirror.
-
-+Error: "invalid JSON" or "unexpected token" in Dockerfile
-+Fix: Ensure WriteToFile content is valid Dockerfile syntax, no stray quotes or braces.
-
-+Error: "no space left on device"
-+Fix: Clean up intermediate layers with RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-
-+Error: "unknown instruction" or "syntax error"
-+Fix: Verify Dockerfile syntax; each instruction must start with a valid keyword (FROM, RUN, COPY, etc.)
+═══════════════════════════════════════════════════════════════════════════════
+ABSOLUTE RULES:
+═══════════════════════════════════════════════════════════════════════════════
++ 11. You MUST NOT ignore or override SearchDockerError advice. If advice conflicts with your prior plan, follow the advice exactly and note the conflict in context.
++ 12. After any VerifyBuild failure, you MUST wait for SearchDockerError results before any WriteToFile. Do not emit WriteToFile until SearchDockerError has completed.
++ 13. You MUST NOT emit multiple SearchDockerError calls for the same error text unless the previous advice failed twice. Repeated identical searches are forbidden.
++ 14. You MUST NOT guess or change the base image unless explicitly instructed by SearchDockerError or VerifyBuild output.
++ 15. You MUST include a COPY validation step: before writing Dockerfile, confirm all source paths exist via ListDirectory results.
++ 16. If rate‑limit or UNKNOWN errors occur, pause and retry once with minimal context; do not abandon workflow.
 ```
-
-**Rationale:**  
-Targets top failure categories: SYNTAX, RATE_LIMIT, NO_SPACE, UNKNOWN.
 
 ---
 
-## 3. ⚙️ Workflow Phase Modifications
+## 2️⃣  New Entries for **COMMON FIX PATTERNS**
+
+**Rationale:**  
+We can codify recurring fixes for top failure types (syntax, missing COPY, image not found, no space).
 
 ```diff
-@@ PHASE 1 - ANALYZE:
--  1. ListDirectory to see project structure
--  2. ReadLocalFile to check package.json, requirements.txt, pom.xml, etc.
--  3. Identify language, framework, and dependencies
-+  1. ListDirectory to see project structure
-+  2. ReadLocalFile to inspect key manifest files (package.json, requirements.txt, pom.xml, etc.)
-+  3. Identify language, framework, and dependencies
-+  4. Confirm all required source files exist before proceeding to Dockerfile creation
+═══════════════════════════════════════════════════════════════════════════════
+COMMON FIX PATTERNS:
+═══════════════════════════════════════════════════════════════════════════════
++ [SYNTAX]
++   - Re‑read Dockerfile line numbers from error log.
++   - Ensure each RUN, COPY, and CMD line uses valid Docker syntax.
++   - Validate JSON formatting in WriteToFile action before sending.
 
-@@ PHASE 2 - CREATE:
--  4. WriteToFile to create Dockerfile
--  5. WriteToFile to create .dockerignore
-+  5. WriteToFile to create Dockerfile (only after PHASE 1 is complete)
-+  6. WriteToFile to create .dockerignore
-+  7. Validate Dockerfile syntax locally before VerifyBuild
++ [FILE_COPY_MISSING]
++   - Re‑run ListDirectory to confirm missing file paths.
++   - Add COPY instructions only for files that exist.
++   - If build context missing, add .dockerignore excluding node_modules, not source files.
+
++ [IMAGE_NOT_FOUND]
++   - Use SearchDockerError to confirm correct base image tag.
++   - Do NOT guess; prefer official image from Docker Hub or verified registry.
+
++ [NO_SPACE]
++   - Add cleanup steps (e.g., `RUN apt-get clean && rm -rf /var/lib/apt/lists/*`).
++   - Reduce intermediate layers; combine RUN commands.
+
++ [RATE_LIMIT]
++   - Implement exponential backoff (wait 10s, retry once).
++   - Avoid repeated identical SearchDockerError queries.
+
++ [UNKNOWN]
++   - Capture full VerifyBuild output and re‑run SearchDockerError with expanded context.
++   - Do not proceed until SearchDockerError returns actionable advice.
 ```
-
-**Rationale:**  
-Adds explicit validation and ordering to prevent premature writes and syntax errors.
 
 ---
 
-## 4. 🧠 Additional Behavioral Reinforcement (insert after “IMPORTANT:” section)
+## 3️⃣  Workflow Phase Modifications
+
+**Rationale:**  
+Premature writes and ignored search advice show the need for explicit gating and cooldown logic.
 
 ```diff
-+REMINDER:
-+- Never assume the base image or dependency versions; derive them from project files or verified SearchDockerError results.
-+- Always prefer explicit COPY paths confirmed by ListDirectory.
-+- If you encounter repeated build failures, summarize the last two error messages before calling SearchDockerError again.
-```
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
+═══════════════════════════════════════════════════════════════════════════════
 
-**Rationale:**  
-Improves contextual search and reduces repeated/ineffective queries.
+PHASE 1 - ANALYZE:
+  1. ListDirectory to see project structure
+  2. ReadLocalFile to inspect key manifest files (package.json, requirements.txt, pom.xml, etc.)
+  3. Identify language, framework, and dependencies
+  4. Confirm all required source files exist before proceeding to Dockerfile creation
++ 4.1. Validate that all COPY source paths are present using ListDirectory results.
+
+PHASE 2 - CREATE:
+  5. WriteToFile to create Dockerfile (only after PHASE 1 is complete)
+  6. WriteToFile to create .dockerignore
++ 6.1. Before WriteToFile, perform syntax self‑check (no missing quotes, valid Docker instructions).
+
+PHASE 3 - VERIFY (MANDATORY):
+  7. VerifyBuild to test the Dockerfile
++ 7.1. Capture full VerifyBuild output for later SearchDockerError context.
+
+PHASE 4 - IF BUILD FAILS (MANDATORY LOOP):
+  8. Read the error message carefully
+  9. IMMEDIATELY use SearchDockerError(error_keywords="...", agent_context="...") to get a fix
+  10. Do NOT guess or try to fix it yourself without searching first
+  11. Apply the fix from the AI analysis
+  12. VerifyBuild again
++ 12.1. If same error repeats twice, expand SearchDockerError context instead of guessing.
++ 12.2. If rate‑limit or UNKNOWN errors occur, retry once with minimal context before escalation.
+```
 
 ---
 
-## 5. 📊 Optional Enhancement: Add a “RECOVERY MODE” clause
+## 4️⃣  Summary of **Exact Diff‑Ready Snippets**
+
+Below is the consolidated diff block you can apply directly to the system prompt:
 
 ```diff
-+═══════════════════════════════════════════════════════════════════════════════
-+RECOVERY MODE (Triggered after 2 consecutive VerifyBuild failures):
-+═══════════════════════════════════════════════════════════════════════════════
-+1. Summarize last two error messages and your last Dockerfile state.
-+2. Call SearchDockerError with combined context.
-+3. Apply the returned fix exactly.
-+4. VerifyBuild again.
-+5. Do NOT attempt manual guessing or random base image changes.
+@@ ABSOLUTE RULES @@
++ 11. You MUST NOT ignore or override SearchDockerError advice. If advice conflicts with your prior plan, follow the advice exactly and note the conflict in context.
++ 12. After any VerifyBuild failure, you MUST wait for SearchDockerError results before any WriteToFile. Do not emit WriteToFile until SearchDockerError has completed.
++ 13. You MUST NOT emit multiple SearchDockerError calls for the same error text unless the previous advice failed twice. Repeated identical searches are forbidden.
++ 14. You MUST NOT guess or change the base image unless explicitly instructed by SearchDockerError or VerifyBuild output.
++ 15. You MUST include a COPY validation step: before writing Dockerfile, confirm all source paths exist via ListDirectory results.
++ 16. If rate‑limit or UNKNOWN errors occur, pause and retry once with minimal context; do not abandon workflow.
+
+@@ COMMON FIX PATTERNS @@
++ [SYNTAX]
++   - Re‑read Dockerfile line numbers from error log.
++   - Ensure each RUN, COPY, and CMD line uses valid Docker syntax.
++   - Validate JSON formatting in WriteToFile action before sending.
++
++ [FILE_COPY_MISSING]
++   - Re‑run ListDirectory to confirm missing file paths.
++   - Add COPY instructions only for files that exist.
++   - If build context missing, add .dockerignore excluding node_modules, not source files.
++
++ [IMAGE_NOT_FOUND]
++   - Use SearchDockerError to confirm correct base image tag.
++   - Do NOT guess; prefer official image from Docker Hub or verified registry.
++
++ [NO_SPACE]
++   - Add cleanup steps (e.g., `RUN apt-get clean && rm -rf /var/lib/apt/lists/*`).
++   - Reduce intermediate layers; combine RUN commands.
++
++ [RATE_LIMIT]
++   - Implement exponential backoff (wait 10s, retry once).
++   - Avoid repeated identical SearchDockerError queries.
++
++ [UNKNOWN]
++   - Capture full VerifyBuild output and re‑run SearchDockerError with expanded context.
++   - Do not proceed until SearchDockerError returns actionable advice.
+
+@@ WORKFLOW PHASES @@
++ 4.1. Validate that all COPY source paths are present using ListDirectory results.
++ 6.1. Before WriteToFile, perform syntax self‑check (no missing quotes, valid Docker instructions).
++ 7.1. Capture full VerifyBuild output for later SearchDockerError context.
++ 12.1. If same error repeats twice, expand SearchDockerError context instead of guessing.
++ 12.2. If rate‑limit or UNKNOWN errors occur, retry once with minimal context before escalation.
 ```
 
-**Rationale:**  
-Reduces looping and improves structured recovery.
-
 ---
 
-### ✅ Summary of Expected Impact
+### ✅ Expected Outcomes
 
-| Problem | Improvement | Expected Reduction |
-|----------|--------------|--------------------|
-| Premature Dockerfile writes | New Rule #6 + Workflow ordering | ↓ by ~80% |
-| Ignored search advice | New Rule #7 | ↓ by ~60% |
-| Base image guessing loops | New Rule #8 + Recovery Mode | ↓ by ~70% |
-| Syntax errors | Validation step + Fix patterns | ↓ by ~50% |
-| Rate limit errors | New Fix pattern | ↓ by ~40% |
+- **Reduce “search_advice_ignored”** by enforcing rule 11–12  
+- **Eliminate “premature_dockerfile_write”** via 4.1 and 6.1 gating  
+- **Prevent “base_image_guessing_loop”** via rule 14  
+- **Lower “RATE_LIMIT” and “UNKNOWN”** via retry logic (rule 16, pattern additions)  
+- **Increase first‑attempt success** through syntax self‑check and COPY validation  
 
----
-
-These diffs can be directly appended to the system prompt to yield a more reliable, self-correcting DevOps agent.
+These changes are minimal, diff‑ready, and empirically targeted to the observed failure clusters.
 
 ## LLM: Tool Gap Analysis
-Excellent — we can use the empirical data to guide targeted improvements.  
-Let’s analyze the failure and waste patterns and then propose **new tools**, **enhancements**, and **description improvements**.
+Excellent — this is exactly the kind of data that helps refine an AI coding agent’s tool ecosystem.  
+Let’s analyze the failure and wasted-call data systematically, then propose **new tools**, **enhancements**, and **description improvements**.
 
 ---
 
-## 1. Analysis of Current Pain Points
+## 1. Diagnosis
 
 ### Wasted Tool Calls
-| Pattern | Root Cause | Impact |
-|----------|-------------|--------|
-| `search_advice_ignored` (297) | Agent performs searches but fails to apply retrieved info | Redundant calls, low learning efficiency |
-| `premature_dockerfile_write` (173) | Agent writes Dockerfile before dependencies or base image are known | Rework, syntax errors |
-| `base_image_guessing_loop` (62) | Agent repeatedly guesses base image instead of querying environment or registry | Looping behavior |
-| `repeated_search_queries` (4) | Minor inefficiency | Low impact |
+| Pattern | Root Cause | Implication |
+|----------|-------------|--------------|
+| `search_advice_ignored` (297) | Agent performs searches but doesn’t integrate results or misinterprets them. | Tool output format or guidance integration unclear. |
+| `premature_dockerfile_write` (173) | Agent writes Dockerfile before dependencies or base image are known. | Missing dependency resolution or planning stage. |
+| `base_image_guessing_loop` (62) | Agent repeatedly guesses base image instead of querying registry or metadata. | Lack of a “base image resolver” tool. |
+| `repeated_search_queries` (4) | Agent reissues same query. | No caching or query deduplication. |
 
 ### Failure Types
-| Type | Root Cause | Tool/Process Gap |
-|------|-------------|------------------|
-| `RATE_LIMIT` (231) | Excessive external API calls | Need caching, batching, or local reasoning |
-| `UNKNOWN` (101) | Poor error surfacing | Need better error introspection tool |
-| `SYNTAX` (38) | Generated code errors | Need syntax validation before write |
-| `FILE_COPY_MISSING` (25) | Missing file operations | Need file existence check tool |
-| `NO_SPACE` (12) | Disk quota exceeded | Need resource monitor tool |
-| `IMAGE_NOT_FOUND` (4) | Docker base image invalid | Need registry query tool |
-| `TIMEOUT` (2) | Long-running ops | Need async or progress tracking |
-| `COMPLIANCE` (1) | Policy violation | Need compliance pre-check tool |
+| Type | Root Cause | Possible Tool Gap |
+|------|-------------|-------------------|
+| `RATE_LIMIT` (254) | External API throttling. | Need rate-aware batching or caching tool. |
+| `UNKNOWN` (84) | Poor error surface or logging. | Need diagnostic/error introspection tool. |
+| `SYNTAX` (37) | Generated code invalid. | Need syntax validation or “lint before write” tool. |
+| `FILE_COPY_MISSING` (22) | Agent assumes file exists but didn’t copy. | Need file existence verification or dependency graph. |
+| `NO_SPACE` (12) | Disk quota exceeded. | Need resource monitor tool. |
+| `IMAGE_NOT_FOUND` (4) | Docker base image missing. | Need registry query or fallback mechanism. |
+| `COMPLIANCE` (1) | Probably content policy violation. | Tool description improvement to clarify constraints. |
 
 ---
 
 ## 2. New Tools to Add
 
-### 🧠 `contextual_search_planner`
-**Purpose:** Plan and summarize search results before acting.  
-**Function:** Given a goal, it generates a structured search plan (query set, expected data types, stop conditions).  
-**Benefit:** Reduces `search_advice_ignored` and `repeated_search_queries`.
+### 🧩 **Tool: `plan_build_context`**
+**Purpose:** Generate a structured plan before writing Dockerfiles or build scripts.  
+**Inputs:** Project files, dependency list.  
+**Outputs:** Ordered build steps, required base image, estimated space usage.  
+**Benefits:** Prevents premature Dockerfile writes and missing file copies.
 
 ---
 
-### 🐳 `docker_base_image_resolver`
-**Purpose:** Resolve valid base images from project metadata or registry.  
-**Function:** Queries Docker Hub or local registry for compatible base images (language, version).  
-**Benefit:** Eliminates `base_image_guessing_loop` and `premature_dockerfile_write`.
+### 🔍 **Tool: `base_image_resolver`**
+**Purpose:** Query Docker registries or known image metadata to find the correct base image.  
+**Inputs:** Language/runtime, version constraints.  
+**Outputs:** Valid image name + digest.  
+**Benefits:** Eliminates “base_image_guessing_loop” and “IMAGE_NOT_FOUND”.
 
 ---
 
-### 🧩 `syntax_guard`
-**Purpose:** Validate generated code before writing to disk.  
-**Function:** Runs language-specific syntax checks (e.g., `python -m py_compile`, `dockerfile-lint`).  
-**Benefit:** Reduces `SYNTAX` failures.
+### 🧠 **Tool: `search_result_integrator`**
+**Purpose:** Convert search results into actionable summaries or structured data.  
+**Inputs:** Search results.  
+**Outputs:** Key insights, recommended next actions.  
+**Benefits:** Reduces “search_advice_ignored”.
 
 ---
 
-### 📦 `file_integrity_checker`
-**Purpose:** Verify existence and accessibility of files before copy or build.  
-**Function:** Checks file paths, permissions, and size.  
-**Benefit:** Prevents `FILE_COPY_MISSING` and `NO_SPACE` errors.
+### 🧾 **Tool: `syntax_validator`**
+**Purpose:** Validate code snippets before writing to disk.  
+**Inputs:** Code text, language identifier.  
+**Outputs:** Syntax errors, fix suggestions.  
+**Benefits:** Reduces “SYNTAX” failures.
 
 ---
 
-### 📊 `resource_monitor`
-**Purpose:** Track disk, memory, and API quota usage.  
-**Function:** Provides resource snapshot and alerts before operations.  
-**Benefit:** Reduces `RATE_LIMIT` and `NO_SPACE` failures.
+### 💾 **Tool: `resource_monitor`**
+**Purpose:** Check disk space, memory, and quota before large writes or builds.  
+**Inputs:** None or target directory.  
+**Outputs:** Available space, warnings.  
+**Benefits:** Prevents “NO_SPACE” failures.
 
 ---
 
-### 🔍 `error_introspector`
-**Purpose:** Classify and surface unknown errors.  
-**Function:** Captures stack traces, categorizes by subsystem, and suggests recovery.  
-**Benefit:** Converts `UNKNOWN` failures into actionable categories.
+### 🧰 **Tool: `file_dependency_checker`**
+**Purpose:** Verify required files exist before build or copy operations.  
+**Inputs:** File list or manifest.  
+**Outputs:** Missing files report.  
+**Benefits:** Prevents “FILE_COPY_MISSING”.
 
 ---
 
-### 🛡️ `compliance_precheck`
-**Purpose:** Validate content before output (copyright, license, privacy).  
-**Function:** Scans generated text/code for restricted patterns.  
-**Benefit:** Prevents `COMPLIANCE` violations.
+### 🕵️ **Tool: `error_introspector`**
+**Purpose:** Capture and classify unknown errors.  
+**Inputs:** Raw error logs.  
+**Outputs:** Structured error type, probable cause, suggested recovery.  
+**Benefits:** Reduces “UNKNOWN” category.
+
+---
+
+### ⚙️ **Tool: `rate_limit_manager`**
+**Purpose:** Handle API rate limits via caching, batching, or backoff.  
+**Inputs:** API endpoint, request frequency.  
+**Outputs:** Delay schedule or cached results.  
+**Benefits:** Reduces “RATE_LIMIT” failures.
 
 ---
 
@@ -577,279 +636,285 @@ Let’s analyze the failure and waste patterns and then propose **new tools**, *
 
 | Existing Tool | Enhancement | Rationale |
 |----------------|--------------|------------|
-| **Search Tool** | Add caching and semantic deduplication | Avoid repeated queries and rate limits |
-| **Dockerfile Writer** | Require base image confirmation before write | Prevent premature writes |
-| **File Operations Tool** | Add pre-check for existence and space | Prevent missing copy and disk errors |
-| **Execution Tool** | Add timeout and progress reporting | Handle long-running ops gracefully |
+| **Search Tool** | Add caching + semantic deduplication. | Prevent repeated queries. |
+| **Dockerfile Writer** | Require validated build plan before execution. | Prevent premature writes. |
+| **File Copy Tool** | Integrate with `file_dependency_checker`. | Avoid missing files. |
+| **Build Tool** | Integrate resource monitor + syntax validator. | Prevent NO_SPACE and SYNTAX errors. |
+| **Logging/Error Handling** | Include structured error codes + context. | Reduce UNKNOWN failures. |
 
 ---
 
 ## 4. Tool Description Improvements
 
-### General Guidelines
-- **Add explicit preconditions** (e.g., “Use only after confirming base image via resolver”).
-- **Include failure recovery hints** (e.g., “If syntax error detected, re-run syntax_guard before retry”).
-- **Expose structured outputs** (JSON with status, diagnostics, next-step suggestions).
-- **Document anti-patterns** (e.g., “Do not write Dockerfile before dependency resolution”).
+1. **Explicit Preconditions:**  
+   Each tool description should list required context (e.g., “Must have validated build plan before calling”).
 
-### Example Description Template
-```yaml
-name: docker_base_image_resolver
-description: >
-  Resolves valid Docker base images for a given language and version.
-  Use before writing any Dockerfile. Avoid guessing loops.
-inputs:
-  - language: string
-  - version: string
-outputs:
-  - image_name: string
-  - confidence: float
-anti_patterns:
-  - "Guessing base image names manually"
-  - "Writing Dockerfile before resolution"
-```
+2. **Structured Outputs:**  
+   Use JSON schemas for all tool outputs so agents can parse and act on them deterministically.
+
+3. **Failure Recovery Guidance:**  
+   Include “If this fails, try…” section in tool docs to guide fallback behavior.
+
+4. **Rate Limit Awareness:**  
+   Add “expected latency and quota” metadata to tools that hit external APIs.
+
+5. **Compliance Metadata:**  
+   Add “content policy boundaries” to prevent misuse (e.g., clarify that copyrighted text cannot be reproduced).
 
 ---
 
 ## 5. Summary of Expected Impact
 
-| Issue | Tool/Enhancement | Expected Reduction |
-|-------|------------------|--------------------|
-| `search_advice_ignored` | contextual_search_planner | ↓ 70–80% |
-| `premature_dockerfile_write` | docker_base_image_resolver | ↓ 90% |
-| `RATE_LIMIT` | resource_monitor + caching | ↓ 60% |
-| `SYNTAX` | syntax_guard | ↓ 90% |
-| `FILE_COPY_MISSING` | file_integrity_checker | ↓ 90% |
-| `UNKNOWN` | error_introspector | ↓ 80% |
+| Improvement | Expected Reduction |
+|--------------|--------------------|
+| `search_result_integrator` | ↓ 80% of `search_advice_ignored` |
+| `plan_build_context` | ↓ 90% of `premature_dockerfile_write` |
+| `base_image_resolver` | ↓ 100% of `base_image_guessing_loop` + `IMAGE_NOT_FOUND` |
+| `syntax_validator` | ↓ 90% of `SYNTAX` |
+| `resource_monitor` | ↓ 100% of `NO_SPACE` |
+| `file_dependency_checker` | ↓ 100% of `FILE_COPY_MISSING` |
+| `rate_limit_manager` | ↓ 80% of `RATE_LIMIT` |
+| `error_introspector` | ↓ 70% of `UNKNOWN` |
 
 ---
 
 **In short:**  
-Add reasoning and validation tools (`resolver`, `guard`, `checker`, `monitor`, `introspector`), enhance existing ones with preconditions and caching, and improve descriptions with anti-patterns and structured outputs.  
-This will directly address the observed failure and waste patterns and improve agent reliability and efficiency.
+Add planning, validation, and introspection tools; enhance existing ones with caching and precondition checks; and rewrite tool descriptions to make dependencies, outputs, and compliance boundaries explicit.  
+This will drastically reduce wasted calls and failure rates while improving agent reliability and interpretability.
 
 ## LLM: Metaprompt Improvement
-Excellent — you’ve provided both the **current metaprompt** and **failure-rate diagnostics** by domain and build tool, which gives us strong signals about where the template is underperforming.
-
-Let’s go step by step.
-
----
-
-## 1. Diagnose the failure patterns
-
-### High failure domains
-- **web-development**, **utilities**, **mobile-development**, **systems-programming**  
-  → These domains often involve *polyglot stacks*, *nonstandard build tools*, and *runtime vs build-time confusion* (e.g., Node.js vs Python utilities, Android vs iOS toolchains).
-
-### High failure build tools
-- **maven**, **gradle**, **dotnet**, **npm**, **bun**, **cargo**, **make**, **cmake**  
-  → These tools require *multi-stage builds*, *cache management*, and *precise dependency resolution*.  
-  → Failures likely stem from the metaprompt not forcing the agent to reason about **toolchain layering** and **runtime vs build-time separation**.
+Excellent — you’ve got a strong, structured metaprompt, but the failure-rate data shows where reasoning depth and specificity are insufficient.  
+Below are **targeted improvements** grouped by metaprompt section and driven by observed failure patterns.
 
 ---
 
-## 2. Root cause analysis by taxonomy dimension
+## 1. Introduce Failure-Aware Reasoning Control
+**Problem:** The current template only adjusts reasoning depth in the last section (“FAILURE-WEIGHTED PRIORITY”). That’s too late — the agent needs to reason differently *throughout* the prompt.
 
-| Dimension | Common Failure Cause | Needed Improvement |
-|------------|----------------------|--------------------|
-| DOMAIN | Ambiguous runtime vs build-time base image selection | Require explicit reasoning about runtime vs build image |
-| BUILD_TOOL | Missing version pinning, incorrect install commands | Add explicit “verify tool version and installation source” step |
-| AUTOMATION_LEVEL | Agent overtrusts docs or undertrusts CI | Add confidence weighting and fallback heuristics |
-| ENVIRONMENT_SPECIFICITY | OS mismatch (Debian vs Alpine vs Windows) | Require explicit OS-family justification |
-| DEPENDENCY_TRANSPARENCY | Missing lockfile or implicit deps | Force explicit lockfile detection and fallback strategy |
-| TOOLING_COMPLEXITY | Multi-tool coordination failures | Require explicit stage mapping table |
-| REPRODUCIBILITY_SUPPORT | CI config ignored or misinterpreted | Require explicit CI artifact mining instructions |
+**Improvement:**
+Add a global directive near the top:
+
+> **FAILURE-AWARE DIRECTIVE:**  
+> Before generating outputs, dynamically weight reasoning depth per dimension according to historical failure rates.  
+> - If domain or build_tool failure rate > 80%, expand reasoning for that dimension by adding explicit command examples, fallback logic, and cross-checks.  
+> - If < 50%, keep concise.  
+> - Always surface uncertainty explicitly (“if version unknown, fallback to X”).
+
+This ensures the agent adapts its reasoning early, not just at the end.
 
 ---
 
-## 3. Specific metaprompt improvements
+## 2. Add a “FAILURE PROFILE SUMMARY” Section
+**Problem:** The agent doesn’t contextualize which dimensions are high-risk before generating recommendations.
 
-### 🔧 Structural improvements
+**Improvement:**
+Insert a new section **before “RECOMMENDED BASE IMAGE”**:
 
-**Current weakness:** The template asks for per-dimension reasoning but doesn’t *force cross-dimensional synthesis*.  
-**Fix:** Add a “CROSS-DIMENSION CONSISTENCY CHECK” section.
+```
+FAILURE PROFILE SUMMARY:
+<list domain and build_tool failure rates, classify as LOW/MEDIUM/HIGH risk>
+<state which dimensions require expanded reasoning and validation>
+```
 
-**Add after CI_CONFIDENCE:**
+This primes the agent to allocate attention proportionally.
+
+---
+
+## 3. Strengthen Cross-Dimension Consistency Logic
+**Problem:** “CROSS-DIMENSION CONSISTENCY CHECK” is too qualitative; failures often stem from mismatched OS base + build tool + dependency manager.
+
+**Improvement:**
+Require explicit compatibility matrix reasoning:
+
 ```
 CROSS-DIMENSION CONSISTENCY CHECK:
-<verify that base image, build tool, and environment setup are mutually compatible.
-List any mismatches (e.g., using Alpine with glibc-dependent tools, Java version conflicts, etc.)>
+<tabulate base image vs build_tool vs dependency manager compatibility>
+<flag known incompatibilities (e.g., Alpine + glibc-dependent tools)>
+<recommend corrective substitutions>
 ```
 
 ---
 
-### 🧩 Domain-specific reasoning enhancement
+## 4. Expand “BUILD TOOL” Dimension Guidance
+**Problem:** High failure rates for build tools with complex dependency graphs (Gradle, Maven, npm, cargo, cmake).
 
-**Current weakness:** “DOMAIN -> Base image family” is too shallow.  
-**Fix:** Require explicit runtime vs build separation.
+**Improvement:**
+Add sub-directives under “BUILD_TOOL”:
 
-Change:
+- Require the agent to output **tool-specific canonical install patterns** (e.g., Gradle wrapper vs system install).
+- Include **cache layer optimization hints** (npm cache, cargo target dir, Maven local repo).
+- Mandate **version fallback hierarchy**: CI config → lockfile → manifest → latest stable.
+
+---
+
+## 5. Add “VALIDATION CHECKPOINTS” Section
+**Problem:** Many failures are due to missing verification of assumptions.
+
+**Improvement:**
+Add a new section after “CRITICAL WARNINGS”:
+
 ```
-DOMAIN -> Base image family, runtime requirements, whether an ENTRYPOINT makes sense
+VALIDATION CHECKPOINTS:
+<list concrete checks the Dockerfile-writing agent should perform to verify correctness>
+- Confirm tool versions installed match inferred versions.
+- Validate lockfile presence and integrity.
+- Test ENTRYPOINT command resolves correctly.
 ```
-To:
+
+This converts reasoning into actionable QA steps.
+
+---
+
+## 6. Improve “ENVIRONMENT_SPECIFICITY” Handling
+**Problem:** High failure rates in domains like machine-learning, data-science, and systems-programming often stem from incorrect base image choice or missing OS packages.
+
+**Improvement:**
+Require:
+- Explicit justification for OS family selection (glibc vs musl).
+- Domain-specific package heuristics (e.g., ML → CUDA/cuDNN; systems → build-essential).
+- Fallback OS selection rule: prefer Debian-based if toolchain complexity > 2 layers.
+
+---
+
+## 7. Add “DOMAIN-SPECIFIC HEURISTICS” Section
+**Problem:** Domain-level failures (utilities, web-dev, mobile, devops) show the agent lacks domain heuristics.
+
+**Improvement:**
+Insert after “FAILURE PROFILE SUMMARY”:
+
 ```
-DOMAIN -> Distinguish runtime vs build-time image families, identify language ecosystem,
-and specify whether ENTRYPOINT should invoke a runtime, CLI, or test harness.
+DOMAIN-SPECIFIC HEURISTICS:
+<for high-failure domains, list known Dockerfile patterns>
+- web-development: node-based multi-stage with static asset copy
+- mobile-development: Android SDK layers, emulator dependencies
+- devops: include CLI tools (kubectl, helm)
 ```
 
 ---
 
-### 🛠 BUILD_TOOL dimension expansion
+## 8. Clarify “FAILURE-WEIGHTED PRIORITY” Behavior
+**Problem:** Currently vague; doesn’t specify how to “increase reasoning depth.”
 
-**Current weakness:** High failure for Maven/Gradle/npm due to missing version and cache strategy.
-
-Change:
-```
-BUILD_TOOL -> Exact install/build commands, multi-stage build patterns, cache optimization
-```
-To:
-```
-BUILD_TOOL -> Exact install/build commands, required tool version and installation source,
-multi-stage build patterns, cache optimization, and artifact handoff between stages.
-```
-
----
-
-### 🧮 Add explicit version reasoning
-
-Insert before “INSTALL COMMANDS”:
-```
-TOOLCHAIN VERSIONING:
-<list exact versions of language runtimes and build tools inferred from taxonomy or CI config.
-Explain fallback if version unknown.>
-```
-
-This directly addresses failures in Maven/Gradle/npm/Cargo/Dotnet cases.
-
----
-
-### 🧱 Add explicit stage mapping for complex toolchains
-
-High failure for cmake/make/cargo → multi-stage confusion.
-
-Add:
-```
-BUILD STAGE MAP:
-<enumerate each stage (builder, runtime, test), what tools run in each, and what artifacts are copied forward.>
-```
-
----
-
-### ⚙️ Add explicit OS-family justification
-
-Under ENVIRONMENT SETUP, require:
-```
-ENVIRONMENT SETUP: <OS packages, env vars, platform flags needed based on environment_specificity.
-Include justification for chosen OS family (Debian vs Alpine vs Ubuntu vs Windows).>
-```
-
----
-
-### 🧩 Add dependency verification fallback
-
-Under DEPENDENCY HANDLING, require:
-```
-DEPENDENCY HANDLING: <strategy based on dependency_transparency: lockfile approach, pinning, etc.
-If no lockfile found, describe fallback method (e.g., pip freeze, npm ls, cargo metadata).>
-```
-
----
-
-### 🧠 Add CI artifact mining details
-
-Under CI_CONFIDENCE:
-```
-CI CONFIDENCE: <based on reproducibility_support: can we trust CI config? what to mine from it?
-List specific CI files (e.g., .github/workflows, Jenkinsfile) and what build commands/versions to extract.>
-```
-
----
-
-### ⚠️ Add explicit error-prevention heuristics
-
-Under CRITICAL WARNINGS:
-```
-CRITICAL WARNINGS: <anything the agent must be careful about given this combination of dimensions.
-Include known pitfalls for this domain/build_tool (e.g., Gradle daemon memory, npm cache path, cargo target dir).>
-```
-
----
-
-## 4. Optional: Add failure-driven weighting hints
-
-To help the agent self-correct based on historical failure rates, add a hidden instruction block:
+**Improvement:**
+Define explicit scaling rules:
 
 ```
 FAILURE-WEIGHTED PRIORITY:
-<If domain or build_tool has >80% historical failure rate, increase reasoning depth for that dimension.
-Generate more explicit command examples and cross-check OS compatibility.>
+If domain failure rate > 80% → add 2 extra reasoning layers per affected section.
+If build_tool failure rate > 80% → include explicit install + verification commands.
+If both > 80% → trigger “deep diagnostic mode”: output extended compatibility matrix and fallback logic.
 ```
 
 ---
 
-## 5. Revised metaprompt (summary form)
+## 9. Add “CONFIDENCE SCORING” Across Sections
+**Problem:** The agent doesn’t quantify uncertainty.
+
+**Improvement:**
+After each major section, append:
+
+```
+CONFIDENCE SCORE: <High/Medium/Low> (based on data completeness and failure history)
+```
+
+This helps downstream agents prioritize human review.
+
+---
+
+## 10. Add “EXEMPLAR SNIPPET” for High-Failure Cases
+**Problem:** Agents fail to translate reasoning into Dockerfile syntax.
+
+**Improvement:**
+For domains/tools with >80% failure rate, require a short, sanitized Dockerfile snippet illustrating the pattern (no copyrighted material, just generic syntax).
+
+```
+EXEMPLAR SNIPPET (for high-failure domain/tool):
+<minimal Dockerfile fragment showing correct stage structure and install pattern>
+```
+
+---
+
+## 11. Meta-Structural Improvement
+**Problem:** The template is long but linear; reasoning could benefit from modular sub-prompts.
+
+**Improvement:**
+Group dimensions into three reasoning clusters:
+
+- **Image Construction Cluster:** DOMAIN, BUILD_TOOL, ENVIRONMENT_SPECIFICITY  
+- **Dependency Cluster:** DEPENDENCY_TRANSPARENCY, TOOLING_COMPLEXITY  
+- **Reproducibility Cluster:** AUTOMATION_LEVEL, REPRODUCIBILITY_SUPPORT  
+
+Add directive:
+
+> “For each cluster, perform internal consistency validation before generating final sections.”
+
+This reduces cross-dimension drift.
+
+---
+
+## 12. Add “FAILURE-DRIVEN EXPLANATION DEPTH” Table
+**Problem:** The agent doesn’t know how much to elaborate per dimension.
+
+**Improvement:**
+Append a table mapping failure rate ranges to explanation depth:
+
+| Failure Rate | Reasoning Depth | Example Output Additions |
+|---------------|----------------|---------------------------|
+| <50% | Concise | 1-line summary |
+| 50–80% | Moderate | Include fallback logic |
+| >80% | Deep | Include explicit commands, validation checkpoints, compatibility matrix |
+
+---
+
+## 13. Add “POST-GENERATION SELF-CHECK”
+**Problem:** No self-validation loop.
+
+**Improvement:**
+End metaprompt with:
+
+```
+SELF-CHECK:
+Before finalizing, verify:
+- Each section populated.
+- All high-failure dimensions received expanded reasoning.
+- No contradictions between base image and build tool.
+```
+
+---
+
+### Summary of Key Additions
+| Category | New Section / Directive | Purpose |
+|-----------|------------------------|----------|
+| Global | FAILURE-AWARE DIRECTIVE | Dynamic reasoning depth |
+| Context | FAILURE PROFILE SUMMARY | Risk awareness |
+| Domain | DOMAIN-SPECIFIC HEURISTICS | Pattern injection |
+| Validation | VALIDATION CHECKPOINTS | QA enforcement |
+| Confidence | CONFIDENCE SCORE | Quantify uncertainty |
+| Example | EXEMPLAR SNIPPET | Concrete guidance |
+| Structure | Clustered reasoning + Self-check | Reduce drift |
+
+---
+
+### Example of Revised Metaprompt Opening
 
 ```
 You are an expert DevOps architect specializing in Docker containerization.
 
-Given a repository's 7-dimension taxonomy classification, generate PRECISE, ACTIONABLE context
-that a Dockerfile-writing agent will use. Your output must be structured and directly applicable.
+FAILURE-AWARE DIRECTIVE:
+Adjust reasoning depth per dimension according to historical failure rates.
+Use expanded reasoning for domains/tools with >80% failure rate.
 
-For each dimension, derive the specific Dockerfile implications:
+FAILURE PROFILE SUMMARY:
+Domain: <domain> (failure rate X/Y → HIGH/MEDIUM/LOW)
+Build Tool: <tool> (failure rate X/Y → HIGH/MEDIUM/LOW)
+Dimensions requiring expanded reasoning: <list>
 
-1. DOMAIN -> Distinguish runtime vs build-time image families, identify language ecosystem,
-   and specify whether ENTRYPOINT should invoke a runtime, CLI, or test harness.
-2. BUILD_TOOL -> Exact install/build commands, required tool version and installation source,
-   multi-stage build patterns, cache optimization, and artifact handoff between stages.
-3. AUTOMATION_LEVEL -> How much the agent can rely on documented commands vs needing to reverse-engineer.
-4. ENVIRONMENT_SPECIFICITY -> Platform flags, OS-specific packages, version pinning requirements,
-   and justification for chosen OS family.
-5. DEPENDENCY_TRANSPARENCY -> Whether to use lockfiles, how to handle implicit deps, pip freeze strategies,
-   and fallback if lockfile missing.
-6. TOOLING_COMPLEXITY -> Number of build stages needed, tool installation ordering, inter-tool coordination,
-   and explicit stage mapping.
-7. REPRODUCIBILITY_SUPPORT -> Whether CI config can be mined for build commands/versions, confidence level,
-   and what CI artifacts to inspect.
+DOMAIN-SPECIFIC HEURISTICS:
+<insert known Dockerfile patterns for high-failure domains>
 
-You MUST follow this exact output format:
----
-RECOMMENDED BASE IMAGE: <specific image:tag suggestion based on domain + build_tool>
-TOOLCHAIN VERSIONING: <exact versions and fallback logic>
-BUILD STRATEGY: <1-2 sentences: single-stage vs multi-stage, why>
-BUILD STAGE MAP: <list of stages and artifact flow>
-INSTALL COMMANDS: <exact commands the Dockerfile should use, based on build_tool>
-ENVIRONMENT SETUP: <OS packages, env vars, platform flags, OS-family justification>
-DEPENDENCY HANDLING: <strategy based on dependency_transparency: lockfile approach, pinning, fallback>
-BUILD COMPLEXITY NOTES: <warnings based on tooling_complexity: multi-tool coordination, ordering>
-CI CONFIDENCE: <based on reproducibility_support: can we trust CI config? what to mine from it?>
-CROSS-DIMENSION CONSISTENCY CHECK: <verify compatibility across base image, build tool, environment>
-CRITICAL WARNINGS: <domain/build_tool-specific pitfalls to avoid>
-FAILURE-WEIGHTED PRIORITY: <increase reasoning depth for historically high-failure dimensions>
----
+Then proceed with the standard output format...
 ```
 
 ---
 
-## 6. Expected impact
-
-| Improvement | Targeted Failure Cluster | Expected Reduction |
-|--------------|--------------------------|--------------------|
-| Runtime vs build-time distinction | web-dev, utilities, mobile | ↓ failures by ~30% |
-| Toolchain versioning | maven, gradle, npm, cargo, dotnet | ↓ failures by ~40% |
-| Stage mapping | cmake, make, cargo | ↓ failures by ~25% |
-| OS-family justification | systems-programming, security | ↓ failures by ~20% |
-| CI artifact mining | devops, enterprise | ↓ failures by ~15% |
-
----
-
-### ✅ Summary
-
-Your metaprompt should:
-- Force **cross-dimensional reasoning** (compatibility checks)
-- Require **explicit versioning and stage mapping**
-- Include **OS-family justification**
-- Add **fallback logic for missing lockfiles**
-- Integrate **failure-weighted depth scaling**
-
-These changes make the template more robust and self-correcting for historically high-failure domains and build tools.
+By integrating these improvements, the metaprompt becomes **failure-adaptive, self-validating, and domain-aware**, significantly reducing misgeneration rates across high-risk dimensions.

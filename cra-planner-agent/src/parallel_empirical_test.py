@@ -21,6 +21,7 @@ import json
 import time
 import threading
 import traceback
+import subprocess
 import concurrent.futures
 import gc
 import shutil
@@ -1486,7 +1487,21 @@ class ParallelEmpiricalTester:
                 result["dockerfile_content"] = content[:500] + "\n... [truncated, see Dockerfile file]"
                 result["dockerfile_content_truncated"] = True
 
-        # 4. Force garbage collection
+        # 4. Periodically prune Docker build cache to prevent disk exhaustion
+        # Run every 5 repos to keep disk usage bounded
+        try:
+            with self.results_lock:
+                count = len(self.results)
+            if count > 0 and count % 5 == 0:
+                self.log(repo_name, "Running periodic docker builder prune...", to_console=True)
+                subprocess.run(
+                    ["docker", "builder", "prune", "-f"],
+                    capture_output=True, timeout=60
+                )
+        except Exception as e:
+            self.log(repo_name, f"Docker prune skipped: {e}", to_console=False)
+
+        # 5. Force garbage collection
         gc.collect()
         self.log(repo_name, "Cleanup complete", to_console=False)
 

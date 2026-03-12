@@ -4,6 +4,8 @@ import threading
 import platform
 import json
 import asyncio
+import time
+import random
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -48,40 +50,79 @@ logger = logging.getLogger(__name__)
 _api_semaphore = threading.Semaphore(2)
 _async_api_semaphore = asyncio.Semaphore(2)
 
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Check if an exception is a rate-limit (429) error."""
+    return (
+        'RateLimitError' in type(e).__name__
+        or '429' in str(e)
+        or 'RateLimitReached' in str(e)
+    )
+
+
 class GPT5NanoWrapper(BaseChatModel):
     """Wrapper for gpt-5-nano that strips unsupported parameters and rate-limits API calls."""
     llm: Any  # Allow Runnable / ChatModel for bind_tools compatibility
     class Config:
         arbitrary_types_allowed = True
 
+    def _backoff_retry(self, fn, max_attempts=5, base_delay=2.0):
+        """Execute fn with exponential backoff on rate limit errors."""
+        for attempt in range(max_attempts):
+            try:
+                return fn()
+            except Exception as e:
+                if _is_rate_limit_error(e) and attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"[RateLimit] Attempt {attempt+1}/{max_attempts}, backing off {delay:.1f}s")
+                    time.sleep(delay)
+                else:
+                    raise
+
+    async def _async_backoff_retry(self, fn, max_attempts=5, base_delay=2.0):
+        """Async version of _backoff_retry."""
+        for attempt in range(max_attempts):
+            try:
+                return await fn()
+            except Exception as e:
+                if _is_rate_limit_error(e) and attempt < max_attempts - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"[RateLimit] Attempt {attempt+1}/{max_attempts}, backing off {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+
     def invoke(self, input, config=None, **kwargs):
-        """Rate-limited invoke for compatibility with bound tools."""
-        # Remove unsupported parameters
+        """Rate-limited invoke with exponential backoff on 429 errors."""
         kwargs.pop('stop', None)
-        with _api_semaphore:
-            return self.llm.invoke(input, config=config, **kwargs)
+        def _call():
+            with _api_semaphore:
+                return self.llm.invoke(input, config=config, **kwargs)
+        return self._backoff_retry(_call)
 
     async def ainvoke(self, input, config=None, **kwargs):
-        """Rate-limited async invoke for compatibility with bound tools."""
-        # Remove unsupported parameters
+        """Rate-limited async invoke with exponential backoff on 429 errors."""
         kwargs.pop('stop', None)
-        async with _async_api_semaphore:
-            return await self.llm.ainvoke(input, config=config, **kwargs)
+        async def _call():
+            async with _async_api_semaphore:
+                return await self.llm.ainvoke(input, config=config, **kwargs)
+        return await self._async_backoff_retry(_call)
 
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> ChatResult:
         """Fallback for LangChain versions that call _generate directly."""
         kwargs.pop('stop', None)
         _stop_sequences = stop  # Save for post-hoc truncation
-        with _api_semaphore:
-            # Ensure the bound object has _generate before calling
-            if hasattr(self.llm, '_generate'):
-                chat_result = self.llm._generate(messages, **kwargs)
-            else:
-                # Fallback to invoke if _generate is not available
-                raw = self.llm.invoke(messages, **kwargs)
-                # Convert to ChatResult if needed
-                from langchain_core.outputs import ChatGeneration
-                chat_result = ChatResult(generations=[ChatGeneration(message=raw)])
+
+        def _call():
+            with _api_semaphore:
+                if hasattr(self.llm, '_generate'):
+                    return self.llm._generate(messages, **kwargs)
+                else:
+                    raw = self.llm.invoke(messages, **kwargs)
+                    from langchain_core.outputs import ChatGeneration
+                    return ChatResult(generations=[ChatGeneration(message=raw)])
+
+        chat_result = self._backoff_retry(_call)
+
         # Post-hoc truncation at stop sequences so ReAct parsing works
         # even though gpt-5-nano doesn't support native stop sequences.
         if _stop_sequences and chat_result.generations:
@@ -95,8 +136,6 @@ class GPT5NanoWrapper(BaseChatModel):
                     if idx != -1 and idx < earliest:
                         earliest = idx
                 if earliest < len(text):
-                    # Strip trailing whitespace so the ReAct parser doesn't
-                    # trip on stray newlines before the stop token boundary.
                     gen.message.content = text[:earliest].rstrip()
         return chat_result
 
@@ -231,6 +270,9 @@ ABSOLUTE RULES:
 8. You MUST NOT change the base image tag unless SearchDockerError or VerifyBuild explicitly indicates a tag or platform issue.
 9. If VerifyBuild fails more than twice for the same error message, stop guessing and escalate by re-running SearchDockerError with expanded context.
 10. You MUST include all required COPY source files verified by ListDirectory before VerifyBuild.
+11. You MUST NOT ignore or override SearchDockerError advice. If advice conflicts with your prior plan, follow the advice exactly.
+12. After any VerifyBuild failure, you MUST call SearchDockerError BEFORE the next WriteToFile. Do not emit WriteToFile until SearchDockerError has completed.
+13. You MUST NOT repeat the same SearchDockerError query twice. If the first advice failed, expand the context (add more error lines) before searching again.
 
 ═══════════════════════════════════════════════════════════════════════════════
 COMMON FIX PATTERNS (Learn from these):
@@ -261,8 +303,19 @@ Fix: Add a short sleep/retry mechanism or switch to a different registry mirror.
 Error: "no space left on device"
 Fix: Clean up intermediate layers with RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-Error: "unknown instruction" or "syntax error"
-Fix: Verify Dockerfile syntax; each instruction must start with a valid keyword (FROM, RUN, COPY, etc.)
+Error: "unknown instruction" or "syntax error" or "dockerfile parse error"
+Fix: Re-read the exact line number from the error. Ensure each instruction starts with a valid
+     Dockerfile keyword (FROM, RUN, COPY, ADD, ENV, EXPOSE, CMD, ENTRYPOINT, WORKDIR, ARG, LABEL).
+     No shell syntax, no comments inside instructions, no trailing backslash on last RUN line.
+
+Error: "COPY failed" or "file not found" or "no such file or directory" in COPY/ADD
+Fix: Run ListDirectory again to confirm the exact file path. COPY paths are relative to the build
+     context root. Do NOT assume subdirectory structure — verify with ListDirectory first.
+     Only include COPY instructions for files confirmed to exist.
+
+Error: unknown error / no clear build stage in failure
+Fix: Call SearchDockerError with the FULL last 20 lines of VerifyBuild output as agent_context.
+     Do not truncate the error. If SearchDockerError returns no advice, try a broader error_keywords.
 
 ═══════════════════════════════════════════════════════════════════════════════
 MULTI-MODULE JAVA PROJECTS (Maven/Gradle):

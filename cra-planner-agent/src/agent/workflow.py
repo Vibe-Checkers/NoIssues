@@ -56,6 +56,8 @@ _SYNTAX_PATTERNS = [
     r"dockerfile parse error",
     r"syntax error",
     r"unknown flag",
+    r"failed to parse.*dockerfile",
+    r"invalid.*dockerfile",
 ]
 _UNFIXABLE_PATTERNS = [
     # Dependency versions that don't exist in any public registry
@@ -74,9 +76,16 @@ _RATE_LIMIT_PATTERNS = [
 _DEPENDENCY_RESOLUTION_PATTERNS = [
     r"could not resolve dependencies",
     r"npm ERR!.*ERESOLVE",
+    r"npm ERR! code E",
     r"pip.*no matching distribution",
     r"failed to resolve",
     r"dependency .* not found",
+    r"go: module .* not found",
+    r"go: .* reading .* 404",
+    r"error: failed to select a version",
+    r"cannot find module",
+    r"package .* is not in",
+    r"no candidates found",
 ]
 _NETWORK_CONNECTIVITY_PATTERNS = [
     r"connection reset by peer",
@@ -532,6 +541,16 @@ This is a large monorepo. Do NOT attempt to build every module individually. Ins
     dockerignore_path = Path(repo_path) / ".dockerignore"
 
     for attempt in range(1, max_retries + 1):
+        # Exponential backoff between retry attempts
+        if attempt > 1:
+            last_lesson = lessons[-1] if lessons else ""
+            if "429" in last_lesson or "RateLimit" in last_lesson:
+                delay = 30 * (2 ** (attempt - 2))  # 30s, 60s
+                logger.warning(f"[RateLimit] Waiting {delay}s before agent attempt {attempt}")
+                time.sleep(delay)
+            else:
+                time.sleep(5)
+
         # Adaptive iteration budget: give later attempts more room
         # so complex repos don't exhaust steps on initial exploration.
         current_max_iterations = max_iterations + (attempt - 1) * 10
