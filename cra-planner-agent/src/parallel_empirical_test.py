@@ -680,31 +680,14 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Clone failed: {e}")
                 return result
 
-            # Step 1.5: Repository Classification (T1)
-            from agent.classification import RepoClassifier
-            try:
-                classifier = RepoClassifier()
-                classification = classifier.classify(repo_path, repo_name)
-                result["classification"] = classification
-                self.log(repo_name,
-                         f"Classified: {classification['repo_type']} "
-                         f"({classification['primary_language']}, "
-                         f"strategy={classification['verification_strategy']})",
-                         to_console=True)
-            except Exception as e:
-                self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
-                classification = None
-
-            # Step 1.55: 7-Dimension Taxonomy Classification
+            # Step 1.5: 7-Dimension Taxonomy Classification
             from agent.taxonomy import get_taxonomy
+            taxonomy = None
             try:
-                taxonomy_signals = getattr(classifier, '_last_signals', None) if classification else None
-                taxonomy_llm = getattr(classifier, 'llm', None) if classification else None
                 taxonomy = get_taxonomy(
                     repo_url=repo_url,
-                    llm=taxonomy_llm,
+                    llm=None,
                     repo_path=repo_path,
-                    signals=taxonomy_signals,
                 )
                 if taxonomy:
                     result["taxonomy"] = taxonomy
@@ -714,10 +697,25 @@ class ParallelEmpiricalTester:
                              f"automation={taxonomy['automation_level']}",
                              to_console=True)
                 else:
-                    self.log(repo_name, "Taxonomy: not in CSV, will use live classification in agent", to_console=True)
+                    self.log(repo_name, "Taxonomy: CSV miss, live LLM classification will run in agent", to_console=True)
             except Exception as e:
                 self.log(repo_name, f"Taxonomy classification failed: {e}", to_console=True)
-                taxonomy = None
+
+            # Step 1.55: Derive classification from taxonomy + filesystem signals
+            from agent.repo_analysis import derive_verification_hints
+            from agent.preparation import detect_project_language
+            try:
+                language = detect_project_language(repo_path)
+                classification = derive_verification_hints(repo_path, language, taxonomy)
+                classification["primary_language"] = language
+                result["classification"] = classification
+                self.log(repo_name,
+                         f"Classified: {classification['repo_type']} "
+                         f"({language}, strategy={classification['verification_strategy']})",
+                         to_console=True)
+            except Exception as e:
+                self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
+                classification = None
 
 
             # Step 1.6: Check for existing valid Dockerfile (Pre-check)
