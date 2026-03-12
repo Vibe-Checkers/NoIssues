@@ -719,15 +719,6 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Taxonomy classification failed: {e}", to_console=True)
                 taxonomy = None
 
-            # Early skip for documentation-only repos
-            if classification and classification.get("repo_type") == "documentation_only":
-                self.log(repo_name, "Documentation-only repo — skipping build", to_console=True)
-                result["success"] = False
-                result["skip_reason"] = "documentation_only"
-                self.update_progress(repo_name, "⊘ Skipped (docs-only)")
-                self._aggressive_cleanup(repo_name, repo_path, result)
-                # Don't save here — the finally block handles append + JSONL
-                return result
 
             # Step 1.6: Check for existing valid Dockerfile (Pre-check)
             if self._check_existing_dockerfile(repo_path, repo_name, slug, result):
