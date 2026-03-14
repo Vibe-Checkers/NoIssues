@@ -627,37 +627,13 @@ GOAL: Containerize the '{repo_name}' repository.
 {classification_context}
 {taxonomy_context}
 OBJECTIVES:
-1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
-2. Based on ONLY the files that exist, determine build approach
-3. Create a production-ready 'Dockerfile' in the repository root
-4. Create a '.dockerignore' to exclude unnecessary files
-5. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile
-6. You MUST get a SUCCESS result from VerifyBuild before finishing
-
-ERROR HANDLING WORKFLOW (When VerifyBuild fails):
-1. STOP. Do not edit the file yet.
-2. Call SearchDockerError with the error message and your context.
-   Example: SearchDockerError(error_keywords="...", agent_context="...")
-3. Read the AI ANALYSIS section to understand:
-   - Root Cause (what went wrong)
-   - Fix (specific changes needed)
-   - Example (code to apply)
-4. Apply the suggested fix to your Dockerfile
-5. Run VerifyBuild again
-6. Repeat until SUCCESS
-
-IMPORTANT RULES:
-- DO NOT check for files that don't exist (e.g. checking package.json in a Python project)
-- Use ListDirectory FIRST, then only read files you know exist
-- Be efficient - don't waste API calls on trial-and-error file reads
-- ALWAYS use SearchDockerError when VerifyBuild fails (don't guess fixes!)
+1. Explore the repository (ListDirectory, ReadLocalFile) to determine the build approach.
+2. Create a production-ready Dockerfile and .dockerignore in the repository root.
+3. Verify with VerifyBuild — you MUST get SUCCESS before finishing.
 
 CONTEXT (AI-Generated from Repository Taxonomy):
 {metaprompt_context}
 {feedback_section}
-You have full autonomy. Use your tools to explore, build, and VERIFY.
-Do NOT ask for user permission. Just do it.
-
 Begin!
 """
 

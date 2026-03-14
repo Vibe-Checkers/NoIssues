@@ -930,12 +930,6 @@ def create_structured_tools(repo_root: str) -> list:
             args_schema=ListDirectoryInput
         ),
         StructuredTool(
-            name="CreateDirectoryTree",
-            func=repo_tools.create_directory_tree_structured,
-            description="Create a tree view of directory structure.",
-            args_schema=CreateDirectoryTreeInput
-        ),
-        StructuredTool(
             name="FindFiles",
             func=repo_tools.find_files_structured,
             description="Find files matching a pattern in a directory.",
@@ -948,62 +942,14 @@ def create_structured_tools(repo_root: str) -> list:
             args_schema=GrepFilesInput
         ),
         StructuredTool(
-            name="ExtractJsonField",
-            func=repo_tools.extract_json_field_structured,
-            description="Extract a specific field from a JSON file.",
-            args_schema=ExtractJsonFieldInput
-        ),
-        StructuredTool(
-            name="GetFileMetadata",
-            func=repo_tools.get_file_metadata_structured,
-            description="Get metadata (size, permissions) for a file.",
-            args_schema=GetFileMetadataInput
-        ),
-        # Stateless Tools (safe to share logic, but we create fresh instances)
-        StructuredTool(
-            name="SearchWeb",
-            func=search_web_structured,
-            description="Search the web for documentation and solutions.",
-            args_schema=SearchWebInput
-        ),
-        StructuredTool(
             name="SearchDockerError",
             func=search_docker_error_structured,
-            description="""Search for Docker build error solutions with AI-powered analysis.
-
-            WHEN TO USE: After VerifyBuild fails with an error.
-
-            INPUT: Provide as much context as possible:
-            - error_keywords (REQUIRED): Key error message for web search (e.g., "unable to locate package")
-            - full_error_log (RECOMMENDED): Complete Docker build output for detailed analysis
-            - dockerfile_content (RECOMMENDED): Full Dockerfile content for precise line-level fixes
-
-            OUTPUT: You will receive:
-            - AI ANALYSIS with Root Cause, Fix, and Example code (with line numbers if Dockerfile provided)
-            - SEARCH SOURCES with relevant documentation links
-
-            WHAT TO DO NEXT:
-            1. Read the AI ANALYSIS to understand the root cause
-            2. Apply the suggested fix to your Dockerfile
-            3. Run VerifyBuild again to test the fix
-
-            BEST PRACTICE EXAMPLE:
-            SearchDockerError(
-                error_keywords="unable to
-                 locate package build-essential",
-                full_error_log="<entire output from docker build>",
-                dockerfile_content="<read from ReadLocalFile>"
-            )
-
-            MINIMAL EXAMPLE (less accurate):
-            SearchDockerError(error_keywords="unable to locate package build-essential")
-            """,
+            description=(
+                "Search for Docker build error solutions with AI-powered analysis. "
+                "Use AFTER VerifyBuild fails. Provide error_keywords (required) and "
+                "optionally full_error_log and dockerfile_content for better analysis. "
+                "Returns Root Cause, Fix, and Example code."
+            ),
             args_schema=SearchDockerErrorInput
-        ),
-        StructuredTool(
-            name="FetchWebPage",
-            func=fetch_web_page_structured,
-            description="Fetch and extract relevant content from a web page.",
-            args_schema=FetchWebPageInput
         ),
     ]

@@ -32,18 +32,6 @@ from .tools import (
     _get_http_client, FormattedOutputHandler,
     create_structured_tools
 )
-# Note: Other tools (ReadFile, docker_image_search, etc.) are currently defined in planner_agent.py 
-# but are simple wrappers. For this refactor, I will define them here 
-# or import if I moved them. I only moved a few complex ones to tools.py.
-# To make this fully functional, I need to make sure ALL tools are available.
-# I will quickly re-implement the standard file tools here using the path helpers from tools.py,
-# or assume they will be moved. To be safe/clean, I will implement them here or in tools.py.
-# Since I only moved `search_web` and `errors` to tools.py, I should probably add the file tools to tools.py
-# later or define them inline here if they are simple. 
-# Better: I will implement the missing standard tools in tools.py in a follow-up or right now?
-# I'll stick to what I moved to tools.py so far, but I missed the simple file tools!
-# I should have moved 'read_local_file', 'list_directory' etc. to tools.py.
-# I will patch tools.py first!
 
 logger = logging.getLogger(__name__)
 
@@ -216,130 +204,18 @@ HOST ARCHITECTURE: {host_arch_name}
 TOOLS:
 {tools}
 
-TOOL INPUT CONTRACT (MUST FOLLOW):
-- WriteToFile:
-  Action Input: {{"file_path":"Dockerfile","content":"<full file contents>"}}
-- ReadLocalFile:
-  Action Input: {{"file_path":"package.json"}}
-- ListDirectory:
-  Action Input: {{"directory":"."}}
-- VerifyBuild:
-  Action Input: "" (empty string)
-- SearchDockerError:
-  Action Input: {{"error_keywords":"<error>", "agent_context":"<what you tried/observed>"}}
+WORKFLOW:
+1. ANALYZE: ListDirectory + ReadLocalFile to understand the project structure, language, and dependencies.
+2. CREATE: WriteToFile to create Dockerfile and .dockerignore (only after step 1).
+3. VERIFY: VerifyBuild to test the Dockerfile.
+4. IF FAILS: Call SearchDockerError with the error, apply its fix, then VerifyBuild again.
 
-IMPORTANT:
-- Action Input must be exactly a JSON object for that tool (or "" for VerifyBuild). No prose.
-- You may emit at most one tool call per message.
-
-═══════════════════════════════════════════════════════════════════════════════
-CRITICAL WORKFLOW - YOU MUST FOLLOW THIS EXACTLY:
-═══════════════════════════════════════════════════════════════════════════════
-
-PHASE 1 - ANALYZE:
-  1. ListDirectory to see project structure
-  2. ReadLocalFile to inspect key manifest files (package.json, requirements.txt, pom.xml, etc.)
-  3. Identify language, framework, and dependencies
-  4. Confirm all required source files exist before proceeding to Dockerfile creation
-
-PHASE 2 - CREATE:
-  5. WriteToFile to create Dockerfile (only after PHASE 1 is complete)
-  6. WriteToFile to create .dockerignore
-
-PHASE 3 - VERIFY (MANDATORY):
-  7. VerifyBuild to test the Dockerfile
-
-PHASE 4 - IF BUILD FAILS (MANDATORY LOOP):
-  8. Read the error message carefully
-  9. IMMEDIATELY use SearchDockerError(error_keywords="...", agent_context="...") to get a fix
-  10. Do NOT guess or try to fix it yourself without searching first
-  11. Apply the fix from the AI analysis
-  12. VerifyBuild again
-
-═══════════════════════════════════════════════════════════════════════════════
-ABSOLUTE RULES:
-═══════════════════════════════════════════════════════════════════════════════
-
-1. You MUST call VerifyBuild at least once before your Final Answer
-2. You CANNOT give a Final Answer if VerifyBuild has not returned "SUCCESS"
-3. When VerifyBuild fails, you MUST use SearchDockerError IMMEDIATELY. Do not think "I can fix this" - you must get external validation first.
-4. You MUST fix the Dockerfile and VerifyBuild again after researching
-5. Your Final Answer can ONLY report success if the last VerifyBuild passed
-6. You MUST NOT write a Dockerfile before completing PHASE 1 (ListDirectory + ReadLocalFile). Premature writes are forbidden.
-7. When SearchDockerError returns advice, you MUST apply that advice exactly before any new VerifyBuild.
-8. You MUST NOT change the base image tag unless SearchDockerError or VerifyBuild explicitly indicates a tag or platform issue.
-9. If VerifyBuild fails more than twice for the same error message, stop guessing and escalate by re-running SearchDockerError with expanded context.
-10. You MUST include all required COPY source files verified by ListDirectory before VerifyBuild.
-11. You MUST NOT ignore or override SearchDockerError advice. If advice conflicts with your prior plan, follow the advice exactly.
-12. After any VerifyBuild failure, you MUST call SearchDockerError BEFORE the next WriteToFile. Do not emit WriteToFile until SearchDockerError has completed.
-13. You MUST NOT repeat the same SearchDockerError query twice. If the first advice failed, expand the context (add more error lines) before searching again.
-
-═══════════════════════════════════════════════════════════════════════════════
-COMMON FIX PATTERNS (Learn from these):
-═══════════════════════════════════════════════════════════════════════════════
-
-Error: "npm ERR! could not find package-lock.json"
-Fix: Use "npm install" instead of "npm ci", or "COPY package*.json ./"
-
-Error: "pip: No module named X" or missing system dependencies
-Fix: Install build deps: RUN apt-get update && apt-get install -y python3-dev gcc
-
-Error: "exec format error" or platform mismatch
-Fix: Use --platform=linux/amd64 in FROM statement
-
-Error: "COPY failed: file not found"
-Fix: Check actual file names with ListDirectory, fix COPY paths
-
-Error: "manifest unknown" or "not found" or "pull access denied"
-Fix: The base image tag does not exist. WriteToFile will block invalid tags and show
-     available alternatives — pick a valid tag from that list and rewrite the FROM line.
-
-Error: "EACCES" or "permission denied" during build
-Fix: Add RUN chmod +x <script> or ensure non-root user has permissions.
-
-Error: "rate limit exceeded" or "too many requests"
-Fix: Add a short sleep/retry mechanism or switch to a different registry mirror.
-
-Error: "no space left on device"
-Fix: Clean up intermediate layers with RUN apt-get clean && rm -rf /var/lib/apt/lists/*
-
-Error: "unknown instruction" or "syntax error" or "dockerfile parse error"
-Fix: Re-read the exact line number from the error. Ensure each instruction starts with a valid
-     Dockerfile keyword (FROM, RUN, COPY, ADD, ENV, EXPOSE, CMD, ENTRYPOINT, WORKDIR, ARG, LABEL).
-     No shell syntax, no comments inside instructions, no trailing backslash on last RUN line.
-
-Error: "COPY failed" or "file not found" or "no such file or directory" in COPY/ADD
-Fix: Run ListDirectory again to confirm the exact file path. COPY paths are relative to the build
-     context root. Do NOT assume subdirectory structure — verify with ListDirectory first.
-     Only include COPY instructions for files confirmed to exist.
-
-Error: unknown error / no clear build stage in failure
-Fix: Call SearchDockerError with the FULL last 20 lines of VerifyBuild output as agent_context.
-     Do not truncate the error. If SearchDockerError returns no advice, try a broader error_keywords.
-
-═══════════════════════════════════════════════════════════════════════════════
-MULTI-MODULE JAVA PROJECTS (Maven/Gradle):
-═══════════════════════════════════════════════════════════════════════════════
-
-When the classification shows is_monorepo=true with Maven/Gradle:
-1. Use FindFiles or ListDirectory to map the module structure (find pom.xml files)
-2. The ROOT pom.xml is usually an aggregator — it orchestrates, it does NOT produce a JAR
-3. Build with: mvn package -DskipTests -pl <target-module> -am
-   - -pl <module>: build specific module
-   - -am: also make dependencies (resolves SNAPSHOT versions)
-4. NEVER try to mvn install first then build separately — SNAPSHOT jars only exist in reactor
-5. For the Dockerfile, copy the ENTIRE project, build with mvn, then copy out the target JAR
-
-═══════════════════════════════════════════════════════════════════════════════
-RECOVERY MODE (Triggered after 2 consecutive VerifyBuild failures):
-═══════════════════════════════════════════════════════════════════════════════
-1. Summarize last two error messages and your last Dockerfile state.
-2. Call SearchDockerError with combined context.
-3. Apply the returned fix exactly.
-4. VerifyBuild again.
-5. Do NOT attempt manual guessing or random base image changes.
-
-═══════════════════════════════════════════════════════════════════════════════
+RULES:
+1. You MUST call VerifyBuild. Final Answer may ONLY report success if the last VerifyBuild returned SUCCESS.
+2. When VerifyBuild fails, call SearchDockerError IMMEDIATELY before any WriteToFile. Apply its advice exactly.
+3. Complete step 1 (ANALYZE) before writing a Dockerfile. Confirm all COPY source paths via ListDirectory.
+4. Do not repeat the same SearchDockerError query. If advice fails, expand context before searching again.
+5. Do not change the base image tag unless SearchDockerError or VerifyBuild explicitly indicates a tag/platform issue.
 
 Use the following format:
 
@@ -352,39 +228,12 @@ Observation: the result of the action
 Thought: I now know the final answer
 Final Answer: the final answer to the original input question
 
-CRITICAL OUTPUT RULES:
+OUTPUT RULES:
 1. You can ONLY output "Thought:", "Action:", "Action Input:", or "Final Answer:"
-2. You must NEVER write "Observation:" - the system adds that automatically after your Action runs
-3. Each response must contain EXACTLY ONE action - never chain multiple actions together
-4. Stop immediately after writing "Action Input:" - do not continue writing
-
-FINAL ANSWER FORMAT:
-When VerifyBuild returns SUCCESS in the Observation, your NEXT response must be:
-
-Thought: VerifyBuild returned SUCCESS.
-Final Answer: Successfully created Dockerfile for [repo-name]. Build verified and smoke test passed.
-
-Keep it to ONE sentence. DO NOT write lengthy documentation after success.
-
-IMPORTANT:
-1. To create a file, you MUST use the WriteToFile tool.
-2. You MUST verify your work with VerifyBuild before finishing.
-3. If VerifyBuild fails, you MUST research and fix it.
-4. Your Final Answer should be CONCISE (1 sentence) after VerifyBuild SUCCESS.
-5. Every Action MUST be immediately followed by "Action Input:" on the next line
-6. You can only output ONE action per response, then you must wait for the system to provide the Observation
-
-REMINDER:
-- Never assume the base image or dependency versions; derive them from project files or verified SearchDockerError results.
-- Always prefer explicit COPY paths confirmed by ListDirectory.
-- If you encounter repeated build failures, summarize the last two error messages before calling SearchDockerError again.
-
-FORMAT EXAMPLE (follow this EXACTLY):
-Thought: I need to check the project structure
-Action: ListDirectory
-Action Input: {{"directory":"."}}
-
-(then STOP and wait for Observation)
+2. You must NEVER write "Observation:" - the system adds that automatically
+3. Each response must contain EXACTLY ONE action - never chain multiple actions
+4. Stop immediately after "Action Input:" - do not continue writing
+5. After VerifyBuild SUCCESS, give a ONE sentence Final Answer
 
 Begin!
 
