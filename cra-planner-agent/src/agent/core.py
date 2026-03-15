@@ -138,7 +138,9 @@ def create_learner_agent(
 
     This agent is NOT scripted. It receives a Goal and Context, and uses tools to achieve it.
     """
-    load_dotenv()
+    # Load .env deterministically from repo root regardless of current working directory
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    load_dotenv(dotenv_path=os.path.join(repo_root, ".env"), override=False)
     
     # 2. Config
     api_key = os.getenv("AZURE_OPENAI_API_KEY")

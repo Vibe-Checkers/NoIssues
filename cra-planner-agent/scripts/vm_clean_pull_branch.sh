@@ -53,11 +53,14 @@ git -C "/home/${SSH_USER}/NoIssues" checkout "$BRANCH"
 git -C "/home/${SSH_USER}/NoIssues" reset --hard "origin/$BRANCH"
 
 # venv + deps for cra-planner-agent
-cd "/home/${SSH_USER}/NoIssues/cra-planner-agent"
+AGENT_DIR="/home/${SSH_USER}/NoIssues/cra-planner-agent"
+[ -d "$AGENT_DIR" ] || { echo "Missing agent dir: $AGENT_DIR" >&2; exit 21; }
+cd "$AGENT_DIR"
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
+[ -x "$AGENT_DIR/.venv/bin/python" ] || { echo "Missing venv python" >&2; exit 22; }
 
 echo "READY"
 EOSSH
@@ -73,4 +76,3 @@ done < "$INVENTORY_FILE"
 echo "Prepared OK: $ok"
 echo "Prepared FAIL: $fail"
 [[ $fail -eq 0 ]]
-

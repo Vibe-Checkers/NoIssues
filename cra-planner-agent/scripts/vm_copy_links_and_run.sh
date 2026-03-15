@@ -9,6 +9,7 @@ set -euo pipefail
 INVENTORY_FILE="${INVENTORY_FILE:-$(dirname "$0")/vm_inventory.tsv}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/noissues-vms}"
 LOCAL_LINKS_FILE="${LOCAL_LINKS_FILE:-/Users/afikbae/Clones/capstone/NoIssues/cra-planner-agent/library_links.txt}"
+LOCAL_ENV_FILE="${LOCAL_ENV_FILE:-/Users/afikbae/Clones/capstone/NoIssues/cra-planner-agent/.env}"
 WORKERS="${WORKERS:-1}"
 PER_REPO_TIMEOUT_SECONDS="${PER_REPO_TIMEOUT_SECONDS:-7200}"
 RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -16,6 +17,7 @@ RUN_STAMP="${RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ -f "$INVENTORY_FILE" ]] || { echo "Missing inventory file: $INVENTORY_FILE" >&2; exit 1; }
 [[ -f "$SSH_KEY" ]] || { echo "Missing SSH key: $SSH_KEY" >&2; exit 1; }
 [[ -f "$LOCAL_LINKS_FILE" ]] || { echo "Missing local links file: $LOCAL_LINKS_FILE" >&2; exit 1; }
+[[ -f "$LOCAL_ENV_FILE" ]] || { echo "Missing local env file: $LOCAL_ENV_FILE" >&2; exit 1; }
 
 ok=0
 fail=0
@@ -27,6 +29,13 @@ while IFS=$'\t' read -r vm_name vm_ip ssh_user slot remote_repos_file; do
   if ! scp -q -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
       "$LOCAL_LINKS_FILE" "$ssh_user@$vm_ip:$remote_repos_file"; then
     echo "[ERROR] failed to copy links file to $vm_name"
+    ((fail+=1)); echo; continue
+  fi
+
+  AGENT_DIR="/home/${ssh_user}/NoIssues/cra-planner-agent"
+  if ! scp -q -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+      "$LOCAL_ENV_FILE" "$ssh_user@$vm_ip:$AGENT_DIR/.env"; then
+    echo "[ERROR] failed to copy .env to $vm_name"
     ((fail+=1)); echo; continue
   fi
 
@@ -43,6 +52,10 @@ AGENT_DIR="/home/${SSH_USER}/NoIssues/cra-planner-agent"
 
 cd "$AGENT_DIR"
 pkill -f 'parallel_empirical_test.py' || true
+
+set -a
+. "$AGENT_DIR/.env"
+set +a
 
 echo "$RUN_STAMP" > "/home/${SSH_USER}/vmtest-run-id.txt"
 echo "=== RUN_STAMP: $RUN_STAMP ===" > "/home/${SSH_USER}/vmtest-run.log"
@@ -71,4 +84,3 @@ echo "Run stamp: $RUN_STAMP"
 echo "Started OK: $ok"
 echo "Started FAIL: $fail"
 [[ $fail -eq 0 ]]
-
