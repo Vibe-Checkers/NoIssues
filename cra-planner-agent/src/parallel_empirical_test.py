@@ -24,6 +24,7 @@ import traceback
 import concurrent.futures
 import gc
 import shutil
+import tempfile
 import ssl
 import certifi
 import re
@@ -637,6 +638,7 @@ class ParallelEmpiricalTester:
         try:
             thread_id = threading.get_ident()
             test_start_time = time.time()
+            repo_path = None
 
             self.log(repo_name, f"[Task {worker_id}] Starting test", to_console=True)
 
@@ -648,11 +650,27 @@ class ParallelEmpiricalTester:
                 import subprocess
                 slug = repo_slug(url)
                 target = Path(target_base) / slug
-                if target.exists():
-                    import shutil
-                    shutil.rmtree(target)
-                target.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["git", "clone", "--depth", "1", "--recursive", url, str(target)], check=True, capture_output=True)
+
+                # Clone into an isolated temp directory first, then move into place.
+                # This reduces race windows around delete/recreate of the final path.
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp_clone_dir = Path(tempfile.mkdtemp(prefix=f"{slug}-", dir=str(target.parent)))
+                try:
+                    subprocess.run(
+                        ["git", "clone", "--depth", "1", "--recursive", url, str(tmp_clone_dir)],
+                        check=True,
+                        capture_output=True
+                    )
+
+                    if target.exists():
+                        import shutil
+                        shutil.rmtree(target, ignore_errors=True)
+
+                    tmp_clone_dir.rename(target)
+                except Exception:
+                    shutil.rmtree(tmp_clone_dir, ignore_errors=True)
+                    raise
+
                 return str(target)
 
             try:
@@ -679,15 +697,10 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
                 classification = None
 
-            # Early skip for documentation-only repos
+            # Do NOT skip documentation-only repositories.
+            # They must still go through full processing and receive terminal success/failure.
             if classification and classification.get("repo_type") == "documentation_only":
-                self.log(repo_name, "Documentation-only repo — skipping build", to_console=True)
-                result["success"] = False
-                result["skip_reason"] = "documentation_only"
-                self.update_progress(repo_name, "⊘ Skipped (docs-only)")
-                self._aggressive_cleanup(repo_name, repo_path, result)
-                self._save_incremental_results(result)
-                return result
+                self.log(repo_name, "Documentation-only repo detected — continuing full agent flow (no skip)", to_console=True)
 
             # Step 1.6: Check for existing valid Dockerfile (Pre-check)
             if self._check_existing_dockerfile(repo_path, repo_name, slug, result):
@@ -714,7 +727,7 @@ class ParallelEmpiricalTester:
 
             # Step 2: Run Learner Agent with Validation Callback
             from agent.workflow import run_learner_agent
-            from agent.tools import FormattedOutputHandler
+            from agent.tools import FormattedOutputHandler, VerifySuccessException
 
             # Setup per-repo logging with timestamp
             ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -868,31 +881,31 @@ class ParallelEmpiricalTester:
                         if verify_log: aux_logs.append(verify_log)
                         
                         if verification.get("success"):
-                             self.log(repo_name, "[VerifyBuild] ✓ Smoke test PASSED", to_console=False)
+                            self.log(repo_name, "[VerifyBuild] ✓ Smoke test PASSED", to_console=False)
 
-                             # 4. Validate Dockerfile Suitability with LLM
-                             self.log(repo_name, "[VerifyBuild] Validating Dockerfile suitability", to_console=False)
-                             validator = LLMDockerfileValidator()
-                             suitability, suitability_log = validator.validate_dockerfile_suitability(
-                                 df_content,
-                                 repo_path.split('/')[-1],
-                                 build_success=True,
-                                 smoke_test_passed=True
-                             )
-                             aux_logs.append(suitability_log)
+                            # 4. Validate Dockerfile Suitability with LLM
+                            self.log(repo_name, "[VerifyBuild] Validating Dockerfile suitability", to_console=False)
+                            validator = LLMDockerfileValidator()
+                            suitability, suitability_log = validator.validate_dockerfile_suitability(
+                                df_content,
+                                repo_path.split('/')[-1],
+                                build_success=True,
+                                smoke_test_passed=True
+                            )
+                            aux_logs.append(suitability_log)
 
-                             _per_call_tester.cleanup_image(verify_image)
+                            _per_call_tester.cleanup_image(verify_image)
 
-                             # Fix 1A: embed verified Dockerfile content so workflow.py can
-                             # restore it if the agent writes cosmetic changes after this point.
-                             try:
-                                 with open(dockerfile_path, 'r', encoding='utf-8') as _df:
-                                     _verified_snapshot = _df.read()
-                             except Exception:
-                                 _verified_snapshot = None
+                            # Fix 1A: embed verified Dockerfile content so workflow.py can
+                            # restore it if the agent writes cosmetic changes after this point.
+                            try:
+                                with open(dockerfile_path, 'r', encoding='utf-8') as _df:
+                                    _verified_snapshot = _df.read()
+                            except Exception:
+                                _verified_snapshot = None
 
-                             # Return response WITHOUT revealing smoke test command
-                             success_payload = {
+                            # Return response WITHOUT revealing smoke test command
+                            success_payload = {
                                 "status": "success",
                                 "message": "✓ Docker build succeeded and container is functional.",
                                 "verification": {
@@ -904,10 +917,12 @@ class ParallelEmpiricalTester:
                                     "concerns": suitability.get("concerns", [])
                                 },
                                 # "auxiliary_logs": aux_logs # Removed to save context
-                             }
-                             if _verified_snapshot is not None:
-                                 success_payload["_verified_dockerfile_snapshot"] = _verified_snapshot
-                             return json.dumps(success_payload, indent=2)
+                            }
+                            if _verified_snapshot is not None:
+                                success_payload["_verified_dockerfile_snapshot"] = _verified_snapshot
+                            # Short-circuit the agent loop immediately on verification success.
+                            # workflow.py catches this and finalizes the attempt.
+                            raise VerifySuccessException(success_payload)
                         else:
                             self.log(repo_name, "[VerifyBuild] ✗ Smoke test FAILED", to_console=False)
 
@@ -1477,6 +1492,7 @@ class ParallelEmpiricalTester:
         """
         # Set total count for progress tracking
         self.total_count = len(repo_urls)
+        per_repo_timeout_seconds = int(os.getenv("PER_REPO_TIMEOUT_SECONDS", "7200"))
 
         print("="*80)
         print(f"PARALLEL EMPIRICAL TESTING - {len(repo_urls)} repositories")
@@ -1524,10 +1540,36 @@ class ParallelEmpiricalTester:
             }
 
             # Wait for completion
-            for future in concurrent.futures.as_completed(future_to_repo):
+            for future, repo_url in future_to_repo.items():
                 repo_url = future_to_repo[future]
                 try:
-                    future.result()
+                    future.result(timeout=per_repo_timeout_seconds)
+                except concurrent.futures.TimeoutError:
+                    repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
+                    timeout_result = {
+                        "repo_url": repo_url,
+                        "repo_slug": repo_slug(repo_url),
+                        "repo_name": repo_name,
+                        "timestamp": datetime.now().isoformat(),
+                        "success": False,
+                        "error_type": "REPO_TIMEOUT",
+                        "error": f"Repository exceeded timeout budget of {per_repo_timeout_seconds}s",
+                        "total_duration_seconds": per_repo_timeout_seconds,
+                        "dockerfile_test": {
+                            "success": False,
+                            "stage": "REPO_TIMEOUT",
+                            "final_result": {
+                                "stage": "REPO_TIMEOUT",
+                                "error": f"Exceeded timeout budget of {per_repo_timeout_seconds}s"
+                            }
+                        }
+                    }
+                    with self.results_lock:
+                        self.results.append(timeout_result)
+                        self._save_incremental_results(timeout_result)
+                    self.update_progress(repo_name, "✗ Failed (repo timeout)")
+                    future.cancel()
+                    print(f"[TIMEOUT] {repo_url} exceeded {per_repo_timeout_seconds}s")
                 except Exception as e:
                     print(f"[ERROR] Future raised exception for {repo_url}: {e}")
 

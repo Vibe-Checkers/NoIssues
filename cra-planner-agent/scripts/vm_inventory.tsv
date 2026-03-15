@@ -1,0 +1,11 @@
+# vm_name	ip	ssh_user	slot	remote_repos_file
+noissues-vm01	20.7.162.209	azureuser	gpt-5-nano	/home/azureuser/vmtest-repos.txt
+noissues-vm02	104.46.126.89	azureuser	gpt-5-nano-slot2	/home/azureuser/vmtest-repos.txt
+noissues-vm03	52.179.215.176	azureuser	gpt-5-nano-slot3	/home/azureuser/vmtest-repos.txt
+noissues-vm04	20.10.32.126	azureuser	gpt-5-nano-slot4	/home/azureuser/vmtest-repos.txt
+noissues-vm05	20.1.168.131	azureuser	gpt-5-nano-slot5	/home/azureuser/vmtest-repos.txt
+noissues-vm06	20.110.202.1	azureuser	gpt-5-nano-slot6	/home/azureuser/vmtest-repos.txt
+noissues-vm07	20.110.170.77	azureuser	gpt-5-nano-slot7	/home/azureuser/vmtest-repos.txt
+noissues-vm08	20.12.25.182	azureuser	gpt-5-nano-slot8	/home/azureuser/vmtest-repos.txt
+noissues-vm09	20.114.237.41	azureuser	gpt-5-nano-slot9	/home/azureuser/vmtest-repos.txt
+noissues-vm10	20.110.75.114	azureuser	gpt-5-nano-slot10	/home/azureuser/vmtest-repos.txt

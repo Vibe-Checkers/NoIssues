@@ -15,6 +15,14 @@ from langchain_core.tools import StructuredTool
 
 logger = logging.getLogger(__name__)
 
+
+class VerifySuccessException(Exception):
+    """Raised to short-circuit the agent loop immediately after VerifyBuild success."""
+
+    def __init__(self, payload: Optional[Dict[str, Any]] = None):
+        super().__init__("VERIFY_BUILD_SUCCESS")
+        self.payload = payload or {}
+
 # ============================================================================
 # Shared Resources (HTTP Client)
 # ============================================================================

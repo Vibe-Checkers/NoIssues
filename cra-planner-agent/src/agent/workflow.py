@@ -4,14 +4,64 @@ import re as _re
 import json
 import logging
 import time
+import random
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from .core import create_learner_agent
 from langchain_core.messages import SystemMessage, HumanMessage
 from .preparation import build_initial_context
+from .tools import VerifySuccessException
 
 logger = logging.getLogger(__name__)
+
+
+def _invoke_with_429_backoff(executor, payload: Dict[str, Any], config: Dict[str, Any], max_attempts: int = 4):
+    """Invoke executor with bounded exponential backoff for transient 429/rate-limit failures."""
+    base_delay = 2.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return executor.invoke(payload, config=config)
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limited = (
+                "ratelimit" in msg
+                or "rate limit" in msg
+                or "429" in msg
+                or "too many requests" in msg
+            )
+            if (not is_rate_limited) or attempt >= max_attempts:
+                raise
+
+            sleep_s = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            logger.warning(
+                f"LLM rate-limited (attempt {attempt}/{max_attempts}); retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
+
+
+def _llm_invoke_with_429_backoff(llm, messages: List[Any], max_attempts: int = 4):
+    """LLM invoke helper with bounded exponential backoff for transient 429/rate-limit failures."""
+    base_delay = 2.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return llm.invoke(messages)
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limited = (
+                "ratelimit" in msg
+                or "rate limit" in msg
+                or "429" in msg
+                or "too many requests" in msg
+            )
+            if (not is_rate_limited) or attempt >= max_attempts:
+                raise
+
+            sleep_s = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            logger.warning(
+                f"Lesson summarization rate-limited (attempt {attempt}/{max_attempts}); retrying in {sleep_s:.1f}s"
+            )
+            time.sleep(sleep_s)
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +288,7 @@ def extract_technical_lesson(
             'Format: "Previous failure caused by [Cause]. Fix: [Action]."\n\n'
             f"CONTEXT:\n{raw_context[:4000]}"
         )
-        response = llm.invoke([
+        response = _llm_invoke_with_429_backoff(llm, [
             SystemMessage(content="You are a technical summarizer. Be extremely concise. Focus on the FIX."),
             HumanMessage(content=summary_prompt)
         ])
@@ -452,10 +502,30 @@ Begin!
         try:
             active_handler = callback_handler if callback_handler else handler
 
-            result = executor.invoke(
-                {"input": goal_prompt},
-                config={"callbacks": [active_handler]}
-            )
+            try:
+                result = _invoke_with_429_backoff(
+                    executor,
+                    {"input": goal_prompt},
+                    {"callbacks": [active_handler]}
+                )
+            except VerifySuccessException as _verify_success:
+                success_payload = dict(_verify_success.payload or {})
+                snapshot = success_payload.get("_verified_dockerfile_snapshot")
+                if snapshot:
+                    try:
+                        dockerfile_path.write_text(snapshot, encoding='utf-8')
+                    except Exception as _write_err:
+                        logger.warning(f"Could not restore verified snapshot from short-circuit payload: {_write_err}")
+
+                logger.info("✓ VerifyBuild short-circuit success received. Ending attempt immediately.")
+                return {
+                    "status": "success",
+                    "report_dir": str(report_dir),
+                    "dockerfile": str(dockerfile_path),
+                    "attempts": attempt,
+                    "language": language,
+                    "note": "VerifyBuild success short-circuit"
+                }
 
             output = result.get("output", "")
             intermediate_steps = result.get("intermediate_steps", [])
