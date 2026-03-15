@@ -41,8 +41,12 @@ while IFS=$'\t' read -r vm_name vm_ip ssh_user slot remote_repos_file; do
   fi
 
   # 2) install base packages + clone repo fresh
-  if ! ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=25 "$ssh_user@$vm_ip" "bash -s" <<EOSSH; then
+  if ! ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=25 "$ssh_user@$vm_ip" \
+      "bash -s -- '$ssh_user' '$REPO_BRANCH' '$REPO_URL'" <<'EOSSH'; then
 set -euo pipefail
+SSH_USER="$1"
+REPO_BRANCH="$2"
+REPO_URL="$3"
 if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; else SUDO=""; fi
 
 
@@ -51,8 +55,8 @@ if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; else SUDO=""; fi
 $SUDO apt-get update -y
 $SUDO apt-get install -y python3 python3-venv python3-pip git curl
 
-rm -rf /home/$ssh_user/NoIssues
-git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" /home/$ssh_user/NoIssues
+rm -rf "/home/${SSH_USER}/NoIssues"
+git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "/home/${SSH_USER}/NoIssues"
 EOSSH
     echo "[ERROR] clone/setup failed on $vm_name"
     ((fail+=1)); echo; continue
@@ -90,4 +94,3 @@ echo "=================================================="
 if [[ $fail -gt 0 ]]; then
   exit 2
 fi
-
