@@ -35,8 +35,8 @@ done
 print_once() {
   local ok=0 bad=0
 
-  printf "%-16s %-15s %-7s %-14s %-8s %-8s %-9s %-9s %s\n" \
-    "VM" "IP" "SSH" "RUN_ID" "MATCH" "PROC" "SUCCESS" "FAIL" "LAST_LOG"
+  printf "%-16s %-15s %-7s %-14s %-8s %-8s %-8s %-9s %-9s %s\n" \
+    "VM" "IP" "SSH" "RUN_ID" "MATCH" "PROC" "LOG" "SUCCESS" "FAIL" "LAST_LOG"
   printf '%s\n' "---------------------------------------------------------------------------------------------------------------------"
 
   while IFS=$'\t' read -r vm_name vm_ip ssh_user slot remote_repos_file; do
@@ -45,22 +45,25 @@ print_once() {
     out="$(ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$ssh_user@$vm_ip" '
 set +e
 RUN_ID=$(cat /home/azureuser/vmtest-run-id.txt 2>/dev/null || echo none)
-if pgrep -f "src/parallel_empirical_test.py" >/dev/null 2>&1; then PROC=yes; else PROC=no; fi
+if pgrep -af "[p]arallel_empirical_test.py" >/dev/null 2>&1; then PROC=yes; else PROC=no; fi
 if [ -f /home/azureuser/vmtest-run.log ]; then
+  LOG=yes
   SUCCESS=$(grep -c "SUCCESS\|✅" /home/azureuser/vmtest-run.log 2>/dev/null || echo 0)
   FAIL=$(grep -c "FAILED\|FAILURE\|ERROR\|❌" /home/azureuser/vmtest-run.log 2>/dev/null || echo 0)
   LAST=$(tail -n 1 /home/azureuser/vmtest-run.log 2>/dev/null | tr "\t" " " | tr -d "\r" | cut -c1-70)
 else
+  LOG=no
   SUCCESS=0
   FAIL=0
   LAST="-"
 fi
-echo "ok|$RUN_ID|$PROC|$SUCCESS|$FAIL|$LAST"
+echo "ok|$RUN_ID|$PROC|$LOG|$SUCCESS|$FAIL|$LAST"
 ' 2>/dev/null || echo "ssh_fail|none|no|0|0|-")"
 
     state="${out%%|*}"; rest="${out#*|}"
     run_id="${rest%%|*}"; rest="${rest#*|}"
     proc="${rest%%|*}"; rest="${rest#*|}"
+    log_exists="${rest%%|*}"; rest="${rest#*|}"
     success="${rest%%|*}"; rest="${rest#*|}"
     fail_count="${rest%%|*}"; last_log="${rest#*|}"
 
@@ -74,10 +77,10 @@ echo "ok|$RUN_ID|$PROC|$SUCCESS|$FAIL|$LAST"
       ssh_state="fail"
     fi
 
-    printf "%-16s %-15s %-7s %-14s %-8s %-8s %-9s %-9s %s\n" \
-      "$vm_name" "$vm_ip" "$ssh_state" "$run_id" "$match" "$proc" "$success" "$fail_count" "$last_log"
+    printf "%-16s %-15s %-7s %-14s %-8s %-8s %-8s %-9s %-9s %s\n" \
+      "$vm_name" "$vm_ip" "$ssh_state" "$run_id" "$match" "$proc" "$log_exists" "$success" "$fail_count" "$last_log"
 
-    if [[ "$ssh_state" == "ok" && "$proc" == "yes" && "$match" != "MISMATCH" ]]; then
+    if [[ "$ssh_state" == "ok" && "$proc" == "yes" && "$log_exists" == "yes" && "$match" != "MISMATCH" ]]; then
       ((ok+=1))
     else
       ((bad+=1))
