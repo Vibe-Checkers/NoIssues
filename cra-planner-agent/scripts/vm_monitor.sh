@@ -42,15 +42,23 @@ print_once() {
   while IFS=$'\t' read -r vm_name vm_ip ssh_user slot remote_repos_file; do
     [[ -z "${vm_name:-}" || "${vm_name:0:1}" == "#" ]] && continue
 
-    out="$(ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$ssh_user@$vm_ip" '
+    out="$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$ssh_user@$vm_ip" "bash -s -- '$ssh_user'" <<'EOSSH'
 set +e
-RUN_ID=$(cat /home/azureuser/vmtest-run-id.txt 2>/dev/null || echo none)
-if pgrep -af "[p]arallel_empirical_test.py" >/dev/null 2>&1; then PROC=yes; else PROC=no; fi
-if [ -f /home/azureuser/vmtest-run.log ]; then
+SSH_USER="$1"
+RUN_ID=$(cat "/home/${SSH_USER}/vmtest-run-id.txt" 2>/dev/null || echo none)
+RUN_PID=$(cat "/home/${SSH_USER}/vmtest-run.pid" 2>/dev/null || echo none)
+if [[ "$RUN_PID" != "none" ]] && kill -0 "$RUN_PID" 2>/dev/null; then
+  PROC=yes
+else
+  PROC=no
+fi
+if [ -f "/home/${SSH_USER}/vmtest-run.log" ]; then
   LOG=yes
-  SUCCESS=$(grep -c "SUCCESS\|✅" /home/azureuser/vmtest-run.log 2>/dev/null || echo 0)
-  FAIL=$(grep -c "FAILED\|FAILURE\|ERROR\|❌" /home/azureuser/vmtest-run.log 2>/dev/null || echo 0)
-  LAST=$(tail -n 1 /home/azureuser/vmtest-run.log 2>/dev/null | tr "\t" " " | tr -d "\r" | cut -c1-70)
+  SUCCESS=$(grep -Ec "SUCCESS|✅" "/home/${SSH_USER}/vmtest-run.log" 2>/dev/null || true)
+  FAIL=$(grep -Ec "FAILED|FAILURE|ERROR|❌" "/home/${SSH_USER}/vmtest-run.log" 2>/dev/null || true)
+  SUCCESS=${SUCCESS:-0}
+  FAIL=${FAIL:-0}
+  LAST=$(tail -n 1 "/home/${SSH_USER}/vmtest-run.log" 2>/dev/null | tr "\t" " " | tr -d "\r" | cut -c1-70)
 else
   LOG=no
   SUCCESS=0
@@ -58,7 +66,8 @@ else
   LAST="-"
 fi
 echo "ok|$RUN_ID|$PROC|$LOG|$SUCCESS|$FAIL|$LAST"
-' 2>/dev/null || echo "ssh_fail|none|no|0|0|-")"
+EOSSH
+2>/dev/null || echo "ssh_fail|none|no|no|0|0|-")"
 
     state="${out%%|*}"; rest="${out#*|}"
     run_id="${rest%%|*}"; rest="${rest#*|}"

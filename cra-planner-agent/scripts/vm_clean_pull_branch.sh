@@ -22,7 +22,7 @@ while IFS=$'\t' read -r vm_name vm_ip ssh_user slot remote_repos_file; do
   [[ -z "${vm_name:-}" || "${vm_name:0:1}" == "#" ]] && continue
   echo "=== [$vm_name] $vm_ip ($slot) ==="
 
-  if ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=20 "$ssh_user@$vm_ip" \
+  if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=20 "$ssh_user@$vm_ip" \
     "bash -s -- '$ssh_user' '$REPO_URL' '$BRANCH'" <<'EOSSH'; then
 set -euo pipefail
 SSH_USER="$1"
@@ -33,7 +33,7 @@ if command -v sudo >/dev/null 2>&1; then SUDO="sudo -n"; else SUDO=""; fi
 
 # clean processes + logs
 pkill -f 'parallel_empirical_test.py' || true
-rm -f "/home/${SSH_USER}/vmtest-run.log" "/home/${SSH_USER}/vmtest-run-id.txt"
+rm -f "/home/${SSH_USER}/vmtest-run.log" "/home/${SSH_USER}/vmtest-run-id.txt" "/home/${SSH_USER}/vmtest-run.pid"
 
 # lightweight docker clean
 docker rm -f $(docker ps -aq) 2>/dev/null || true
