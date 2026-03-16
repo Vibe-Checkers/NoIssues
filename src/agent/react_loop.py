@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from langgraph.prebuilt import create_react_agent
+from langgraph.errors import GraphRecursionError
 from langchain_core.tools import StructuredTool
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
@@ -175,87 +176,96 @@ def run_iteration(
     # Convert tools to LangChain StructuredTool format
     lc_tools = _to_langchain_tools(tools)
 
-    try:
-        # Create the react agent graph
-        agent = create_react_agent(
-            model=llm.nano,
-            tools=lc_tools,
-            prompt=prompt,
-        )
+    # Create the react agent graph
+    agent = create_react_agent(
+        model=llm.nano,
+        tools=lc_tools,
+        prompt=prompt,
+    )
 
-        # Invoke with recursion limit (each tool call = 2 graph steps: AI + tool)
-        result = agent.invoke(
+    step_num = 0
+    # tool_call_id -> {name, args, thought, started_at}
+    pending: dict[str, dict] = {}
+
+    try:
+        for chunk in agent.stream(
             {"messages": [HumanMessage(
                 content="Generate a Dockerfile for this repository. Follow the workflow above.",
             )]},
             config={"recursion_limit": max_steps * 2 + 1},
+            stream_mode="updates",
+        ):
+            # Agent node: LLM decided to call tool(s)
+            if "agent" in chunk:
+                for msg in chunk["agent"].get("messages", []):
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            pending[tc["id"]] = {
+                                "name": tc["name"],
+                                "args": tc.get("args", {}),
+                                "thought": msg.content or "",
+                                "started_at": datetime.now(timezone.utc),
+                            }
+
+            # Tools node: tool finished executing
+            elif "tools" in chunk:
+                for msg in chunk["tools"].get("messages", []):
+                    if not isinstance(msg, ToolMessage):
+                        continue
+                    tc = pending.pop(msg.tool_call_id, None)
+                    if tc is None:
+                        continue
+
+                    step_num += 1
+                    raw_output = msg.content or ""
+                    output, sum_pt, sum_ct = summarize_output(raw_output, llm=llm)
+
+                    step = StepRecord(
+                        step_number=step_num,
+                        started_at=tc["started_at"],
+                        finished_at=datetime.now(timezone.utc),
+                        thought=tc["thought"],
+                        tool_name=tc["name"],
+                        tool_input=tc["args"] if isinstance(tc["args"], dict) else {"raw": str(tc["args"])},
+                        tool_output_raw=raw_output,
+                        tool_output=output,
+                        was_summarized=output != raw_output,
+                        summary_prompt_tokens=sum_pt,
+                        summary_completion_tokens=sum_ct,
+                    )
+                    iteration.steps.append(step)
+                    db.write_step(iteration.id, step)
+
+                    iteration.prompt_tokens += step.prompt_tokens + sum_pt
+                    iteration.completion_tokens += step.completion_tokens + sum_ct
+
+                    tool_name = tc["name"]
+                    if tool_name == "VerifyBuild":
+                        iteration.verify_attempted = True
+                        if "accepted" in raw_output.lower():
+                            iteration.verify_result = "accepted"
+                            iteration.dockerfile_generated = True
+                            break  # stop consuming the stream — we're done
+                        elif "rejected" in raw_output.lower():
+                            iteration.verify_result = "rejected"
+                        elif "build_failed" in raw_output.lower():
+                            iteration.verify_result = "build_failed"
+                        elif "smoke_failed" in raw_output.lower():
+                            iteration.verify_result = "smoke_failed"
+
+                    if tool_name == "WriteFile" and "Dockerfile" in str(tc["args"].get("path", "")):
+                        iteration.dockerfile_generated = True
+                else:
+                    continue
+                break  # inner break propagates out of outer for-loop
+
+    except GraphRecursionError:
+        logger.warning(
+            "Iteration %d hit recursion limit after %d steps (steps already saved)",
+            iteration.iteration_number, step_num,
         )
-
-        messages = result.get("messages", [])
-
-        # Extract steps from the message history
-        # Each step = one AIMessage with tool_calls + corresponding ToolMessage
-        step_num = 0
-        for i, msg in enumerate(messages):
-            if not isinstance(msg, AIMessage) or not msg.tool_calls:
-                continue
-
-            for tool_call in msg.tool_calls:
-                step_num += 1
-                tool_name = tool_call.get("name", "unknown")
-                tool_input = tool_call.get("args", {})
-                thought = msg.content if msg.content else ""
-
-                # Find the corresponding ToolMessage
-                raw_output = ""
-                tool_call_id = tool_call.get("id", "")
-                for later_msg in messages[i + 1:]:
-                    if (isinstance(later_msg, ToolMessage)
-                            and later_msg.tool_call_id == tool_call_id):
-                        raw_output = later_msg.content or ""
-                        break
-
-                # Summarize if needed
-                output, sum_pt, sum_ct = summarize_output(raw_output, llm=llm)
-                was_summarized = output != raw_output
-
-                step = StepRecord(
-                    step_number=step_num,
-                    thought=thought,
-                    tool_name=tool_name,
-                    tool_input=tool_input if isinstance(tool_input, dict) else {"raw": str(tool_input)},
-                    tool_output_raw=raw_output,
-                    tool_output=output,
-                    was_summarized=was_summarized,
-                    summary_prompt_tokens=sum_pt,
-                    summary_completion_tokens=sum_ct,
-                )
-                iteration.steps.append(step)
-                db.write_step(iteration.id, step)
-
-                # Track token usage
-                iteration.prompt_tokens += step.prompt_tokens + sum_pt
-                iteration.completion_tokens += step.completion_tokens + sum_ct
-
-                # Check for VerifyBuild acceptance
-                if tool_name == "VerifyBuild" and "accepted" in raw_output.lower():
-                    iteration.verify_attempted = True
-                    iteration.verify_result = "accepted"
-                    iteration.dockerfile_generated = True
-                elif tool_name == "VerifyBuild":
-                    iteration.verify_attempted = True
-                    if "rejected" in raw_output.lower():
-                        iteration.verify_result = "rejected"
-                    elif "build_failed" in raw_output.lower():
-                        iteration.verify_result = "build_failed"
-                    elif "smoke_failed" in raw_output.lower():
-                        iteration.verify_result = "smoke_failed"
-
-                if tool_name == "WriteFile" and "Dockerfile" in str(tool_input.get("path", "")):
-                    iteration.dockerfile_generated = True
-
     except Exception as e:
-        logger.error("Iteration %d failed with error: %s", iteration.iteration_number, e, exc_info=True)
+        logger.error("Iteration %d failed: %s", iteration.iteration_number, e, exc_info=True)
         iteration.error_message = str(e)
 
     # Finalize iteration
