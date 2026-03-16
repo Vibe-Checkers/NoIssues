@@ -10,9 +10,6 @@ build/
 venv/
 env/
 
-# Test results and generated files
-parallel
-
 # Cloned repositories (from testing)
 repos/
 cloned_repos/
