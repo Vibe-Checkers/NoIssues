@@ -444,11 +444,11 @@ A Dockerfile is NOT suitable if it:
             }, log_entry
 
 
-def estimate_build_timeout(repo_path: str, classification: dict = None) -> int:
+def estimate_build_timeout(repo_path: str, repo_profile: dict = None) -> int:
     """
     Choose a Docker build timeout based on project complexity signals.
 
-    Uses classification (T1) when available, falls back to filesystem heuristics.
+    Uses inferred profile when available, falls back to filesystem heuristics.
 
     Heuristics (independent of language detection, runs from the repo on disk):
       - Extreme monorepos (>5 Java modules OR >50K files): 1800s
@@ -457,11 +457,11 @@ def estimate_build_timeout(repo_path: str, classification: dict = None) -> int:
 
     Thread-safe: reads filesystem only, no shared state.
     """
-    # Classification-based fast path
-    if classification:
-        repo_type = classification.get("repo_type", "")
-        lang = classification.get("primary_language", "")
-        module_count = classification.get("module_count", 1)
+    # Profile-based fast path
+    if repo_profile:
+        repo_type = repo_profile.get("repo_type", "")
+        lang = repo_profile.get("primary_language", "")
+        module_count = repo_profile.get("module_count", 1)
 
         if repo_type == "documentation_only":
             return 120  # Should never build, but if it does, don't wait
@@ -664,30 +664,68 @@ class ParallelEmpiricalTester:
                 self.log(repo_name, f"Clone failed: {e}")
                 return result
 
-            # Step 1.5: Repository Classification (T1)
-            from agent.classification import RepoClassifier
+            # Step 1.5: Repository Characterization (7-dimension taxonomy)
+            from agent.taxonomy import RepositoryTaxonomyAnalyzer
             try:
-                classifier = RepoClassifier()
-                classification = classifier.classify(repo_path, repo_name)
-                result["classification"] = classification
+                taxonomy_analyzer = RepositoryTaxonomyAnalyzer()
+                taxonomy = taxonomy_analyzer.classify(repo_path, repo_name)
+                result["taxonomy"] = taxonomy
                 self.log(repo_name,
-                         f"Classified: {classification['repo_type']} "
-                         f"({classification['primary_language']}, "
-                         f"strategy={classification['verification_strategy']})",
+                         f"Taxonomy: domain={taxonomy.get('domain', 'unknown')}, "
+                         f"build_tool={taxonomy.get('build_tool', 'unknown')}, "
+                         f"repro={taxonomy.get('repro_support', 'unknown')}",
                          to_console=True)
             except Exception as e:
-                self.log(repo_name, f"Classification failed (proceeding without): {e}", to_console=True)
-                classification = None
+                self.log(repo_name, f"Taxonomy generation failed (proceeding without): {e}", to_console=True)
+                taxonomy = None
 
-            # Early skip for documentation-only repos
-            if classification and classification.get("repo_type") == "documentation_only":
-                self.log(repo_name, "Documentation-only repo — skipping build", to_console=True)
-                result["success"] = False
-                result["skip_reason"] = "documentation_only"
-                self.update_progress(repo_name, "⊘ Skipped (docs-only)")
-                self._aggressive_cleanup(repo_name, repo_path, result)
-                self._save_incremental_results(result)
-                return result
+            # Inferred profile for timeout and strategy-aware verification.
+            # This is derived from taxonomy + repo evidence (not a standalone startup classifier).
+            inferred_profile = {
+                "repo_type": "library",
+                "verification_strategy": "build_only",
+                "primary_language": "Unknown",
+                "build_system": (taxonomy or {}).get("build_tool", "unknown"),
+                "package_name": repo_name,
+                "binary_name": repo_name,
+                "library_name": repo_name,
+                "module_count": 1,
+            }
+            if taxonomy:
+                bt = taxonomy.get("build_tool", "none")
+                if bt in ("npm", "yarn", "pnpm"):
+                    inferred_profile.update({
+                        "primary_language": "JavaScript",
+                        "repo_type": "library",
+                        "verification_strategy": "import_test",
+                    })
+                elif bt == "pip":
+                    inferred_profile.update({
+                        "primary_language": "Python",
+                        "repo_type": "library",
+                        "verification_strategy": "import_test",
+                    })
+                elif bt in ("cargo", "go"):
+                    inferred_profile.update({
+                        "primary_language": "Rust" if bt == "cargo" else "Go",
+                        "repo_type": "cli_tool",
+                        "verification_strategy": "binary_run",
+                    })
+                elif bt in ("maven", "gradle"):
+                    inferred_profile.update({
+                        "primary_language": "Java",
+                        "repo_type": "library",
+                        "verification_strategy": "build_only",
+                    })
+                elif bt in ("cmake", "make", "meson"):
+                    inferred_profile.update({
+                        "primary_language": "C++" if bt == "cmake" else "C",
+                        "repo_type": "native_library",
+                        "verification_strategy": "link_test",
+                    })
+
+                if taxonomy.get("tooling_complexity") in ("multi_layer_toolchains", "mixed_languages_and_bindings"):
+                    inferred_profile["verification_strategy"] = "build_only"
 
             # Step 1.6: Check for existing valid Dockerfile (Pre-check)
             if self._check_existing_dockerfile(repo_path, repo_name, slug, result):
@@ -819,7 +857,7 @@ class ParallelEmpiricalTester:
 
                 # Fix 6: Adaptive timeout — create a fresh DockerBuildTester per call to
                 # avoid mutating shared state across concurrent workers.
-                _adaptive_timeout = estimate_build_timeout(repo_path, classification)
+                _adaptive_timeout = estimate_build_timeout(repo_path, inferred_profile)
                 self.log(repo_name, f"[VerifyBuild] Building Docker image (timeout={_adaptive_timeout}s)", to_console=False)
                 _per_call_tester = DockerBuildTester(timeout=_adaptive_timeout, serialize_builds=True)
 
@@ -845,14 +883,14 @@ class ParallelEmpiricalTester:
                         with open(dockerfile_path, 'r') as f:
                             df_content = f.read()
 
-                        # 1. Generate Command (strategy-aware when classification available)
+                        # 1. Generate Command (strategy-aware using inferred profile)
                         self.log(repo_name, "[VerifyBuild] Generating smoke test command via LLM", to_console=False)
-                        if classification:
+                        if inferred_profile:
                             from agent.verification_strategies import StrategyAwareVerifier
                             strategy_verifier = StrategyAwareVerifier()
                             test_cmd, cmd_log = strategy_verifier.generate_test_command(
-                                df_content, classification, repo_name=repo_path.split('/')[-1])
-                            self.log(repo_name, f"[VerifyBuild] Strategy: {classification.get('verification_strategy', 'unknown')}", to_console=False)
+                                df_content, inferred_profile, repo_name=repo_path.split('/')[-1])
+                            self.log(repo_name, f"[VerifyBuild] Strategy: {inferred_profile.get('verification_strategy', 'unknown')}", to_console=False)
                         else:
                             test_cmd, cmd_log = verifier.generate_verification_command(df_content, repo_path.split('/')[-1])
                         aux_logs.append(cmd_log)
@@ -1034,7 +1072,7 @@ class ParallelEmpiricalTester:
                 repo_path=repo_path,
                 repo_name=repo_name,
                 repo_url=repo_url,
-                repo_classification=classification,
+                repo_taxonomy=taxonomy,
                 max_retries=3,  # 3 attempts × 25 steps = 75 max tool calls
                 callback_handler=callback_handler,
                 validation_callback=validation_callback,

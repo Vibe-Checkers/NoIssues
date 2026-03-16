@@ -256,7 +256,7 @@ def run_learner_agent(
     repo_path: str,
     repo_name: str,
     repo_url: str,
-    repo_classification: dict = None,
+    repo_taxonomy: dict = None,
     max_retries: int = 3,
     max_iterations: int = 25,
     callback_handler=None,
@@ -308,22 +308,25 @@ def run_learner_agent(
     )
 
     prep_context = build_initial_context(base_llm, repo_path,
-                                         repo_classification=repo_classification)
+                                         repo_taxonomy=repo_taxonomy)
     language = prep_context["language"]
 
-    # Build classification context for the agent prompt
-    classification_context = ""
-    if repo_classification:
-        classification_context = f"""
-## Repository Classification (pre-analyzed)
-- Type: {repo_classification.get('repo_type', 'unknown')}
-- Language: {repo_classification.get('primary_language', 'Unknown')}
-- Build System: {repo_classification.get('build_system', 'unknown')}
-- Is Monorepo: {repo_classification.get('is_monorepo', False)} ({repo_classification.get('module_count', 1)} modules)
-- Guidance: {repo_classification.get('dockerfile_hints', 'N/A')}
+    # Build taxonomy context for the agent prompt
+    taxonomy_context = ""
+    if repo_taxonomy:
+        taxonomy_context = f"""
+## Repository Characterization (taxonomy-first)
+- domain: {repo_taxonomy.get('domain', 'unknown')}
+- build_tool: {repo_taxonomy.get('build_tool', 'unknown')}
+- automation_level: {repo_taxonomy.get('automation_level', 'unknown')}
+- environment_specificity: {repo_taxonomy.get('environment_specificity', 'unknown')}
+- dependency_transparency: {repo_taxonomy.get('dependency_transparency', 'unknown')}
+- tooling_complexity: {repo_taxonomy.get('tooling_complexity', 'unknown')}
+- repro_support: {repo_taxonomy.get('repro_support', 'unknown')}
 
-Use this classification to guide your Dockerfile design. Do NOT create an
-ENTRYPOINT for libraries. Do NOT try to build all modules in a monorepo.
+You MUST infer an initial operating profile from repository evidence during your
+first exploration steps (repo_type, build_system, likely verification approach),
+then implement/verify accordingly.
 """
 
     logger.info(f"=== Starting Agent Execution (max {max_retries} attempts) ===")
@@ -413,10 +416,10 @@ REQUIRED ACTION:
 
         goal_prompt = f"""
 GOAL: Containerize the '{repo_name}' repository.
-{classification_context}
+{taxonomy_context}
 OBJECTIVES:
 1. Use ListDirectory to see what files exist (pyproject.toml, package.json, etc.)
-2. Based on ONLY the files that exist, determine build approach
+2. Based on ONLY the files that exist, infer repo type, verification approach, and build strategy
 3. Create a production-ready 'Dockerfile' in the repository root
 4. Create a '.dockerignore' to exclude unnecessary files
 5. CRITICAL: Use the 'VerifyBuild' tool to test your Dockerfile

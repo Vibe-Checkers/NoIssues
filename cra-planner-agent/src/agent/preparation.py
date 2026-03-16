@@ -521,21 +521,36 @@ def format_manifest_warnings(manifest: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def build_initial_context(llm: BaseChatModel, repo_path: str,
-                         repo_classification: dict = None) -> dict:
+                         repo_taxonomy: dict = None) -> dict:
     """
     Build the full preparation context for the Learner Agent.
 
     Runs:
-      1. Language detection (classification-first, then 4-pass heuristic)
+      1. Language detection (taxonomy-first, then 4-pass heuristic)
       2. Language guidelines (LLM call)
       3. CI/CD workflow extraction (structured)
       4. Build manifest analysis (version pins, build tool warnings)
     """
-    # Use classification language if available and confident
-    if (repo_classification
-            and repo_classification.get("primary_language", "Unknown") != "Unknown"):
-        language = repo_classification["primary_language"]
-        logger.info(f"[Prep] Using classification language: {language}")
+    # Use taxonomy build_tool hint when available
+    taxonomy_tool_to_language = {
+        "maven": "Java",
+        "gradle": "Java",
+        "cargo": "Rust",
+        "go": "Go",
+        "pip": "Python",
+        "npm": "JavaScript",
+        "yarn": "JavaScript",
+        "pnpm": "JavaScript",
+        "cmake": "C++",
+        "make": "C",
+        "meson": "C",
+        "bundler": "Ruby",
+        "composer": "PHP",
+    }
+    taxonomy_build_tool = (repo_taxonomy or {}).get("build_tool", "")
+    language = taxonomy_tool_to_language.get(taxonomy_build_tool, "Unknown")
+    if language != "Unknown":
+        logger.info(f"[Prep] Using taxonomy-derived language: {language} (build_tool={taxonomy_build_tool})")
     else:
         language = detect_project_language(repo_path)
     logger.info(f"[Prep] Building context for language: {language}")
@@ -545,8 +560,23 @@ def build_initial_context(llm: BaseChatModel, repo_path: str,
     manifest     = analyze_build_manifests(repo_path)
     manifest_str = format_manifest_warnings(manifest)
 
+    taxonomy_str = ""
+    if repo_taxonomy:
+        taxonomy_str = f"""
+REPOSITORY CHARACTERIZATION (7-DIM TAXONOMY):
+- domain: {repo_taxonomy.get('domain', 'unknown')}
+- build_tool: {repo_taxonomy.get('build_tool', 'unknown')}
+- automation_level: {repo_taxonomy.get('automation_level', 'unknown')}
+- environment_specificity: {repo_taxonomy.get('environment_specificity', 'unknown')}
+- dependency_transparency: {repo_taxonomy.get('dependency_transparency', 'unknown')}
+- tooling_complexity: {repo_taxonomy.get('tooling_complexity', 'unknown')}
+- repro_support: {repo_taxonomy.get('repro_support', 'unknown')}
+"""
+
     context_str = f"""
 DETECTED LANGUAGE: {language}
+
+{taxonomy_str}
 
 LANGUAGE GUIDELINES (Latest Best Practices):
 {guidelines}
