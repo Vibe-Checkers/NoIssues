@@ -37,29 +37,32 @@ class LLMClient:
     """Wrapper around two Azure OpenAI deployments (nano + chat) with rate limiting.
 
     Environment variables:
-        AZURE_OPENAI_ENDPOINT          — Azure endpoint URL
-        AZURE_OPENAI_API_KEY           — API key
+        AZURE_OPENAI_ENDPOINT          — Azure endpoint URL (nano; also chat fallback)
+        AZURE_OPENAI_API_KEY           — API key (nano; also chat fallback)
         AZURE_OPENAI_API_VERSION       — API version (default: 2024-02-15-preview)
         AZURE_OPENAI_DEPLOYMENT_NANO   — deployment name for gpt5-nano
         AZURE_OPENAI_DEPLOYMENT_CHAT   — deployment name for gpt5-chat
+        AZURE_OPENAI_ENDPOINT_CHAT     — (optional) separate endpoint for chat model
+        AZURE_OPENAI_API_KEY_CHAT      — (optional) separate API key for chat model
     """
 
     def __init__(self, rate_limiter: GlobalRateLimiter):
         self.limiter = rate_limiter
 
-        common_kwargs = {
-            "azure_endpoint": os.environ["AZURE_OPENAI_ENDPOINT"],
-            "api_key": os.environ["AZURE_OPENAI_API_KEY"],
-            "api_version": os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview"),
-        }
+        api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 
         self.nano = AzureChatOpenAI(
             azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NANO"],
-            **common_kwargs,
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            api_version=api_version,
         )
+        # Chat may use a separate Azure resource (optional override vars)
         self.chat = AzureChatOpenAI(
             azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_CHAT"],
-            **common_kwargs,
+            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT_CHAT", os.environ["AZURE_OPENAI_ENDPOINT"]),
+            api_key=os.environ.get("AZURE_OPENAI_API_KEY_CHAT", os.environ["AZURE_OPENAI_API_KEY"]),
+            api_version=api_version,
         )
 
     def call_nano(self, messages: list[dict], estimated_tokens: int = 2000) -> LLMResponse:
