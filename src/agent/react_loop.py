@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,6 +137,7 @@ def run_agent(
             db=db,
             iteration=iteration,
             verify_tool=verify_tool,
+            max_steps=int(os.environ.get("MAX_STEPS_PER_ITERATION", "25")),
         )
 
         run_record.iterations.append(iteration)
@@ -165,7 +167,7 @@ def run_iteration(
     db: DBWriter,
     iteration: IterationRecord,
     verify_tool: VerifyBuildTool,
-    max_steps: int = 15,
+    max_steps: int = 25,
 ) -> IterationRecord:
     """Single iteration: run langgraph react agent and extract steps."""
     t0 = time.monotonic()

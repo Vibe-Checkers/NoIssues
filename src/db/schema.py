@@ -139,6 +139,16 @@ TABLES_SQL = [
         created_at  TIMESTAMP NOT NULL
     )
     """,
+
+    # ── image_catalog ──
+    """
+    CREATE TABLE IF NOT EXISTS image_catalog (
+        id          TEXT PRIMARY KEY,
+        fetched_at  TIMESTAMP NOT NULL,
+        image_count INTEGER NOT NULL,
+        content     TEXT NOT NULL
+    )
+    """,
 ]
 
 INDEXES_SQL = [

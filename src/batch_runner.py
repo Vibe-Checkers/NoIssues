@@ -19,6 +19,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from db.models import BatchRun
 from db.writer import DBWriter
 from agent.blueprint import ImageCatalog
@@ -122,10 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  DB:      {args.db}")
     print()
 
-    # Phase 0: Fetch image catalog once
-    print("Fetching Docker image catalog...")
-    image_catalog = ImageCatalog().get()
-
     # Initialize shared resources
     rate_limiter = GlobalRateLimiter()
     build_semaphore = threading.Semaphore(
@@ -133,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     disk_monitor = DiskSpaceMonitor()
     db = DBWriter(args.db)
+
+    # Phase 0: Fetch image catalog once (DB-cached)
+    print("Fetching Docker image catalog...")
+    image_catalog = ImageCatalog().get(db=db)
 
     # Create batch record
     config = {

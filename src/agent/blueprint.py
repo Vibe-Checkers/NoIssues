@@ -55,11 +55,19 @@ class ImageCatalog:
         self._catalog: str | None = None
         self._fetched_at: datetime | None = None
 
-    def get(self) -> str:
-        """Return cached catalog string, fetching from Docker Hub if needed."""
+    def get(self, db=None) -> str:
+        """Return cached catalog string, loading from DB or fetching from Docker Hub."""
         if self._catalog is None:
+            if db is not None:
+                cached = db.load_image_catalog()
+                if cached:
+                    logger.info("Image catalog loaded from DB cache")
+                    self._catalog = cached
+                    return self._catalog
             self._catalog = self._fetch_from_docker_hub()
             self._fetched_at = datetime.now(timezone.utc)
+            if db is not None:
+                db.save_image_catalog(self._catalog, self._catalog.count("\n"))
         return self._catalog
 
     def _fetch_from_docker_hub(self) -> str:

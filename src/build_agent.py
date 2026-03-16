@@ -20,6 +20,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from db.models import BatchRun, RunRecord
 from db.writer import DBWriter
 from agent.llm import LLMClient
@@ -105,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Phase 0+1: Blueprint
         print("[2/3] Generating blueprint...")
-        image_catalog = ImageCatalog().get()
+        image_catalog = ImageCatalog().get(db=db)
 
         bp_t0 = time.monotonic()
         blueprint, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)

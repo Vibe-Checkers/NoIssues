@@ -76,6 +76,7 @@ class DBWriter:
                 self.conn.execute(sql, params)
                 self.conn.commit()
         else:
+            sql = sql.replace("?", "%s")
             conn = self._pool.getconn()
             try:
                 conn.cursor().execute(sql, params)
@@ -89,6 +90,7 @@ class DBWriter:
                 cursor = self.conn.execute(sql, params)
                 return cursor.fetchall()
         else:
+            sql = sql.replace("?", "%s")
             conn = self._pool.getconn()
             try:
                 cur = conn.cursor()
@@ -227,6 +229,31 @@ class DBWriter:
                 file_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (_new_id(), run_id, artifact_type, file_name, content, file_path, _now()),
         )
+
+    # ── Image catalog cache ──
+
+    def save_image_catalog(self, content: str, image_count: int) -> None:
+        self._execute(
+            "INSERT INTO image_catalog (id, fetched_at, image_count, content) VALUES (?, ?, ?, ?)",
+            (_new_id(), _now(), image_count, content),
+        )
+
+    def load_image_catalog(self, max_age_hours: int = 24) -> str | None:
+        """Return cached catalog content if fresh enough, else None."""
+        rows = self._query(
+            "SELECT content, fetched_at FROM image_catalog ORDER BY fetched_at DESC LIMIT 1",
+        )
+        if not rows:
+            return None
+        content, fetched_at = rows[0]
+        if isinstance(fetched_at, str):
+            fetched_at = datetime.fromisoformat(fetched_at)
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - fetched_at
+        if age.total_seconds() < max_age_hours * 3600:
+            return content
+        return None
 
     # ── Crash recovery ──
 
