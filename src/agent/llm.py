@@ -1,7 +1,12 @@
 """LLM client wrapper for BuildAgent v2.0.
 
-Creates two AzureChatOpenAI instances (nano + chat) from env vars.
+Creates two ChatOpenAI instances (nano + chat) pointed at OpenRouter.
 Both go through the global rate limiter. Retry on 429/5xx.
+
+Environment variables:
+    OPENROUTER_API_KEY       — OpenRouter API key
+    OPENROUTER_MODEL_NANO    — model for agent steps (e.g. 'google/gemini-2.0-flash-001')
+    OPENROUTER_MODEL_CHAT    — model for lesson extraction (e.g. 'anthropic/claude-sonnet-4')
 """
 
 from __future__ import annotations
@@ -10,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from langchain_openai import AzureChatOpenAI
+from langchain_openai import ChatOpenAI
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -23,6 +28,8 @@ from parallel.rate_limiter import GlobalRateLimiter
 
 logger = logging.getLogger(__name__)
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 
 @dataclass
 class LLMResponse:
@@ -34,60 +41,32 @@ class LLMResponse:
 
 
 class LLMClient:
-    """Wrapper around two Azure OpenAI deployments (nano + chat) with rate limiting.
+    """Wrapper around two OpenRouter models (nano + chat) with rate limiting."""
 
-    Environment variables:
-        AZURE_OPENAI_ENDPOINT          — Azure endpoint URL (nano; also chat fallback)
-        AZURE_OPENAI_API_KEY           — API key (nano; also chat fallback)
-        AZURE_OPENAI_API_VERSION       — API version (default: 2024-02-15-preview)
-        AZURE_OPENAI_DEPLOYMENT_NANO   — deployment name(s) for gpt5-nano;
-                                         comma-separated list for multi-deployment
-                                         round-robin (e.g. "nano-1,nano-2,nano-3")
-        AZURE_OPENAI_DEPLOYMENT_CHAT   — deployment name for gpt5-chat
-        AZURE_OPENAI_ENDPOINT_CHAT     — (optional) separate endpoint for chat model
-        AZURE_OPENAI_API_KEY_CHAT      — (optional) separate API key for chat model
-    """
-
-    def __init__(self, rate_limiter: GlobalRateLimiter, worker_id: int = 0):
+    def __init__(self, rate_limiter: GlobalRateLimiter, worker_id: int = 0):  # noqa: ARG002
         self.limiter = rate_limiter
+        api_key = os.environ["OPENROUTER_API_KEY"]
 
-        api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-
-        # Support comma-separated list of nano deployments; each worker picks one
-        nano_deployments = [
-            d.strip()
-            for d in os.environ["AZURE_OPENAI_DEPLOYMENT_NANO"].split(",")
-            if d.strip()
-        ]
-        nano_deployment = nano_deployments[worker_id % len(nano_deployments)]
-        logger.debug(
-            "worker %d → nano deployment: %s (pool size: %d)",
-            worker_id, nano_deployment, len(nano_deployments),
+        self.nano = ChatOpenAI(
+            model=os.environ["OPENROUTER_MODEL_NANO"],
+            base_url=OPENROUTER_BASE_URL,
+            api_key=api_key,
         )
-
-        self.nano = AzureChatOpenAI(
-            azure_deployment=nano_deployment,
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-            api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            api_version=api_version,
-        )
-        # Chat may use a separate Azure resource (optional override vars)
-        self.chat = AzureChatOpenAI(
-            azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_CHAT"],
-            azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT_CHAT", os.environ["AZURE_OPENAI_ENDPOINT"]),
-            api_key=os.environ.get("AZURE_OPENAI_API_KEY_CHAT", os.environ["AZURE_OPENAI_API_KEY"]),
-            api_version=api_version,
+        self.chat = ChatOpenAI(
+            model=os.environ["OPENROUTER_MODEL_CHAT"],
+            base_url=OPENROUTER_BASE_URL,
+            api_key=api_key,
         )
 
     def call_nano(self, messages: list[dict], estimated_tokens: int = 2000) -> LLMResponse:
-        """Call gpt5-nano through the rate limiter with retry."""
+        """Call nano model through the rate limiter with retry."""
         return self._call(self.nano, messages, estimated_tokens)
 
     def call_chat(self, messages: list[dict], estimated_tokens: int = 2000) -> LLMResponse:
-        """Call gpt5-chat through the rate limiter with retry."""
+        """Call chat model through the rate limiter with retry."""
         return self._call(self.chat, messages, estimated_tokens)
 
-    def _call(self, client: AzureChatOpenAI, messages: list[dict], estimated_tokens: int) -> LLMResponse:
+    def _call(self, client: ChatOpenAI, messages: list[dict], estimated_tokens: int) -> LLMResponse:
         """Internal call with rate limiting and retry."""
         return _llm_call_with_retry(self.limiter, client, messages, estimated_tokens)
 
@@ -105,7 +84,7 @@ class LLMClient:
 )
 def _llm_call_with_retry(
     limiter: GlobalRateLimiter,
-    client: AzureChatOpenAI,
+    client: ChatOpenAI,
     messages: list[dict],
     estimated_tokens: int,
 ) -> LLMResponse:

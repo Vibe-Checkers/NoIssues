@@ -33,8 +33,8 @@ class GlobalRateLimiter:
         tpm: int | None = None,
         headroom: float | None = None,
     ):
-        rpm_raw = rpm or int(os.environ.get("AZURE_OPENAI_RPM", DEFAULT_RPM))
-        tpm_raw = tpm or int(os.environ.get("AZURE_OPENAI_TPM", DEFAULT_TPM))
+        rpm_raw = rpm or int(os.environ.get("LLM_RPM", os.environ.get("AZURE_OPENAI_RPM", DEFAULT_RPM)))
+        tpm_raw = tpm or int(os.environ.get("LLM_TPM", os.environ.get("AZURE_OPENAI_TPM", DEFAULT_TPM)))
         self._headroom = headroom or float(os.environ.get("RATE_LIMIT_HEADROOM", DEFAULT_HEADROOM))
 
         self._rpm_limit = max(1, int(rpm_raw * self._headroom))
@@ -123,7 +123,7 @@ class GlobalRateLimiter:
             # Restore budget after 60s without a 429
             if self._budget_reduced and time.monotonic() > self._backoff_until + 60:
                 original = int(
-                    (int(os.environ.get("AZURE_OPENAI_TPM", DEFAULT_TPM)))
+                    (int(os.environ.get("LLM_TPM", os.environ.get("AZURE_OPENAI_TPM", DEFAULT_TPM))))
                     * self._headroom
                 )
                 self._tpm_limit = original

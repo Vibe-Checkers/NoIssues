@@ -1,0 +1,10 @@
+https://github.com/basecamp/local_time
+https://github.com/spring-projects/spring-framework
+https://github.com/open-webui/open-webui
+https://github.com/drewm/mailchimp-api
+https://github.com/umami-software/umami
+https://github.com/CorentinTh/it-tools
+https://github.com/photoprism/photoprism
+https://github.com/psf/requests
+https://github.com/benvinegar/counterscale
+https://github.com/resume/resume.github.com
