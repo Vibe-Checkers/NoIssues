@@ -20,7 +20,8 @@ TABLES_SQL = [
         failure_count   INTEGER DEFAULT 0,
         total_prompt_tokens     INTEGER DEFAULT 0,
         total_completion_tokens INTEGER DEFAULT 0,
-        config_json     TEXT
+        config_json     TEXT,
+        tag             TEXT
     )
     """,
 
