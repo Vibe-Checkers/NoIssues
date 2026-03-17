@@ -139,24 +139,26 @@ class TestVerifyBuildLastResult:
 # ═══════════════════════════════════════════════════════
 
 class TestMessagesModifier:
+    """langgraph passes state dict {"messages": [...]} to the prompt callable."""
+
     def test_prepends_system_message_always(self):
         modifier = _make_messages_modifier("You are BuildAgent.")
-        result = modifier([HumanMessage(content="hello")])
+        result = modifier({"messages": [HumanMessage(content="hello")]})
         assert isinstance(result[0], SystemMessage)
         assert result[0].content == "You are BuildAgent."
 
     def test_empty_messages_returns_only_system(self):
         modifier = _make_messages_modifier("sys")
-        result = modifier([])
+        result = modifier({"messages": []})
         assert len(result) == 1
         assert isinstance(result[0], SystemMessage)
 
     def test_fewer_than_keep_full_not_truncated(self):
-        """With ≤8 messages, all tool messages preserved intact."""
+        """With ≤16 messages, all tool messages preserved intact."""
         modifier = _make_messages_modifier("sys")
         long = "x" * 3000
         messages = [ToolMessage(content=long, tool_call_id=f"id{i}") for i in range(6)]
-        result = modifier(messages)
+        result = modifier({"messages": messages})
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
         assert all(len(m.content) == 3000 for m in tool_msgs)
 
@@ -166,7 +168,7 @@ class TestMessagesModifier:
         long = "x" * 6000
         # Need more than keep_full (16) messages to trigger truncation
         messages = [ToolMessage(content=long, tool_call_id=f"id{i}") for i in range(20)]
-        result = modifier(messages)
+        result = modifier({"messages": messages})
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
 
         # First 4 are old (20 - 16 = 4), all truncated
@@ -180,7 +182,7 @@ class TestMessagesModifier:
     def test_old_short_tool_messages_not_truncated(self):
         modifier = _make_messages_modifier("sys")
         messages = [ToolMessage(content="short", tool_call_id=f"id{i}") for i in range(10)]
-        result = modifier(messages)
+        result = modifier({"messages": messages})
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
         assert all(m.content == "short" for m in tool_msgs)
 
@@ -189,7 +191,7 @@ class TestMessagesModifier:
         modifier = _make_messages_modifier("sys")
         long = "x" * 3000
         messages = [AIMessage(content=long) for _ in range(10)]
-        result = modifier(messages)
+        result = modifier({"messages": messages})
         ai_msgs = [m for m in result if isinstance(m, AIMessage)]
         assert all(len(m.content) == 3000 for m in ai_msgs)
 
@@ -198,7 +200,7 @@ class TestMessagesModifier:
         from agent.react_loop import _OLD_TOOL_MSG_MAX
         modifier = _make_messages_modifier("sys")
         messages = [ToolMessage(content="y" * 6000, tool_call_id=f"id{i}") for i in range(20)]
-        result = modifier(messages)
+        result = modifier({"messages": messages})
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
         for msg in tool_msgs[:4]:  # old messages (20 - 16 = 4)
             assert len(msg.content) <= _OLD_TOOL_MSG_MAX + 20  # small slack for "\n...[truncated]"
@@ -214,9 +216,16 @@ class TestMessagesModifier:
         long = "x" * 3000
         messages = [ToolMessage(content=long, tool_call_id=f"id{i}") for i in range(10)]
         original_contents = [m.content for m in messages]
-        modifier(messages)
+        modifier({"messages": messages})
         for msg, orig in zip(messages, original_contents):
             assert msg.content == orig
+
+    def test_bare_list_still_works(self):
+        """Backward compat: passing a bare list instead of state dict still works."""
+        modifier = _make_messages_modifier("sys")
+        result = modifier([HumanMessage(content="hello")])
+        assert isinstance(result[0], SystemMessage)
+        assert isinstance(result[1], HumanMessage)
 
 
 # ═══════════════════════════════════════════════════════

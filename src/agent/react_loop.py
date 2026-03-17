@@ -391,8 +391,17 @@ def _make_messages_modifier(system_prompt: str):
     Keeps the last 16 messages fully intact (8 tool exchanges). Older tool
     messages are truncated to _OLD_TOOL_MSG_MAX chars to prevent the
     accumulated history from exceeding the model's context limit.
+
+    Note: langgraph passes the full state dict {"messages": [...]},
+    not a bare message list.
     """
-    def modifier(messages: list) -> list:
+    def modifier(state) -> list:
+        # langgraph passes state dict {"messages": [...]}, not bare list
+        if isinstance(state, dict):
+            messages = state.get("messages", [])
+        else:
+            messages = state
+
         keep_full = 16
         cutoff = max(0, len(messages) - keep_full)
         result = []
