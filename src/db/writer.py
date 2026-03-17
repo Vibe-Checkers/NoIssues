@@ -119,6 +119,26 @@ class DBWriter:
              batch.total_prompt_tokens, batch.total_completion_tokens, batch.id),
         )
 
+    def update_batch_progress(self, batch_id: str) -> None:
+        """Recalculate and persist batch_run counters from completed runs."""
+        rows = self._query(
+            """SELECT
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status IN ('failure', 'error') THEN 1 ELSE 0 END),
+                COALESCE(SUM(total_prompt_tokens), 0),
+                COALESCE(SUM(total_completion_tokens), 0)
+            FROM run WHERE batch_id=?""",
+            (batch_id,),
+        )
+        if not rows:
+            return
+        sc, fc, pt, ct = rows[0]
+        self._execute(
+            """UPDATE batch_run SET success_count=?, failure_count=?,
+                total_prompt_tokens=?, total_completion_tokens=? WHERE id=?""",
+            (sc or 0, fc or 0, pt, ct, batch_id),
+        )
+
     # ── Run operations ──
 
     def write_run_start(self, run: RunRecord) -> None:
@@ -198,17 +218,18 @@ class DBWriter:
         self._execute(
             """INSERT INTO verify_build_detail (id, step_id,
                 review_approved, review_concerns, smoke_test_commands,
-                review_prompt_tokens, review_completion_tokens,
+                review_prompt_tokens, review_completion_tokens, review_duration_ms,
                 build_attempted, build_success, build_duration_ms,
                 build_error_raw, build_error, build_error_summarized,
                 build_error_summary_tokens_prompt, build_error_summary_tokens_completion,
                 smoke_attempted, smoke_passed, smoke_results, smoke_duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (detail_id, step_id,
              detail.review_approved,
              json.dumps(detail.review_concerns),
              json.dumps(detail.smoke_test_commands),
              detail.review_tokens[0], detail.review_tokens[1],
+             detail.review_duration_ms,
              detail.build_success is not None,  # build_attempted
              detail.build_success, detail.build_duration_ms,
              detail.build_error_raw, detail.build_error,
@@ -217,7 +238,7 @@ class DBWriter:
              detail.smoke_results is not None,  # smoke_attempted
              all(r.get("exit_code") == 0 for r in (detail.smoke_results or [])) if detail.smoke_results else None,
              json.dumps(detail.smoke_results) if detail.smoke_results else None,
-             None),  # smoke_duration_ms filled by caller if needed
+             detail.smoke_duration_ms),
         )
 
     # ── Artifact operations ──

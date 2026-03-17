@@ -141,9 +141,9 @@ If the LLM call fails or returns unparseable JSON:
 
 ---
 
-## 3. ReAct Agent (gpt5-nano via LangChain)
+## 3. ReAct Agent (gpt5-nano via langgraph)
 
-The core agent that generates Dockerfiles. Runs inside LangChain's `AgentExecutor` with structured tools.
+The core agent that generates Dockerfiles. Runs inside langgraph's `create_react_agent` with structured tools. The agent receives **pre-seeded repository context** (file tree, README, key build files) from the blueprint phase, eliminating the need for exploration.
 
 ### System Prompt
 
@@ -155,25 +155,55 @@ CONTEXT BLUEPRINT:
 
 {lessons_section}
 
+REPOSITORY CONTEXT:
+The repository file tree and key build file contents are provided in the first message below. You already have all the information needed to write the Dockerfile.
+
 WORKFLOW:
-1. Explore the repository structure using ListDirectory and ReadFile to understand what needs to be built.
-2. Write a Dockerfile using WriteFile. The Dockerfile must:
+1. Based on the repository context provided, write a Dockerfile using WriteFile. The Dockerfile must:
    - Use an appropriate base image (the blueprint suggests: {base_image})
    - Install system dependencies if needed
    - Copy source code
    - Install project dependencies
    - Build the project from source
    - Set a proper CMD or ENTRYPOINT
-3. Write a .dockerignore file to exclude unnecessary files (.git, node_modules, etc.).
-4. Call VerifyBuild to test the Dockerfile. This is MANDATORY — never finish without calling VerifyBuild.
-5. If VerifyBuild reports issues, read the error, fix the Dockerfile, and call VerifyBuild again.
+2. Write a .dockerignore file to exclude unnecessary files (.git, node_modules, etc.).
+3. Call VerifyBuild to test the Dockerfile. This is MANDATORY — never finish without calling VerifyBuild.
+4. If VerifyBuild reports issues, read the error carefully. Use ReadFile or ListDirectory ONLY to investigate specific files mentioned in the error. Fix the Dockerfile and call VerifyBuild again.
 
 RULES:
+- Your first action should be WriteFile to create the Dockerfile.
+- Do NOT explore the repository — the file tree and build files are already provided.
+- Do NOT call ListDirectory(".") or ReadFile unless VerifyBuild has failed and you need to check a specific file.
 - You MUST call VerifyBuild at least once.
 - Do NOT write a Dockerfile that only installs a runtime without building the project.
 - If the blueprint's suggested base image doesn't work, use DockerImageSearch to find a better one.
 - If a build error is unclear, use SearchWeb to find solutions.
-- Be precise with COPY paths — check what files exist with ListDirectory before writing COPY instructions.
+```
+
+### Pre-seeded Initial Message
+
+The first HumanMessage includes the full repository context collected during the blueprint phase:
+
+```
+Generate a Dockerfile for this repository based on the context below.
+
+=== REPOSITORY FILE TREE ===
+src/
+package.json
+README.md
+...
+
+=== README ===
+# My Project
+...
+
+=== KEY BUILD FILES ===
+--- package.json ---
+{"name": "test", "scripts": {"build": "tsc"}, ...}
+--- tsconfig.json ---
+...
+
+Write the Dockerfile now. Do not explore — all needed context is above.
 ```
 
 ### Lessons Section (injected in iterations 2+)
@@ -205,20 +235,19 @@ SearchWeb: Search the web for Docker build solutions. Input: {"query": "search t
 VerifyBuild: Build the Dockerfile and run smoke tests. Input: {} (no parameters — reads the Dockerfile from the repo root). Returns build status, smoke test results, and any errors. YOU MUST CALL THIS.
 ```
 
-### Step Extraction (from LangChain)
+### Step Extraction (from langgraph stream)
+
+Steps are extracted from the langgraph `stream_mode="updates"` output:
 
 ```python
-result = agent_executor.invoke({"input": prompt})
-intermediate_steps = result["intermediate_steps"]
-# Each element is (AgentAction, observation_string)
-for action, observation in intermediate_steps:
-    step = StepRecord(
-        thought=action.log,           # contains "Thought: ..." text
-        tool_name=action.tool,        # "ReadFile", "WriteFile", etc.
-        tool_input=action.tool_input, # dict
-        tool_output_raw=observation,  # full output string
+for chunk in agent.stream({"messages": [HumanMessage(content=initial_message)]}, ...):
+    if "agent" in chunk:
+        # AIMessage with tool_calls → record thought + pending tool call
+        for tc in msg.tool_calls:
+            pending[tc["id"]] = {"name": tc["name"], "args": tc["args"], ...}
+    elif "tools" in chunk:
+        # ToolMessage → match with pending, record step, check VerifyBuild result
         ...
-    )
 ```
 
 ---

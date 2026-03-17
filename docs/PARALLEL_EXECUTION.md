@@ -51,24 +51,35 @@
 
 ### The Problem
 
-Azure OpenAI enforces two limits:
-- **RPM** (requests per minute) — e.g., 60 RPM
-- **TPM** (tokens per minute) — e.g., 80K TPM
+Azure OpenAI enforces per-deployment limits:
+- **RPM** (requests per minute) — e.g., 250 RPM per deployment
+- **TPM** (tokens per minute) — e.g., 250K TPM per deployment
 
-With N workers each making LLM calls for agent steps, summarizations, reviews, and lesson extraction, it's easy to hit both limits simultaneously.
+With N workers each making LLM calls for agent steps, summarizations, reviews, and lesson extraction, a single deployment is easily saturated.
 
-### The Solution: Global Token-Bucket Rate Limiter
+### The Solution: Multi-Deployment Round-Robin + Global Rate Limiter
+
+**Multi-deployment round-robin**: The nano model is deployed across multiple Azure OpenAI deployments (e.g., 4 deployments x 250 RPM = 1000 RPM aggregate). Each worker is assigned to a deployment via `worker_id % num_deployments`:
+
+```
+AZURE_OPENAI_DEPLOYMENT_NANO=gpt-5-nano,gpt-5-nano-2,gpt-5-nano-3,gpt-5-nano-4
+```
+
+All deployments share the same Azure resource, endpoint, and API key — they are named slots within a single resource.
+
+**Global token-bucket rate limiter** tracks aggregate RPM + TPM across all deployments:
 
 ```
 ┌─────────────────────────────────────────┐
 │  GlobalRateLimiter (singleton)          │
 │                                         │
-│  rpm_semaphore:  asyncio.Semaphore(50)  │
-│  tpm_budget:     AtomicCounter(80000)   │
+│  rpm_semaphore:  threading.Semaphore    │
+│  tpm_budget:     AtomicCounter          │
 │  refill_task:    runs every 60s         │
 │                                         │
 │  acquire(estimated_tokens) → blocks     │
 │  release(actual_tokens)   → adjusts    │
+│  backoff(retry_after)     → on 429     │
 └─────────────────────────────────────────┘
 ```
 
@@ -80,15 +91,13 @@ With N workers each making LLM calls for agent steps, summarizations, reviews, a
 
 **Configuration:**
 ```
-AZURE_OPENAI_RPM=60          # requests per minute
-AZURE_OPENAI_TPM=80000       # tokens per minute
-RATE_LIMIT_HEADROOM=0.85     # use 85% of limits to avoid edge-case 429s
+AZURE_OPENAI_RPM=1000         # aggregate across all nano deployments
+AZURE_OPENAI_TPM=1000000      # aggregate across all nano deployments
 ```
 
 **Backoff on 429:**
 - If a 429 is received despite the limiter, wait for `Retry-After` header value (or 10s default).
-- Log the event and temporarily reduce the limiter's budget by 20%.
-- Restore budget after 60s without a 429.
+- Retry decorator: 3 attempts with exponential backoff on 429/5xx.
 
 ---
 

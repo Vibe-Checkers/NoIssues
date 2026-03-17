@@ -91,14 +91,15 @@ class RunRecord:
 class VerifyBuildResult:
     status: str                 # 'accepted', 'rejected', 'build_failed', 'smoke_failed'
     review_approved: bool
-    review_score: int
     review_concerns: list[str]
     smoke_test_commands: list[str]
+    review_duration_ms: int | None  # time spent on LLM review call
     build_success: bool | None
     build_error: str | None     # summarized if >2000 chars
     build_error_raw: str | None
     build_duration_ms: int | None
     smoke_results: list[dict] | None  # [{command, exit_code, output, timed_out}]
+    smoke_duration_ms: int | None     # total time for all smoke test runs
     dockerfile_snapshot: str | None
     # token accounting
     review_tokens: tuple[int, int]
@@ -170,7 +171,26 @@ Called once in `batch_runner.py` before spawning workers. The string is passed t
 
 ## 4. Phase 1: Context Blueprint
 
-### 4.1 Sequence
+### 4.1 CollectedContext
+
+The blueprint phase collects repository context (file tree, README, key build files) and preserves it in a `CollectedContext` dataclass. This context is passed forward to the agent to eliminate the exploration phase.
+
+```python
+@dataclass
+class CollectedContext:
+    file_tree: str = ""
+    readme: str = ""
+    files: dict[str, str] = field(default_factory=dict)  # path → content
+
+    def estimated_chars(self) -> int:
+        return len(self.file_tree) + len(self.readme) + sum(len(v) for v in self.files.values())
+
+    def truncate_to_budget(self, max_chars: int = 60_000) -> None:
+        """Trim context to fit within token budget, prioritizing build files."""
+        ...
+```
+
+### 4.2 Sequence
 
 ```
 clone_repo(url)
@@ -178,7 +198,7 @@ clone_repo(url)
     ▼
 generate_file_tree(repo_root)       ── tree output (string)
 read_readme(repo_root)              ── README content (string)
-    │
+    │                                   ↘ saved into CollectedContext
     ▼
 LLM call: file_selector             ── gpt5-nano
   input:  file_tree + readme
@@ -186,108 +206,56 @@ LLM call: file_selector             ── gpt5-nano
     │
     ▼
 read_selected_files(paths, limit=20000)
-    │
+    │                                   ↘ saved into CollectedContext.files
     ▼
 LLM call: metaprompt_blueprint      ── gpt5-nano
   input:  file_contents + image_catalog
   output: context blueprint JSON
+    │
+    ▼
+return (blueprint, collected_context, prompt_tokens, completion_tokens)
 ```
 
-### 4.2 File Selector Prompt
+### 4.3 Return Signature
 
-```
-You are analyzing a repository to determine which files are most relevant for
-building and containerizing this project.
+`generate_blueprint()` returns a 4-tuple:
 
-FILE TREE:
-{file_tree}
+```python
+def generate_blueprint(repo_root, image_catalog, llm) -> tuple[dict, CollectedContext, int, int]:
+    # Step 1: select files (also creates CollectedContext with file_tree + readme)
+    paths, ctx, sel_pt, sel_ct = select_build_files(repo_root, llm)
 
-README (first 5000 chars):
-{readme}
+    # Step 2: read selected files into ctx.files
+    file_contents, file_dict = _read_selected_files(repo_root, paths)
+    ctx.files = file_dict
 
-Select 3-5 files that would be most useful for understanding how to build this
-project in a Docker container. Prioritize: build configs, dependency manifests,
-CI/CD configs, Makefiles, existing Dockerfiles.
+    # Step 3: metaprompt → blueprint JSON
+    response = llm.call_nano([...])
+    blueprint = json.loads(response.content)
 
-Return ONLY a JSON array of file paths, e.g.:
-["package.json", ".github/workflows/ci.yml", "tsconfig.json"]
-```
-
-### 4.3 Metaprompting Blueprint Prompt
-
-```
-You are a Docker expert analyzing a repository to produce a build blueprint.
-
-SELECTED FILES:
---- {path1} ---
-{content1}
---- {path2} ---
-{content2}
-...
-
-AVAILABLE DOCKER OFFICIAL IMAGES:
-{image_catalog}
-
-Produce a JSON context blueprint:
-{
-  "language": "...",
-  "build_system": "...",
-  "package_manager": "...",
-  "dependencies_summary": "...",
-  "build_commands": ["..."],
-  "runtime_requirements": "...",
-  "repo_type": "library|cli_tool|web_service|data_pipeline|native_library|framework|desktop_app",
-  "base_image": "python:3.12-slim",       ← MUST be from the official images list above
-  "base_image_rationale": "...",
-  "pitfalls": ["..."],
-  "warnings": ["..."],
-  "environment": {
-    "language_version": "...",
-    "system_libraries": ["..."]
-  }
-}
-
-Rules for base_image:
-- Pick from the official images list. Use the most specific tag (e.g., "python:3.12-slim" not "python:latest").
-- Match the language version detected in the config files.
-- Prefer -slim variants for smaller images unless build tools are needed.
-- If the project needs a non-official image (nvidia/cuda, mcr.microsoft.com/...),
-  set base_image to the closest official image and add a note in pitfalls.
+    ctx.truncate_to_budget()
+    return blueprint, ctx, total_pt, total_ct
 ```
 
 ### 4.4 Blueprint Parsing and Fallback
 
 ```python
-def generate_blueprint(repo_root: str, image_catalog: str, llm: LLMClient) -> dict:
-    tree = generate_file_tree(repo_root)
-    readme = read_readme(repo_root)
+# Validate required fields
+for field in ("language", "build_system", "repo_type", "base_image"):
+    if field not in blueprint:
+        blueprint[field] = "unknown"
+```
 
-    # Step 1: file selection
-    try:
-        selected = llm.call("file_selector", tree=tree, readme=readme)
-        paths = json.loads(selected)
-        paths = [p for p in paths if (Path(repo_root) / p).is_file()]  # validate
-    except Exception:
-        paths = _heuristic_file_selection(repo_root)  # fallback: known filenames
-
-    # Step 2: read files
-    contents = {}
-    for p in paths[:5]:
-        try:
-            text = (Path(repo_root) / p).read_text(errors="replace")[:20_000]
-            contents[p] = text
-        except Exception:
-            continue
-
-    # Step 3: metaprompting
-    try:
-        raw = llm.call("metaprompt", files=contents, catalog=image_catalog)
-        blueprint = json.loads(raw)
-        return blueprint
-    except Exception:
-        # Fallback: minimal blueprint from file extensions
-        lang = detect_language_by_extensions(repo_root)
-        return {"language": lang, "base_image": None, "build_system": "unknown"}
+If the LLM call fails or returns unparseable JSON:
+```python
+{
+    "language": detect_language_by_extensions(repo_root),
+    "build_system": "unknown",
+    "repo_type": "unknown",
+    "base_image": None,
+    "pitfalls": [],
+    "notes": "Blueprint generation failed. Agent must analyze the repository from scratch."
+}
 ```
 
 ---
@@ -296,107 +264,113 @@ def generate_blueprint(repo_root: str, image_catalog: str, llm: LLMClient) -> di
 
 ### 5.1 Architecture
 
+The agent receives pre-seeded repository context from the blueprint phase, eliminating the need for an exploration step. It uses langgraph's `create_react_agent` with a messages modifier for system prompt injection and history truncation.
+
 ```python
-def run_agent(repo_root: str, blueprint: dict, max_iterations: int = 3) -> RunRecord:
+def run_agent(repo_root, blueprint, llm, docker_ops, image_name, db,
+              run_record, max_iterations=3, collected_context=None) -> RunRecord:
     lessons = None
+    initial_message = _build_initial_message(collected_context)
+
     for iteration_num in range(1, max_iterations + 1):
         # Clean slate
         delete_dockerfile(repo_root)
 
-        # Build prompt
-        prompt = build_prompt(blueprint, lessons)
+        # Build system prompt with blueprint + lessons
+        prompt = _build_prompt(blueprint, lessons)
+
+        # Create tools + verify tool
         tools = create_tools(repo_root)
+        verify_tool = VerifyBuildTool(repo_root, image_name, docker_ops, llm, blueprint)
+        tools.append(verify_tool)
 
-        # Run iteration
-        iteration = run_iteration(prompt, tools, max_steps=15)
+        # Run iteration with langgraph react agent
+        iteration = run_iteration(prompt, tools, llm, db, iteration,
+                                  verify_tool, max_steps=25,
+                                  initial_message=initial_message)
 
-        # Check outcome
         if iteration.verify_result == "accepted":
-            return success(iteration)
+            return success(run_record)
 
         # Extract lessons for next iteration
-        lessons = extract_lessons(iteration.steps)
+        lessons = extract_lessons(iteration.steps, llm)
 
-    return failure()
+    return run_record
 ```
 
-### 5.2 Single Iteration Loop
+### 5.2 Pre-seeded Initial Message
+
+The `collected_context` from the blueprint phase is formatted into the initial HumanMessage:
 
 ```python
-def run_iteration(prompt: str, tools: list, max_steps: int = 15) -> IterationRecord:
-    messages = [system_prompt, user_prompt(prompt)]
-    steps = []
+def _build_initial_message(collected_context: CollectedContext | None) -> str:
+    if collected_context is None or not collected_context.file_tree:
+        return "Generate a Dockerfile for this repository. Follow the workflow above."
 
-    for step_num in range(1, max_steps + 1):
-        t0 = time.monotonic()
+    parts = ["Generate a Dockerfile for this repository based on the context below."]
+    parts.append("\n\n=== REPOSITORY FILE TREE ===")
+    parts.append(collected_context.file_tree)
+    if collected_context.readme and collected_context.readme != "(no README found)":
+        parts.append("\n\n=== README ===")
+        parts.append(collected_context.readme)
+    if collected_context.files:
+        parts.append("\n\n=== KEY BUILD FILES ===")
+        for path, content in collected_context.files.items():
+            parts.append(f"\n--- {path} ---")
+            parts.append(content)
+    parts.append("\n\nWrite the Dockerfile now. Do not explore — all needed context is above.")
+    return "\n".join(parts)
+```
 
-        # LLM call → thought + tool selection
-        response = llm.call(messages)
-        thought, tool_name, tool_input = parse_react_response(response)
+### 5.3 Single Iteration (langgraph)
 
-        # Execute tool
-        raw_output = tools[tool_name].execute(tool_input)
+Each iteration uses langgraph's `create_react_agent` with a **messages modifier** that:
+1. Extracts messages from the langgraph state dict `{"messages": [...]}`
+2. Prepends the system prompt as a `SystemMessage`
+3. Truncates old `ToolMessage` content to 4000 chars (keeps last 16 messages intact)
 
-        # Summarize if needed
-        if len(raw_output) > 2000:
-            output = summarize(raw_output, tool_name)
-            was_summarized = True
+```python
+def run_iteration(prompt, tools, llm, db, iteration, verify_tool, max_steps=25,
+                  initial_message="...") -> IterationRecord:
+    lc_tools = _to_langchain_tools(tools)
+
+    agent = create_react_agent(
+        model=llm.nano,
+        tools=lc_tools,
+        prompt=_make_messages_modifier(prompt),  # callable that receives state dict
+    )
+
+    for chunk in agent.stream(
+        {"messages": [HumanMessage(content=initial_message)]},
+        config={"recursion_limit": max_steps * 2 + 1},
+        stream_mode="updates",
+    ):
+        # "agent" chunks: extract tool calls from AIMessage
+        # "tools" chunks: extract results from ToolMessage, record steps
+        ...
+```
+
+**Important**: The messages modifier must handle the langgraph state dict:
+```python
+def _make_messages_modifier(system_prompt: str):
+    def modifier(state) -> list:
+        # langgraph passes state dict {"messages": [...]}, not bare list
+        if isinstance(state, dict):
+            messages = state.get("messages", [])
         else:
-            output = raw_output
-            was_summarized = False
-
-        # Record step
-        step = StepRecord(
-            step_number=step_num,
-            thought=thought,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_output_raw=raw_output,
-            tool_output=output,
-            was_summarized=was_summarized,
-            duration_ms=elapsed(t0),
-            ...
-        )
-        steps.append(step)
-        db.write_step(step)  # persist incrementally
-
-        # Append to conversation
-        messages.append(assistant_message(thought, tool_name, tool_input))
-        messages.append(tool_result_message(output))
-
-        # Check if VerifyBuild accepted
-        if tool_name == "VerifyBuild" and is_accepted(output):
-            return IterationRecord(status="success", steps=steps, ...)
-
-    return IterationRecord(status="failure", steps=steps, ...)
+            messages = state
+        # truncation logic + prepend SystemMessage
+        ...
+    return modifier
 ```
 
-### 5.3 ReAct Message Format
+### 5.4 Step Recording
 
-Each turn in the conversation follows:
+Steps are extracted from the langgraph stream in real-time. Each tool call produces:
+- `"agent"` chunk → captures tool name, args, and thought from `AIMessage.tool_calls`
+- `"tools"` chunk → captures result from `ToolMessage`, records duration, summarizes if needed
 
-```
-Assistant (thought + action):
-  Thought: I need to check the package.json to find build commands.
-  Action: ReadFile
-  Action Input: {"path": "package.json"}
-
-Tool result:
-  Observation: {"name": "express", "scripts": {"build": "tsc", ...}}
-
-Assistant (next thought + action):
-  Thought: This is a TypeScript project using tsc for build. I'll use node:22-slim...
-  Action: WriteFile
-  Action Input: {"path": "Dockerfile", "content": "FROM node:22-slim\n..."}
-```
-
-The `thought` and `action` are extracted from the assistant response via regex:
-```python
-THOUGHT_RE = re.compile(r"Thought:\s*(.+?)(?=\nAction:)", re.DOTALL)
-ACTION_RE  = re.compile(r"Action:\s*(\w+)\s*\nAction Input:\s*(.+)", re.DOTALL)
-```
-
-This makes thoughts and actions directly extractable for database persistence.
+Token usage is extracted from `AIMessage.usage_metadata` and split evenly across parallel tool calls.
 
 ---
 
@@ -411,14 +385,14 @@ Agent calls VerifyBuild
 Step 1: Read Dockerfile from disk
     │
     ▼
-Step 2: LLM Review (gpt5-nano)
+Step 2: LLM Review (gpt5-nano)       ← timed → review_duration_ms
   input:  dockerfile content + repo_type from blueprint
-  output: {approved, score, smoke_test_commands, concerns}
+  output: {approved, smoke_test_commands, concerns}
     │
-    ├── approved=false → return {status: "rejected", review: ...}
+    ├── approved=false → return {status: "rejected", review_duration_ms: ..., ...}
     │
     ▼
-Step 3: docker build
+Step 3: docker build                  ← timed → build_duration_ms
     │
     ├── build fails
     │     │
@@ -426,12 +400,12 @@ Step 3: docker build
     │     └── error ≤ 2000 chars → return {status: "build_failed", build_error: error}
     │
     ▼
-Step 4: Run smoke tests (1-3 commands)
+Step 4: Run smoke tests (1-3 cmds)   ← timed → smoke_duration_ms (total for all tests)
     │
     ├── any fails → return {status: "smoke_failed", smoke_results: [...]}
     │
     ▼
-Step 5: return {status: "accepted", dockerfile_snapshot: ..., review: ...}
+Step 5: return {status: "accepted", review_duration_ms, build_duration_ms, smoke_duration_ms, ...}
 ```
 
 ### 6.2 Review Prompt
@@ -582,30 +556,30 @@ Lesson extraction uses **gpt5-chat** (not gpt5-nano) because it must compress a 
 
 ## 9. LLM Client Wrapper
 
-### 9.1 Unified Interface
+### 9.1 Multi-Deployment Round-Robin
+
+The nano model supports **multiple Azure OpenAI deployments** for higher aggregate throughput. Each deployment has its own rate limit (e.g., 250 RPM each). Workers are assigned to deployments via `worker_id % len(deployments)`.
 
 ```python
 class LLMClient:
-    def __init__(self, rate_limiter: GlobalRateLimiter):
-        self.nano = AzureChatOpenAI(deployment="gpt5-nano", ...)
-        self.chat = AzureChatOpenAI(deployment="gpt5-chat", ...)
+    def __init__(self, rate_limiter: GlobalRateLimiter, worker_id: int = 0):
+        # Support comma-separated list of nano deployments
+        nano_deployments = [
+            d.strip()
+            for d in os.environ["AZURE_OPENAI_DEPLOYMENT_NANO"].split(",")
+            if d.strip()
+        ]
+        nano_deployment = nano_deployments[worker_id % len(nano_deployments)]
+
+        self.nano = AzureChatOpenAI(azure_deployment=nano_deployment, ...)
+        self.chat = AzureChatOpenAI(azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_CHAT"], ...)
         self.limiter = rate_limiter
 
-    def call(self, model: str, messages: list, estimated_tokens: int = 2000) -> LLMResponse:
-        self.limiter.acquire(estimated_tokens)
-        try:
-            client = self.nano if model == "nano" else self.chat
-            response = client.invoke(messages)
-            actual_tokens = response.usage.total_tokens
-            self.limiter.release(actual_tokens)
-            return LLMResponse(
-                content=response.content,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens
-            )
-        except RateLimitError as e:
-            self.limiter.backoff(e.retry_after)
-            raise
+    def call_nano(self, messages, estimated_tokens=2000) -> LLMResponse:
+        return self._call(self.nano, messages, estimated_tokens)
+
+    def call_chat(self, messages, estimated_tokens=2000) -> LLMResponse:
+        return self._call(self.chat, messages, estimated_tokens)
 ```
 
 ### 9.2 Retry Decorator
@@ -614,10 +588,16 @@ class LLMClient:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=4),
-    retry=retry_if_exception_type((RateLimitError, APIConnectionError))
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, APIStatusError)),
+    reraise=True,
 )
-def llm_call_with_retry(client, model, messages, estimated_tokens):
-    return client.call(model, messages, estimated_tokens)
+def _llm_call_with_retry(limiter, client, messages, estimated_tokens) -> LLMResponse:
+    limiter.acquire(estimated_tokens)
+    response = client.invoke(messages)
+    usage = response.usage_metadata or {}
+    actual_tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+    limiter.release(actual_tokens)
+    return LLMResponse(content=response.content, ...)
 ```
 
 ---
@@ -751,6 +731,24 @@ class DBWriter:
             step.summary_prompt_tokens, step.summary_completion_tokens
         ))
 
+    def update_batch_progress(self, batch_id: str):
+        """Recalculate batch_run counters from completed runs — called after each repo."""
+        rows = self._query(
+            """SELECT
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN status IN ('failure', 'error') THEN 1 ELSE 0 END),
+                COALESCE(SUM(total_prompt_tokens), 0),
+                COALESCE(SUM(total_completion_tokens), 0)
+            FROM run WHERE batch_id=?""",
+            (batch_id,),
+        )
+        sc, fc, pt, ct = rows[0]
+        self._execute(
+            "UPDATE batch_run SET success_count=?, failure_count=?, "
+            "total_prompt_tokens=?, total_completion_tokens=? WHERE id=?",
+            (sc or 0, fc or 0, pt, ct, batch_id),
+        )
+
     def _execute(self, sql, params):
         if self.lock:  # SQLite
             with self.lock:
@@ -777,43 +775,40 @@ def worker_loop(worker_id: int, repo_url: str, batch_id: str,
     slug = make_slug(repo_url)
     clone_dir = Path(f"workdir/{batch_id}/{worker_id}/{slug}")
     image_name = f"buildagent-{slug}-{worker_id}"
-    llm = LLMClient(rate_limiter)
+    llm = LLMClient(rate_limiter, worker_id=worker_id)  # round-robin deployment
 
     run_record = RunRecord(repo_url=repo_url, repo_slug=slug, worker_id=worker_id, ...)
     db.write_run_start(run_record)
 
     try:
-        # Disk check
         disk_monitor.check_or_wait()
-
-        # Clone
         clone_repo(repo_url, clone_dir)
 
-        # Phase 1: Blueprint
-        blueprint = generate_blueprint(str(clone_dir), image_catalog, llm)
+        # Phase 1: Blueprint (returns CollectedContext for the agent)
+        blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(
+            str(clone_dir), image_catalog, llm
+        )
         run_record.context_blueprint = json.dumps(blueprint)
         run_record.detected_language = blueprint.get("language")
         run_record.repo_type = blueprint.get("repo_type")
         db.update_run_blueprint(run_record)
 
-        # Phase 2: Agent
+        # Phase 2: Agent (receives pre-seeded context)
         docker_ops = DockerOps(build_semaphore)
-        result = run_agent(str(clone_dir), blueprint, llm, docker_ops, image_name, db)
-
-        run_record.status = result.status
-        run_record.final_dockerfile = result.dockerfile
-        run_record.verify_score = result.verify_score
-        run_record.iterations = result.iterations
+        run_record = run_agent(
+            repo_root=clone_dir, blueprint=blueprint, llm=llm,
+            docker_ops=docker_ops, image_name=image_name, db=db,
+            run_record=run_record,
+            collected_context=collected_context,  # pre-seeded repo context
+        )
 
     except Exception as e:
         run_record.status = "error"
         run_record.error_message = str(e)
-        logger.exception(f"[worker-{worker_id}] {slug}: {e}")
     finally:
-        # Cleanup always runs
         shutil.rmtree(clone_dir, ignore_errors=True)
         docker_ops.cleanup(image_name)
-        run_record.finished_at = datetime.utcnow()
+        run_record.finished_at = datetime.now(timezone.utc)
         db.write_run_finish(run_record)
 ```
 
@@ -856,6 +851,9 @@ def main(repo_list: str, workers: int = 4):
             except Exception as e:
                 logger.error(f"Unhandled: {url}: {e}")
 
+            # Update batch_run counters incrementally after each repo completes
+            db.update_batch_progress(batch.id)
+
     db.write_batch_finish(batch)
     print_summary(db, batch.id)
 ```
@@ -871,16 +869,18 @@ All configuration via environment variables (loaded from `.env`):
 AZURE_OPENAI_API_KEY=...
 AZURE_OPENAI_ENDPOINT=...
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT_NANO=gpt5-nano
-AZURE_OPENAI_DEPLOYMENT_CHAT=gpt5-chat
+AZURE_OPENAI_DEPLOYMENT_NANO=gpt-5-nano,gpt-5-nano-2,gpt-5-nano-3,gpt-5-nano-4  # comma-separated for round-robin
+AZURE_OPENAI_DEPLOYMENT_CHAT=gpt-5-chat
+AZURE_OPENAI_ENDPOINT_CHAT=...           # optional: separate endpoint for chat model
+AZURE_OPENAI_API_KEY_CHAT=...            # optional: separate API key for chat model
 
-# Rate limits
-AZURE_OPENAI_RPM=60
-AZURE_OPENAI_TPM=80000
+# Rate limits (aggregate across all nano deployments)
+AZURE_OPENAI_RPM=1000
+AZURE_OPENAI_TPM=1000000
 
 # Docker
 DOCKER_BUILD_TIMEOUT=600
-DOCKER_BUILD_CONCURRENCY=2
+DOCKER_BUILD_CONCURRENCY=4
 DOCKER_SMOKE_TIMEOUT=30
 DOCKER_KEEP_STORAGE_GB=10
 DOCKER_PRUNE_INTERVAL=10
@@ -894,6 +894,6 @@ DATABASE_URL=sqlite:///results.db
 
 # Agent
 MAX_ITERATIONS=3
-MAX_STEPS_PER_ITERATION=15
+MAX_STEPS_PER_ITERATION=25
 SUMMARIZE_THRESHOLD=2000
 ```

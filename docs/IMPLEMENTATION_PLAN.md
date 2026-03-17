@@ -93,11 +93,12 @@ Three functions + the image catalog:
 - Call file selector prompt (from PROMPT_SPECIFICATIONS.md §1)
 - Validate paths, fallback to heuristic
 
-**`generate_blueprint(repo_root, image_catalog, llm) → dict`**
-- Read selected files (20K cap each)
+**`generate_blueprint(repo_root, image_catalog, llm) → tuple[dict, CollectedContext, int, int]`**
+- Read selected files (20K cap each) into `CollectedContext.files`
 - Call metaprompt (from PROMPT_SPECIFICATIONS.md §2)
 - Parse JSON, validate required fields
 - Fallback to extension-based detection
+- Returns `(blueprint, collected_context, prompt_tokens, completion_tokens)` — the `CollectedContext` is forwarded to the agent as the pre-seeded initial message
 
 **Test:**
 - `ImageCatalog`: mock Docker Hub responses, verify pagination and format.
@@ -173,30 +174,32 @@ Implement in order:
 
 ### F1. `src/agent/react_loop.py`
 
-**`run_iteration(prompt, tools, llm, db, max_steps=15) → IterationRecord`**
-- Create LangChain `AgentExecutor` with tools and system prompt
-- Set `max_iterations=max_steps`, `return_intermediate_steps=True`
-- Run executor
-- Extract steps from `intermediate_steps`
+**`run_iteration(prompt, tools, llm, db, iteration, verify_tool, max_steps=25, initial_message) → IterationRecord`**
+- Create langgraph `create_react_agent` with `prompt=_make_messages_modifier(prompt)` (callable)
+- The messages modifier extracts `state["messages"]` from the langgraph state dict, prepends `SystemMessage`, and truncates old `ToolMessage` content to 4000 chars (last 16 messages kept intact)
+- Stream with `stream_mode="updates"`, `recursion_limit=max_steps * 2 + 1`
+- Extract `"agent"` chunks (pending tool calls) and `"tools"` chunks (completed steps)
 - For each step: check output length → summarize if >2000 → write to DB
-- Detect if VerifyBuild accepted
+- Detect if VerifyBuild accepted → break stream early
 
 **`extract_lessons(steps, llm) → str`**
-- Format step history
+- Format step history (thought/input/result capped at 200 chars each)
 - Call lesson extractor prompt (PROMPT_SPECIFICATIONS.md §5) via gpt5-chat
-- Fallback to raw error extraction
+- Fallback to raw error extraction from last VerifyBuild result
 
-**`run_agent(repo_root, blueprint, llm, docker_ops, image_name, db, max_iterations=3) → RunRecord`**
+**`run_agent(repo_root, blueprint, llm, docker_ops, image_name, db, run_record, max_iterations=3, collected_context=None) → RunRecord`**
 - Outer loop: up to 3 iterations
 - Delete Dockerfile between iterations
-- Build prompt with blueprint + lessons
+- Build system prompt with blueprint + lessons
+- Build initial HumanMessage from `collected_context` (pre-seeded file tree + build files)
 - Call `run_iteration`
 - If accepted → return success
 - If failed → extract lessons → next iteration
 
 **Test:**
-- Mock LLM to return a predefined sequence of steps (tool calls). Verify step extraction, DB writes, summarization triggers.
-- Integration test with real LLM + Docker on a toy repo. Verify end-to-end: blueprint → agent → VerifyBuild → accepted.
+- Mock LLM to return a predefined sequence of tool calls as langgraph stream chunks. Verify step extraction, DB writes, summarization triggers.
+- Pass state dict `{"messages": [...]}` to the messages modifier — verify it extracts correctly (not bare list).
+- Integration test with real LLM + Docker on a toy repo. Verify: blueprint → agent writes Dockerfile → VerifyBuild called → accepted.
 
 ---
 
@@ -223,6 +226,7 @@ python src/batch_runner.py repos.txt [--workers 4] [--db results.db]
 - Create batch_run row
 - Skip already-successful slugs (crash recovery)
 - ThreadPoolExecutor → worker_loop per repo
+- After each repo completes, call `db.update_batch_progress(batch.id)` to update `success_count`, `failure_count`, and token totals incrementally
 - Print progress + summary
 
 ### G3. `src/parallel/worker.py`

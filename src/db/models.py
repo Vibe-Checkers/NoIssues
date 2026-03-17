@@ -50,11 +50,13 @@ class VerifyBuildResult:
     review_approved: bool = False
     review_concerns: list[str] = field(default_factory=list)
     smoke_test_commands: list[str] = field(default_factory=list)
+    review_duration_ms: int | None = None
     build_success: bool | None = None
     build_error: str | None = None
     build_error_raw: str | None = None
     build_duration_ms: int | None = None
     smoke_results: list[dict] | None = None
+    smoke_duration_ms: int | None = None
     dockerfile_snapshot: str | None = None
     # Token accounting
     review_tokens: tuple[int, int] = (0, 0)  # (prompt, completion)

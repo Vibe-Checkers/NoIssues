@@ -163,9 +163,6 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.monotonic()
     done_count = 0
-    success_count = 0
-    fail_count = 0
-    error_count = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {}
@@ -193,7 +190,9 @@ def main(argv: list[str] | None = None) -> int:
                 future.result()
             except Exception as e:
                 logger.error("Unhandled error for %s: %s", slug, e)
-                error_count += 1
+
+            # Update batch_run counters after each repo
+            db.update_batch_progress(batch.id)
 
             elapsed = time.monotonic() - t0
             active = len(pending) - done_count

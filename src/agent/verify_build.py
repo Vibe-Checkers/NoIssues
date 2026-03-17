@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -115,7 +116,9 @@ class VerifyBuildTool:
         dockerfile_content = dockerfile_path.read_text(errors="replace")
 
         # Step 2: LLM review
+        review_t0 = time.monotonic()
         review = self._review_dockerfile(dockerfile_content)
+        review_duration_ms = int((time.monotonic() - review_t0) * 1000)
         review_tokens = review.pop("_tokens", (0, 0))
 
         approved = review.get("approved", False)
@@ -135,6 +138,7 @@ class VerifyBuildTool:
                 review_approved=False,
                 review_concerns=concerns,
                 smoke_test_commands=smoke_commands,
+                review_duration_ms=review_duration_ms,
                 dockerfile_snapshot=dockerfile_content,
                 review_tokens=review_tokens,
             )
@@ -155,6 +159,7 @@ class VerifyBuildTool:
                 review_approved=True,
                 review_concerns=concerns,
                 smoke_test_commands=smoke_commands,
+                review_duration_ms=review_duration_ms,
                 build_success=False,
                 build_error=summarized_error,
                 build_error_raw=build_error_raw,
@@ -165,6 +170,7 @@ class VerifyBuildTool:
             )
 
         # Step 4: Run smoke tests
+        smoke_t0 = time.monotonic()
         smoke_results = []
         all_passed = True
         for cmd in smoke_commands:
@@ -179,6 +185,7 @@ class VerifyBuildTool:
             })
             if exit_code != 0:
                 all_passed = False
+        smoke_duration_ms = int((time.monotonic() - smoke_t0) * 1000)
 
         status = "accepted" if all_passed else "smoke_failed"
 
@@ -187,9 +194,11 @@ class VerifyBuildTool:
             review_approved=True,
             review_concerns=concerns,
             smoke_test_commands=smoke_commands,
+            review_duration_ms=review_duration_ms,
             build_success=True,
             build_duration_ms=build_duration,
             smoke_results=smoke_results,
+            smoke_duration_ms=smoke_duration_ms,
             dockerfile_snapshot=dockerfile_content,
             review_tokens=review_tokens,
         )
