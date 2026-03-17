@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         image_catalog = ImageCatalog().get(db=db)
 
         bp_t0 = time.monotonic()
-        blueprint, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
+        blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
         bp_dur = int((time.monotonic() - bp_t0) * 1000)
 
         run_record.context_blueprint = json.dumps(blueprint)
@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             db=db,
             run_record=run_record,
             max_iterations=args.max_iterations,
+            collected_context=collected_context,
         )
 
         if run_record.smoke_test_passed:

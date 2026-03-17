@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,42 @@ FILE_TREE_MAX_ENTRIES = 500
 README_MAX_CHARS = 5000
 FILE_CONTENT_MAX_CHARS = 20_000
 MAX_TAGS_PER_IMAGE = 6
+CONTEXT_MAX_CHARS = 60_000  # ~15k tokens; leaves room for system prompt + tool exchanges
+
+
+@dataclass
+class CollectedContext:
+    """Repository context gathered during blueprint generation.
+
+    Passed to the agent so it can skip the exploration phase.
+    """
+
+    file_tree: str = ""
+    readme: str = ""
+    files: dict[str, str] = field(default_factory=dict)  # path → content
+
+    def estimated_chars(self) -> int:
+        return len(self.file_tree) + len(self.readme) + sum(len(v) for v in self.files.values())
+
+    def truncate_to_budget(self, max_chars: int = CONTEXT_MAX_CHARS) -> None:
+        """Trim context to fit within token budget, prioritizing build files."""
+        if self.estimated_chars() <= max_chars:
+            return
+
+        # Priority: files > readme > file_tree
+        tree_budget = min(len(self.file_tree), max_chars // 4)
+        if len(self.file_tree) > tree_budget:
+            self.file_tree = self.file_tree[:tree_budget] + "\n... (truncated)"
+
+        readme_budget = min(len(self.readme), max_chars // 6)
+        if len(self.readme) > readme_budget:
+            self.readme = self.readme[:readme_budget] + "\n... (truncated)"
+
+        remaining = max_chars - len(self.file_tree) - len(self.readme)
+        per_file = max(remaining // max(len(self.files), 1), 0)
+        for path in list(self.files):
+            if len(self.files[path]) > per_file:
+                self.files[path] = self.files[path][:per_file] + "\n... (truncated)"
 
 
 # ═══════════════════════════════════════════════════════
@@ -149,14 +186,15 @@ Return ONLY a JSON array of file paths exactly as they appear in the tree. Examp
 ["package.json", "tsconfig.json", ".github/workflows/ci.yml"]"""
 
 
-def select_build_files(repo_root: str | Path, llm) -> tuple[list[str], int, int]:
+def select_build_files(repo_root: str | Path, llm) -> tuple[list[str], CollectedContext, int, int]:
     """Select 3-5 build-relevant files from the repo.
 
-    Returns (paths, prompt_tokens, completion_tokens).
+    Returns (paths, collected_context, prompt_tokens, completion_tokens).
     """
     repo_root = Path(repo_root)
     file_tree = generate_file_tree(repo_root)
     readme = read_readme(repo_root)
+    ctx = CollectedContext(file_tree=file_tree, readme=readme)
 
     try:
         response = llm.call_nano([
@@ -171,10 +209,10 @@ def select_build_files(repo_root: str | Path, llm) -> tuple[list[str], int, int]
         if not paths:
             paths = _heuristic_file_selection(repo_root)
 
-        return paths[:5], response.prompt_tokens, response.completion_tokens
+        return paths[:5], ctx, response.prompt_tokens, response.completion_tokens
     except Exception:
         logger.warning("File selector LLM call failed, using heuristic", exc_info=True)
-        return _heuristic_file_selection(repo_root), 0, 0
+        return _heuristic_file_selection(repo_root), ctx, 0, 0
 
 
 def _heuristic_file_selection(repo_root: Path) -> list[str]:
@@ -237,18 +275,19 @@ def generate_blueprint(
     repo_root: str | Path,
     image_catalog: str,
     llm,
-) -> tuple[dict, int, int]:
+) -> tuple[dict, CollectedContext, int, int]:
     """Generate context blueprint for a repository.
 
-    Returns (blueprint_dict, total_prompt_tokens, total_completion_tokens).
+    Returns (blueprint_dict, collected_context, total_prompt_tokens, total_completion_tokens).
     """
     repo_root = Path(repo_root)
 
     # Step 1: select files
-    paths, sel_pt, sel_ct = select_build_files(repo_root, llm)
+    paths, ctx, sel_pt, sel_ct = select_build_files(repo_root, llm)
 
     # Step 2: read selected files
-    file_contents = _read_selected_files(repo_root, paths)
+    file_contents, file_dict = _read_selected_files(repo_root, paths)
+    ctx.files = file_dict
 
     # Step 3: call metaprompt
     try:
@@ -263,13 +302,14 @@ def generate_blueprint(
         blueprint = json.loads(response.content)
 
         # Validate required fields
-        for field in ("language", "build_system", "repo_type", "base_image"):
-            if field not in blueprint:
-                blueprint[field] = "unknown"
+        for bp_field in ("language", "build_system", "repo_type", "base_image"):
+            if bp_field not in blueprint:
+                blueprint[bp_field] = "unknown"
 
         total_pt = sel_pt + response.prompt_tokens
         total_ct = sel_ct + response.completion_tokens
-        return blueprint, total_pt, total_ct
+        ctx.truncate_to_budget()
+        return blueprint, ctx, total_pt, total_ct
 
     except Exception:
         logger.warning("Blueprint metaprompt failed, using fallback", exc_info=True)
@@ -282,21 +322,27 @@ def generate_blueprint(
             "pitfalls": [],
             "notes": "Blueprint generation failed. Agent must analyze the repository from scratch.",
         }
-        return fallback, sel_pt, sel_ct
+        ctx.truncate_to_budget()
+        return fallback, ctx, sel_pt, sel_ct
 
 
 # ─── Helpers ─────────────────────────────────────────
 
-def _read_selected_files(repo_root: Path, paths: list[str]) -> str:
-    """Read selected files and format for the metaprompt."""
+def _read_selected_files(repo_root: Path, paths: list[str]) -> tuple[str, dict[str, str]]:
+    """Read selected files and format for the metaprompt.
+
+    Returns (formatted_string, {path: content}).
+    """
     sections = []
+    file_dict: dict[str, str] = {}
     for p in paths[:5]:
         try:
             text = (repo_root / p).read_text(errors="replace")[:FILE_CONTENT_MAX_CHARS]
             sections.append(f"--- {p} ---\n{text}")
+            file_dict[p] = text
         except Exception:
             continue
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), file_dict
 
 
 def generate_file_tree(repo_root: Path) -> str:

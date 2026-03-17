@@ -99,7 +99,7 @@ def worker_loop(
 
         # Phase 1: Blueprint
         bp_t0 = time.monotonic()
-        blueprint, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
+        blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
         bp_dur = int((time.monotonic() - bp_t0) * 1000)
 
         run_record.context_blueprint = json.dumps(blueprint)
@@ -119,6 +119,7 @@ def worker_loop(
             image_name=image_name,
             db=db,
             run_record=run_record,
+            collected_context=collected_context,
         )
 
         # Determine final status

@@ -21,6 +21,7 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, System
 
 from db.models import StepRecord, IterationRecord, RunRecord, VerifyBuildResult
 from db.writer import DBWriter
+from agent.blueprint import CollectedContext
 from agent.summarizer import summarize_output
 from agent.tools import create_tools
 from agent.verify_build import VerifyBuildTool
@@ -38,25 +39,31 @@ CONTEXT BLUEPRINT:
 
 {lessons_section}
 
+REPOSITORY CONTEXT:
+The repository file tree and key build file contents are provided in the first message below. \
+You already have all the information needed to write the Dockerfile.
+
 WORKFLOW:
-1. Explore the repository structure using ListDirectory and ReadFile to understand what needs to be built.
-2. Write a Dockerfile using WriteFile. The Dockerfile must:
+1. Based on the repository context provided, write a Dockerfile using WriteFile. The Dockerfile must:
    - Use an appropriate base image (the blueprint suggests: {base_image})
    - Install system dependencies if needed
    - Copy source code
    - Install project dependencies
    - Build the project from source
    - Set a proper CMD or ENTRYPOINT
-3. Write a .dockerignore file to exclude unnecessary files (.git, node_modules, etc.).
-4. Call VerifyBuild to test the Dockerfile. This is MANDATORY — never finish without calling VerifyBuild.
-5. If VerifyBuild reports issues, read the error, fix the Dockerfile, and call VerifyBuild again.
+2. Write a .dockerignore file to exclude unnecessary files (.git, node_modules, etc.).
+3. Call VerifyBuild to test the Dockerfile. This is MANDATORY — never finish without calling VerifyBuild.
+4. If VerifyBuild reports issues, read the error carefully. Use ReadFile or ListDirectory ONLY to \
+investigate specific files mentioned in the error. Fix the Dockerfile and call VerifyBuild again.
 
 RULES:
+- Your first action should be WriteFile to create the Dockerfile.
+- Do NOT explore the repository — the file tree and build files are already provided.
+- Do NOT call ListDirectory(".") or ReadFile unless VerifyBuild has failed and you need to check a specific file.
 - You MUST call VerifyBuild at least once.
 - Do NOT write a Dockerfile that only installs a runtime without building the project.
 - If the blueprint's suggested base image doesn't work, use DockerImageSearch to find a better one.
-- If a build error is unclear, use SearchWeb to find solutions.
-- Be precise with COPY paths — check what files exist with ListDirectory before writing COPY instructions."""
+- If a build error is unclear, use SearchWeb to find solutions."""
 
 LESSONS_TEMPLATE = """\
 LESSONS FROM PREVIOUS ATTEMPTS:
@@ -97,9 +104,11 @@ def run_agent(
     db: DBWriter,
     run_record: RunRecord,
     max_iterations: int = 3,
+    collected_context: CollectedContext | None = None,
 ) -> RunRecord:
     """Outer loop: up to max_iterations attempts to generate a working Dockerfile."""
     lessons = None
+    initial_message = _build_initial_message(collected_context)
 
     for iteration_num in range(1, max_iterations + 1):
         # Clean slate — delete Dockerfile between iterations
@@ -139,6 +148,7 @@ def run_agent(
             iteration=iteration,
             verify_tool=verify_tool,
             max_steps=int(os.environ.get("MAX_STEPS_PER_ITERATION", "25")),
+            initial_message=initial_message,
         )
 
         run_record.iterations.append(iteration)
@@ -169,6 +179,7 @@ def run_iteration(
     iteration: IterationRecord,
     verify_tool: VerifyBuildTool,
     max_steps: int = 25,
+    initial_message: str = "Generate a Dockerfile for this repository. Follow the workflow above.",
 ) -> IterationRecord:
     """Single iteration: run langgraph react agent and extract steps."""
     t0 = time.monotonic()
@@ -189,9 +200,7 @@ def run_iteration(
 
     try:
         for chunk in agent.stream(
-            {"messages": [HumanMessage(
-                content="Generate a Dockerfile for this repository. Follow the workflow above.",
-            )]},
+            {"messages": [HumanMessage(content=initial_message)]},
             config={"recursion_limit": max_steps * 2 + 1},
             stream_mode="updates",
         ):
@@ -348,18 +357,43 @@ def _fallback_lessons(steps: list[StepRecord]) -> str:
 
 # ─── Helpers ─────────────────────────────────────────
 
-_OLD_TOOL_MSG_MAX = 1500  # chars to keep from non-recent tool messages
+_OLD_TOOL_MSG_MAX = 4000  # chars to keep from non-recent tool messages
+
+
+def _build_initial_message(collected_context: CollectedContext | None) -> str:
+    """Build the initial HumanMessage content with pre-seeded repo context."""
+    if collected_context is None or not collected_context.file_tree:
+        return "Generate a Dockerfile for this repository. Follow the workflow above."
+
+    parts = ["Generate a Dockerfile for this repository based on the context below."]
+
+    parts.append("\n\n=== REPOSITORY FILE TREE ===")
+    parts.append(collected_context.file_tree)
+
+    if collected_context.readme and collected_context.readme != "(no README found)":
+        parts.append("\n\n=== README ===")
+        parts.append(collected_context.readme)
+
+    if collected_context.files:
+        parts.append("\n\n=== KEY BUILD FILES ===")
+        for path, content in collected_context.files.items():
+            parts.append(f"\n--- {path} ---")
+            parts.append(content)
+
+    parts.append("\n\nWrite the Dockerfile now. Do not explore — all needed context is above.")
+
+    return "\n".join(parts)
 
 
 def _make_messages_modifier(system_prompt: str):
     """Messages modifier: inject system prompt and truncate old tool outputs.
 
-    Keeps the last 8 messages fully intact (4 tool exchanges). Older tool
+    Keeps the last 16 messages fully intact (8 tool exchanges). Older tool
     messages are truncated to _OLD_TOOL_MSG_MAX chars to prevent the
     accumulated history from exceeding the model's context limit.
     """
     def modifier(messages: list) -> list:
-        keep_full = 8
+        keep_full = 16
         cutoff = max(0, len(messages) - keep_full)
         result = []
         for i, msg in enumerate(messages):

@@ -18,6 +18,7 @@ from agent.tools import ListDirectoryTool
 from agent.verify_build import VerifyBuildTool
 from agent.react_loop import _make_messages_modifier
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
+from agent.blueprint import CollectedContext
 from db.models import BatchRun, RunRecord, VerifyBuildResult
 from db.writer import DBWriter
 from parallel.worker import worker_loop
@@ -160,19 +161,20 @@ class TestMessagesModifier:
         assert all(len(m.content) == 3000 for m in tool_msgs)
 
     def test_old_long_tool_messages_truncated(self):
-        """Messages beyond the keep_full window that exceed 1500 chars are truncated."""
+        """Messages beyond the keep_full window that exceed _OLD_TOOL_MSG_MAX chars are truncated."""
         modifier = _make_messages_modifier("sys")
-        long = "x" * 3000
-        messages = [ToolMessage(content=long, tool_call_id=f"id{i}") for i in range(10)]
+        long = "x" * 6000
+        # Need more than keep_full (16) messages to trigger truncation
+        messages = [ToolMessage(content=long, tool_call_id=f"id{i}") for i in range(20)]
         result = modifier(messages)
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
 
-        # First 2 are old (10 - 8 = 2)
-        assert "[truncated]" in tool_msgs[0].content
-        assert "[truncated]" in tool_msgs[1].content
-        # Remaining 8 intact
-        for msg in tool_msgs[2:]:
-            assert len(msg.content) == 3000
+        # First 4 are old (20 - 16 = 4), all truncated
+        for msg in tool_msgs[:4]:
+            assert "[truncated]" in msg.content
+        # Remaining 16 intact
+        for msg in tool_msgs[4:]:
+            assert len(msg.content) == 6000
             assert "[truncated]" not in msg.content
 
     def test_old_short_tool_messages_not_truncated(self):
@@ -195,10 +197,10 @@ class TestMessagesModifier:
         """Truncated content is ≤ _OLD_TOOL_MSG_MAX + len('\n...[truncated]')."""
         from agent.react_loop import _OLD_TOOL_MSG_MAX
         modifier = _make_messages_modifier("sys")
-        messages = [ToolMessage(content="y" * 5000, tool_call_id=f"id{i}") for i in range(10)]
+        messages = [ToolMessage(content="y" * 6000, tool_call_id=f"id{i}") for i in range(20)]
         result = modifier(messages)
         tool_msgs = [m for m in result if isinstance(m, ToolMessage)]
-        for msg in tool_msgs[:2]:  # old messages
+        for msg in tool_msgs[:4]:  # old messages (20 - 16 = 4)
             assert len(msg.content) <= _OLD_TOOL_MSG_MAX + 20  # small slack for "\n...[truncated]"
 
     def test_modifier_callable_is_returned(self):
@@ -235,7 +237,7 @@ class TestWorkerArtifact:
             with patch("parallel.worker.clone_repo"):
                 with patch("parallel.worker.generate_blueprint",
                            return_value=({"base_image": "python:3.11", "language": "python",
-                                          "repo_type": "library"}, 100, 50)):
+                                          "repo_type": "library"}, CollectedContext(), 100, 50)):
                     with patch("parallel.worker.run_agent", side_effect=mock_run_agent):
                         worker_loop(
                             worker_id=0,
@@ -501,3 +503,131 @@ class TestMultiDeploymentRoundRobin:
                 LLMClient(mock_limiter)  # no worker_id
                 nano_call = mock_azure.call_args_list[0]
                 assert nano_call.kwargs["azure_deployment"] == "first"
+
+
+# ═══════════════════════════════════════════════════════
+# J1: CollectedContext
+# ═══════════════════════════════════════════════════════
+
+class TestCollectedContext:
+    def test_estimated_chars(self):
+        ctx = CollectedContext(file_tree="abc", readme="de", files={"f": "ghij"})
+        assert ctx.estimated_chars() == 3 + 2 + 4
+
+    def test_truncate_noop_under_budget(self):
+        ctx = CollectedContext(file_tree="a" * 100, readme="b" * 100, files={"f": "c" * 100})
+        ctx.truncate_to_budget(max_chars=1000)
+        assert ctx.estimated_chars() == 300
+
+    def test_truncate_trims_large_context(self):
+        ctx = CollectedContext(
+            file_tree="t" * 30_000,
+            readme="r" * 20_000,
+            files={"a.py": "x" * 40_000, "b.py": "y" * 40_000},
+        )
+        ctx.truncate_to_budget(max_chars=60_000)
+        assert ctx.estimated_chars() <= 60_000 + 100  # allow small overhead from "... (truncated)"
+
+    def test_empty_context(self):
+        ctx = CollectedContext()
+        assert ctx.estimated_chars() == 0
+        ctx.truncate_to_budget()  # should not raise
+
+
+# ═══════════════════════════════════════════════════════
+# J2: _build_initial_message
+# ═══════════════════════════════════════════════════════
+
+class TestBuildInitialMessage:
+    def test_none_context_returns_fallback(self):
+        from agent.react_loop import _build_initial_message
+        msg = _build_initial_message(None)
+        assert "Follow the workflow" in msg
+
+    def test_empty_context_returns_fallback(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext()
+        msg = _build_initial_message(ctx)
+        assert "Follow the workflow" in msg
+
+    def test_with_context_includes_file_tree(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext(file_tree="src/\npackage.json\nREADME.md")
+        msg = _build_initial_message(ctx)
+        assert "REPOSITORY FILE TREE" in msg
+        assert "package.json" in msg
+
+    def test_with_context_includes_files(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext(
+            file_tree="package.json",
+            files={"package.json": '{"name": "test"}'},
+        )
+        msg = _build_initial_message(ctx)
+        assert "KEY BUILD FILES" in msg
+        assert '"name": "test"' in msg
+
+    def test_with_context_includes_readme(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext(file_tree="README.md", readme="# My Project")
+        msg = _build_initial_message(ctx)
+        assert "README" in msg
+        assert "# My Project" in msg
+
+    def test_skips_no_readme_found(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext(file_tree="src/", readme="(no README found)")
+        msg = _build_initial_message(ctx)
+        assert "(no README found)" not in msg
+
+    def test_ends_with_write_instruction(self):
+        from agent.react_loop import _build_initial_message
+        ctx = CollectedContext(file_tree="src/")
+        msg = _build_initial_message(ctx)
+        assert "Write the Dockerfile now" in msg
+
+
+# ═══════════════════════════════════════════════════════
+# J3: generate_blueprint returns CollectedContext
+# ═══════════════════════════════════════════════════════
+
+class TestBlueprintReturnsContext:
+    def test_generate_blueprint_returns_four_values(self):
+        from agent.blueprint import generate_blueprint
+        mock_llm = MagicMock()
+        # Mock call_nano to return valid JSON for both file selection and blueprint
+        mock_llm.call_nano.side_effect = [
+            MagicMock(content='["package.json"]', prompt_tokens=10, completion_tokens=5),
+            MagicMock(content='{"language":"javascript","build_system":"npm","repo_type":"library","base_image":"node:22"}',
+                      prompt_tokens=20, completion_tokens=10),
+        ]
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "package.json").write_text('{"name":"test"}')
+            (Path(td) / "README.md").write_text("# Test")
+            result = generate_blueprint(td, "node: 22, 20", mock_llm)
+
+        assert len(result) == 4
+        blueprint, ctx, pt, ct = result
+        assert isinstance(blueprint, dict)
+        assert isinstance(ctx, CollectedContext)
+        assert ctx.file_tree  # non-empty
+        assert "package.json" in ctx.files
+        assert pt > 0
+
+    def test_select_build_files_returns_context(self):
+        from agent.blueprint import select_build_files
+        mock_llm = MagicMock()
+        mock_llm.call_nano.return_value = MagicMock(
+            content='["Makefile"]', prompt_tokens=5, completion_tokens=3,
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "Makefile").write_text("all: build")
+            (Path(td) / "README.md").write_text("# Hi")
+            paths, ctx, pt, ct = select_build_files(td, mock_llm)
+
+        assert "Makefile" in paths
+        assert isinstance(ctx, CollectedContext)
+        assert "Makefile" in ctx.file_tree
+        assert ctx.readme == "# Hi"
