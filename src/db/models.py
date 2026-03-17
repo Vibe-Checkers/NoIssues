@@ -154,6 +154,7 @@ class BatchRun:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     config_json: str | None = None
+    tag: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
