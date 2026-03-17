@@ -40,19 +40,33 @@ class LLMClient:
         AZURE_OPENAI_ENDPOINT          — Azure endpoint URL (nano; also chat fallback)
         AZURE_OPENAI_API_KEY           — API key (nano; also chat fallback)
         AZURE_OPENAI_API_VERSION       — API version (default: 2024-02-15-preview)
-        AZURE_OPENAI_DEPLOYMENT_NANO   — deployment name for gpt5-nano
+        AZURE_OPENAI_DEPLOYMENT_NANO   — deployment name(s) for gpt5-nano;
+                                         comma-separated list for multi-deployment
+                                         round-robin (e.g. "nano-1,nano-2,nano-3")
         AZURE_OPENAI_DEPLOYMENT_CHAT   — deployment name for gpt5-chat
         AZURE_OPENAI_ENDPOINT_CHAT     — (optional) separate endpoint for chat model
         AZURE_OPENAI_API_KEY_CHAT      — (optional) separate API key for chat model
     """
 
-    def __init__(self, rate_limiter: GlobalRateLimiter):
+    def __init__(self, rate_limiter: GlobalRateLimiter, worker_id: int = 0):
         self.limiter = rate_limiter
 
         api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 
+        # Support comma-separated list of nano deployments; each worker picks one
+        nano_deployments = [
+            d.strip()
+            for d in os.environ["AZURE_OPENAI_DEPLOYMENT_NANO"].split(",")
+            if d.strip()
+        ]
+        nano_deployment = nano_deployments[worker_id % len(nano_deployments)]
+        logger.debug(
+            "worker %d → nano deployment: %s (pool size: %d)",
+            worker_id, nano_deployment, len(nano_deployments),
+        )
+
         self.nano = AzureChatOpenAI(
-            azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NANO"],
+            azure_deployment=nano_deployment,
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
             api_version=api_version,

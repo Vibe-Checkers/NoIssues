@@ -423,3 +423,81 @@ class TestStepTokenCounting:
         assert result.steps[0].prompt_tokens == 0
         assert result.steps[0].completion_tokens == 0
         db.close()
+
+
+# ═══════════════════════════════════════════════════════
+# I1: Multi-deployment round-robin for gpt-5-nano
+# ═══════════════════════════════════════════════════════
+
+class TestMultiDeploymentRoundRobin:
+    """LLMClient selects nano deployment by worker_id % len(deployments)."""
+
+    def _make_client(self, deployment_env: str, worker_id: int):
+        env = {
+            "AZURE_OPENAI_DEPLOYMENT_NANO": deployment_env,
+            "AZURE_OPENAI_DEPLOYMENT_CHAT": "chat-deploy",
+            "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
+            "AZURE_OPENAI_API_KEY": "fake-key",
+        }
+        mock_limiter = MagicMock()
+        with patch.dict(os.environ, env, clear=False):
+            with patch("agent.llm.AzureChatOpenAI") as mock_azure:
+                mock_azure.return_value = MagicMock()
+                from agent.llm import LLMClient
+                client = LLMClient(mock_limiter, worker_id=worker_id)
+                # Return list of (kwargs, instance) from each AzureChatOpenAI call
+                calls = mock_azure.call_args_list
+                return client, calls
+
+    def test_single_deployment_always_selected(self):
+        """With one deployment, all workers use it."""
+        for wid in range(5):
+            _, calls = self._make_client("only-nano", wid)
+            nano_call = calls[0]
+            assert nano_call.kwargs["azure_deployment"] == "only-nano"
+
+    def test_two_deployments_alternates(self):
+        """Worker 0 → first, worker 1 → second, worker 2 → first, etc."""
+        for wid, expected in [(0, "nano-a"), (1, "nano-b"), (2, "nano-a"), (3, "nano-b")]:
+            _, calls = self._make_client("nano-a,nano-b", wid)
+            nano_call = calls[0]
+            assert nano_call.kwargs["azure_deployment"] == expected, \
+                f"worker {wid}: expected {expected}, got {nano_call.kwargs['azure_deployment']}"
+
+    def test_three_deployments_cycles(self):
+        """Three deployments cycle across workers."""
+        mapping = {0: "d1", 1: "d2", 2: "d3", 3: "d1", 4: "d2", 5: "d3"}
+        for wid, expected in mapping.items():
+            _, calls = self._make_client("d1,d2,d3", wid)
+            nano_call = calls[0]
+            assert nano_call.kwargs["azure_deployment"] == expected
+
+    def test_whitespace_in_env_var_stripped(self):
+        """Spaces around deployment names are stripped."""
+        _, calls = self._make_client("  nano-x , nano-y  ", 1)
+        nano_call = calls[0]
+        assert nano_call.kwargs["azure_deployment"] == "nano-y"
+
+    def test_chat_deployment_unaffected(self):
+        """Chat deployment is always the single configured value regardless of worker_id."""
+        for wid in range(4):
+            _, calls = self._make_client("nano-a,nano-b", wid)
+            chat_call = calls[1]
+            assert chat_call.kwargs["azure_deployment"] == "chat-deploy"
+
+    def test_default_worker_id_zero(self):
+        """worker_id defaults to 0, selecting the first deployment."""
+        env = {
+            "AZURE_OPENAI_DEPLOYMENT_NANO": "first,second",
+            "AZURE_OPENAI_DEPLOYMENT_CHAT": "chat-deploy",
+            "AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com/",
+            "AZURE_OPENAI_API_KEY": "fake-key",
+        }
+        mock_limiter = MagicMock()
+        with patch.dict(os.environ, env, clear=False):
+            with patch("agent.llm.AzureChatOpenAI") as mock_azure:
+                mock_azure.return_value = MagicMock()
+                from agent.llm import LLMClient
+                LLMClient(mock_limiter)  # no worker_id
+                nano_call = mock_azure.call_args_list[0]
+                assert nano_call.kwargs["azure_deployment"] == "first"

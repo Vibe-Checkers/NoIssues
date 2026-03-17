@@ -76,7 +76,7 @@ def worker_loop(
     slug = make_slug(repo_url)
     clone_dir = Path(workdir) / batch_id / str(worker_id) / slug
     image_name = f"buildagent-{slug}-{worker_id}"
-    llm = LLMClient(rate_limiter)
+    llm = LLMClient(rate_limiter, worker_id=worker_id)
     docker_ops = DockerOps(build_semaphore=build_semaphore)
 
     run_record = RunRecord(
