@@ -18,7 +18,7 @@ https://github.com/FreeRTOS/FreeRTOS
 https://github.com/git/git
 https://github.com/google/guava
 https://github.com/ocornut/imgui
-https://github.com/stleaACry/JSON-java
+https://github.com/stleary/JSON-java
 https://github.com/json-c/json-c
 https://github.com/keras-team/keras
 https://github.com/langchain-ai/langchain
