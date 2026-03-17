@@ -6,7 +6,6 @@ All file operations are sandboxed within repo_root.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -86,7 +85,7 @@ class ListDirectoryTool:
                 return f"Error: not a directory: {path}"
             entries = []
             for item in sorted(resolved.iterdir()):
-                rel = item.relative_to(self.repo_root)
+                rel = item.relative_to(self.repo_root.resolve())
                 suffix = "/" if item.is_dir() else ""
                 entries.append(f"{rel}{suffix}")
             return "\n".join(entries) if entries else "(empty directory)"

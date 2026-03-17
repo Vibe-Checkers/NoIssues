@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -20,7 +19,7 @@ from pathlib import Path
 from db.models import RunRecord
 from db.writer import DBWriter
 from agent.llm import LLMClient
-from agent.blueprint import generate_blueprint, ImageCatalog
+from agent.blueprint import generate_blueprint
 from agent.react_loop import run_agent
 from agent.docker_ops import DockerOps
 from parallel.rate_limiter import GlobalRateLimiter
@@ -153,6 +152,10 @@ def worker_loop(
         )
 
         db.write_run_finish(run_record)
+
+        if run_record.final_dockerfile:
+            db.write_artifact(run_record.id, "dockerfile", "Dockerfile",
+                              content=run_record.final_dockerfile)
 
         # Clean up filesystem and Docker image
         shutil.rmtree(clone_dir, ignore_errors=True)

@@ -17,7 +17,7 @@ from pathlib import Path
 from langgraph.prebuilt import create_react_agent
 from langgraph.errors import GraphRecursionError
 from langchain_core.tools import StructuredTool
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 
 from db.models import StepRecord, IterationRecord, RunRecord, VerifyBuildResult
 from db.writer import DBWriter
@@ -145,7 +145,7 @@ def run_agent(
         run_record.iteration_count = iteration_num
 
         if iteration.verify_result == "accepted":
-            # Read the final Dockerfile
+            db.write_iteration_finish(iteration)
             if dockerfile.exists():
                 run_record.final_dockerfile = dockerfile.read_text(errors="replace")
             run_record.smoke_test_passed = True
@@ -180,7 +180,7 @@ def run_iteration(
     agent = create_react_agent(
         model=llm.nano,
         tools=lc_tools,
-        prompt=prompt,
+        prompt=_make_messages_modifier(prompt),
     )
 
     step_num = 0
@@ -199,12 +199,18 @@ def run_iteration(
             if "agent" in chunk:
                 for msg in chunk["agent"].get("messages", []):
                     if isinstance(msg, AIMessage) and msg.tool_calls:
+                        usage = msg.usage_metadata or {}
+                        n = len(msg.tool_calls)
+                        pt = usage.get("input_tokens", 0) // n
+                        ct = usage.get("output_tokens", 0) // n
                         for tc in msg.tool_calls:
                             pending[tc["id"]] = {
                                 "name": tc["name"],
                                 "args": tc.get("args", {}),
                                 "thought": msg.content or "",
                                 "started_at": datetime.now(timezone.utc),
+                                "prompt_tokens": pt,
+                                "completion_tokens": ct,
                             }
 
             # Tools node: tool finished executing
@@ -220,16 +226,23 @@ def run_iteration(
                     raw_output = msg.content or ""
                     output, sum_pt, sum_ct = summarize_output(raw_output, llm=llm)
 
+                    finished_at = datetime.now(timezone.utc)
+                    duration_ms = int(
+                        (finished_at - tc["started_at"]).total_seconds() * 1000
+                    )
                     step = StepRecord(
                         step_number=step_num,
                         started_at=tc["started_at"],
-                        finished_at=datetime.now(timezone.utc),
+                        finished_at=finished_at,
+                        duration_ms=duration_ms,
                         thought=tc["thought"],
                         tool_name=tc["name"],
                         tool_input=tc["args"] if isinstance(tc["args"], dict) else {"raw": str(tc["args"])},
                         tool_output_raw=raw_output,
                         tool_output=output,
                         was_summarized=output != raw_output,
+                        prompt_tokens=tc.get("prompt_tokens", 0),
+                        completion_tokens=tc.get("completion_tokens", 0),
                         summary_prompt_tokens=sum_pt,
                         summary_completion_tokens=sum_ct,
                     )
@@ -242,6 +255,8 @@ def run_iteration(
                     tool_name = tc["name"]
                     if tool_name == "VerifyBuild":
                         iteration.verify_attempted = True
+                        if verify_tool._last_result is not None:
+                            db.write_verify_detail(step.id, verify_tool._last_result)
                         if "accepted" in raw_output.lower():
                             iteration.verify_result = "accepted"
                             iteration.dockerfile_generated = True
@@ -332,6 +347,34 @@ def _fallback_lessons(steps: list[StepRecord]) -> str:
 
 
 # ─── Helpers ─────────────────────────────────────────
+
+_OLD_TOOL_MSG_MAX = 1500  # chars to keep from non-recent tool messages
+
+
+def _make_messages_modifier(system_prompt: str):
+    """Messages modifier: inject system prompt and truncate old tool outputs.
+
+    Keeps the last 8 messages fully intact (4 tool exchanges). Older tool
+    messages are truncated to _OLD_TOOL_MSG_MAX chars to prevent the
+    accumulated history from exceeding the model's context limit.
+    """
+    def modifier(messages: list) -> list:
+        keep_full = 8
+        cutoff = max(0, len(messages) - keep_full)
+        result = []
+        for i, msg in enumerate(messages):
+            if i < cutoff and isinstance(msg, ToolMessage):
+                content = msg.content or ""
+                if len(content) > _OLD_TOOL_MSG_MAX:
+                    msg = ToolMessage(
+                        content=content[:_OLD_TOOL_MSG_MAX] + "\n...[truncated]",
+                        tool_call_id=msg.tool_call_id,
+                    )
+            result.append(msg)
+        return [SystemMessage(content=system_prompt)] + result
+
+    return modifier
+
 
 def _build_prompt(blueprint: dict, lessons: str | None) -> str:
     """Build the system prompt with blueprint and optional lessons."""

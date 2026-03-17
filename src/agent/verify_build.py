@@ -93,11 +93,12 @@ class VerifyBuildTool:
         self.docker_ops = docker_ops
         self.llm = llm
         self.blueprint = blueprint or {}
+        self._last_result: VerifyBuildResult | None = None
 
     def execute(self) -> str:
         """Run the full VerifyBuild pipeline. Returns a JSON string summary."""
         result = self._run()
-        # Return a concise summary for the agent
+        self._last_result = result
         return self._format_for_agent(result)
 
     def _run(self) -> VerifyBuildResult:
