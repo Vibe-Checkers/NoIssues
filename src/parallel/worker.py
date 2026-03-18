@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -45,17 +46,67 @@ def make_slug(repo_url: str) -> str:
     return slug.lower()
 
 
-def clone_repo(repo_url: str, dest: Path, timeout: int = 120) -> None:
-    """Shallow-clone a git repository."""
+def clone_repo(repo_url: str, dest: Path, timeout: int = 120, retries: int = 3) -> None:
+    """Shallow-clone a git repository with retry and non-interactive git settings."""
     logger.info("Cloning %s → %s", repo_url, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--depth", "1", repo_url, str(dest)],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "echo"
+
+    backoffs = [0, 5, 15]
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        if attempt > 1:
+            wait_s = backoffs[min(attempt - 1, len(backoffs) - 1)]
+            logger.warning("Clone retry %d/%d for %s after %ds", attempt, retries, repo_url, wait_s)
+            time.sleep(wait_s)
+
+        # A failed/partial clone can leave dest populated. Ensure each attempt starts clean.
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+
+        t0 = time.monotonic()
+        try:
+            subprocess.run(
+                [
+                    "git", "clone",
+                    "--depth", "1",
+                    "--single-branch",
+                    "--filter=blob:none",
+                    repo_url,
+                    str(dest),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=True,
+                env=env,
+            )
+            logger.info("Clone succeeded for %s on attempt %d in %.1fs", repo_url, attempt, time.monotonic() - t0)
+            return
+        except subprocess.TimeoutExpired as e:
+            last_exc = e
+            logger.warning(
+                "Clone timeout for %s on attempt %d/%d after %ds",
+                repo_url,
+                attempt,
+                retries,
+                timeout,
+            )
+        except subprocess.CalledProcessError as e:
+            last_exc = e
+            err = (e.stderr or e.stdout or "")[-500:]
+            logger.warning(
+                "Clone failed for %s on attempt %d/%d: %s",
+                repo_url,
+                attempt,
+                retries,
+                err,
+            )
+
+    if last_exc is not None:
+        raise last_exc
 
 
 def worker_loop(
@@ -68,6 +119,8 @@ def worker_loop(
     disk_monitor: DiskSpaceMonitor,
     db: DBWriter,
     workdir: str = "workdir",
+    heartbeat_registry: dict[str, dict] | None = None,
+    heartbeat_lock: threading.Lock | None = None,
 ) -> None:
     """Process a single repository end-to-end.
 
@@ -90,17 +143,37 @@ def worker_loop(
 
     t0 = time.monotonic()
 
+    def heartbeat(phase: str, extra: str = "") -> None:
+        msg = f"[worker-{worker_id}] {slug}: phase={phase}"
+        if extra:
+            msg += f" {extra}"
+        logger.info(msg)
+        if heartbeat_registry is not None and heartbeat_lock is not None:
+            with heartbeat_lock:
+                heartbeat_registry[run_record.id] = {
+                    "worker_id": worker_id,
+                    "slug": slug,
+                    "phase": phase,
+                    "ts": time.monotonic(),
+                    "extra": extra,
+                }
+
     try:
         # Disk check — block if low
+        heartbeat("disk_check")
         disk_monitor.check_or_wait()
 
         # Clone
+        heartbeat("clone_start", f"repo={repo_url}")
         clone_repo(repo_url, clone_dir)
+        heartbeat("clone_done")
 
         # Phase 1: Blueprint
+        heartbeat("blueprint_start")
         bp_t0 = time.monotonic()
         blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
         bp_dur = int((time.monotonic() - bp_t0) * 1000)
+        heartbeat("blueprint_done", f"duration_ms={bp_dur}")
 
         run_record.context_blueprint = json.dumps(blueprint)
         run_record.detected_language = blueprint.get("language")
@@ -111,6 +184,7 @@ def worker_loop(
         db.update_run_blueprint(run_record)
 
         # Phase 2: Agent loop
+        heartbeat("agent_start")
         run_record = run_agent(
             repo_root=clone_dir,
             blueprint=blueprint,
@@ -121,6 +195,7 @@ def worker_loop(
             run_record=run_record,
             collected_context=collected_context,
         )
+        heartbeat("agent_done", f"iterations={run_record.iteration_count}")
 
         # Determine final status
         if run_record.smoke_test_passed:
@@ -135,6 +210,7 @@ def worker_loop(
 
     finally:
         # Cleanup always runs
+        heartbeat("cleanup_start")
         elapsed = int((time.monotonic() - t0) * 1000)
         run_record.duration_ms = elapsed
         run_record.finished_at = datetime.now(timezone.utc)
@@ -164,6 +240,10 @@ def worker_loop(
             docker_ops.cleanup(image_name)
         except Exception:
             logger.debug("Cleanup failed for %s (may not exist)", image_name)
+
+        if heartbeat_registry is not None and heartbeat_lock is not None:
+            with heartbeat_lock:
+                heartbeat_registry.pop(run_record.id, None)
 
     logger.info(
         "[worker-%d] %s: %s in %.1fs",

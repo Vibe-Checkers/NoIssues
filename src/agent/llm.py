@@ -15,6 +15,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+import httpx
+
 from langchain_openai import ChatOpenAI
 from tenacity import (
     retry,
@@ -46,16 +48,31 @@ class LLMClient:
     def __init__(self, rate_limiter: GlobalRateLimiter, worker_id: int = 0):  # noqa: ARG002
         self.limiter = rate_limiter
         api_key = os.environ["OPENROUTER_API_KEY"]
+        request_timeout = float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "120"))
+        connect_timeout = float(os.environ.get("OPENROUTER_CONNECT_TIMEOUT_SECONDS", "10"))
+        read_timeout = float(os.environ.get("OPENROUTER_READ_TIMEOUT_SECONDS", "90"))
+        write_timeout = float(os.environ.get("OPENROUTER_WRITE_TIMEOUT_SECONDS", "30"))
+        timeout_cfg = httpx.Timeout(
+            timeout=request_timeout,
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+        )
+        max_retries = int(os.environ.get("OPENROUTER_MAX_RETRIES", "3"))
 
         self.nano = ChatOpenAI(
             model=os.environ["OPENROUTER_MODEL_NANO"],
             base_url=OPENROUTER_BASE_URL,
             api_key=api_key,
+            timeout=timeout_cfg,
+            max_retries=max_retries,
         )
         self.chat = ChatOpenAI(
             model=os.environ["OPENROUTER_MODEL_CHAT"],
             base_url=OPENROUTER_BASE_URL,
             api_key=api_key,
+            timeout=timeout_cfg,
+            max_retries=max_retries,
         )
 
     def call_nano(self, messages: list[dict], estimated_tokens: int = 2000) -> LLMResponse:

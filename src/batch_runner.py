@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    heartbeat_warn_s = int(os.environ.get("WORKER_HEARTBEAT_WARN_SECONDS", "300"))
+    heartbeat_log_interval_s = int(os.environ.get("WORKER_HEARTBEAT_LOG_INTERVAL_SECONDS", "60"))
+
     # Setup logging
     logging.basicConfig(
         level=logging.INFO,
@@ -163,45 +166,78 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.monotonic()
     done_count = 0
+    heartbeat_registry: dict[str, dict] = {}
+    heartbeat_lock = threading.Lock()
+    shutdown_watchdog = threading.Event()
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {}
-        for i, url in enumerate(pending):
-            future = pool.submit(
-                worker_loop,
-                worker_id=i % args.workers,
-                repo_url=url,
-                batch_id=batch.id,
-                image_catalog=image_catalog,
-                rate_limiter=rate_limiter,
-                build_semaphore=build_semaphore,
-                disk_monitor=disk_monitor,
-                db=db,
-                workdir=args.workdir,
-            )
-            futures[future] = url
+    def watchdog_loop() -> None:
+        while not shutdown_watchdog.wait(timeout=heartbeat_log_interval_s):
+            now = time.monotonic()
+            with heartbeat_lock:
+                snapshot = list(heartbeat_registry.values())
+            if not snapshot:
+                continue
+            stale = []
+            for hb in snapshot:
+                age = int(now - hb["ts"])
+                if age >= heartbeat_warn_s:
+                    stale.append(f"worker-{hb['worker_id']}:{hb['slug']} phase={hb['phase']} age={age}s")
+            if stale:
+                logger.warning("Stale workers detected (%d): %s", len(stale), " | ".join(stale))
+            else:
+                status = " | ".join(
+                    f"worker-{hb['worker_id']}:{hb['slug']} phase={hb['phase']} age={int(now - hb['ts'])}s"
+                    for hb in snapshot
+                )
+                logger.info("Worker heartbeat: %s", status)
 
-        for future in as_completed(futures):
-            url = futures[future]
-            slug = make_slug(url)
-            done_count += 1
+    watchdog = threading.Thread(target=watchdog_loop, daemon=True, name="worker-watchdog")
+    watchdog.start()
 
-            try:
-                future.result()
-            except Exception as e:
-                logger.error("Unhandled error for %s: %s", slug, e)
+    try:
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {}
+            for i, url in enumerate(pending):
+                future = pool.submit(
+                    worker_loop,
+                    worker_id=i % args.workers,
+                    repo_url=url,
+                    batch_id=batch.id,
+                    image_catalog=image_catalog,
+                    rate_limiter=rate_limiter,
+                    build_semaphore=build_semaphore,
+                    disk_monitor=disk_monitor,
+                    db=db,
+                    workdir=args.workdir,
+                    heartbeat_registry=heartbeat_registry,
+                    heartbeat_lock=heartbeat_lock,
+                )
+                futures[future] = url
 
-            # Update batch_run counters after each repo
-            db.update_batch_progress(batch.id)
+            for future in as_completed(futures):
+                url = futures[future]
+                slug = make_slug(url)
+                done_count += 1
 
-            elapsed = time.monotonic() - t0
-            active = len(pending) - done_count
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
-                f"{done_count}/{len(pending)} complete | "
-                f"{active} active | "
-                f"{elapsed:.0f}s elapsed"
-            )
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error("Unhandled error for %s: %s", slug, e)
+
+                # Update batch_run counters after each repo
+                db.update_batch_progress(batch.id)
+
+                elapsed = time.monotonic() - t0
+                active = len(pending) - done_count
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"{done_count}/{len(pending)} complete | "
+                    f"{active} active | "
+                    f"{elapsed:.0f}s elapsed"
+                )
+    finally:
+        shutdown_watchdog.set()
+        watchdog.join(timeout=2)
 
     total_elapsed = time.monotonic() - t0
 
@@ -231,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     print_summary(db, batch.id, total_elapsed)
 
     db.close()
+    rate_limiter.shutdown()
 
     return 0 if batch.failure_count == 0 else 1
 
