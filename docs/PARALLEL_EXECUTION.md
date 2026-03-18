@@ -47,25 +47,20 @@
 
 ---
 
-## 2. API Rate Limiting
+## 2. API Rate Limiting and LLM Timeout Controls
 
 ### The Problem
 
-Azure OpenAI enforces per-deployment limits:
-- **RPM** (requests per minute) — e.g., 250 RPM per deployment
-- **TPM** (tokens per minute) — e.g., 250K TPM per deployment
+OpenRouter-backed LLM calls must be controlled for both throughput and request latency:
+- **RPM** (requests per minute)
+- **TPM** (tokens per minute)
+- **Transport stalls/timeouts** (connect/read/write)
 
-With N workers each making LLM calls for agent steps, summarizations, reviews, and lesson extraction, a single deployment is easily saturated.
+With N workers making LLM calls for agent steps, summarization, reviews, and lesson extraction, quota saturation and long network waits can stall visible batch progress.
 
-### The Solution: Multi-Deployment Round-Robin + Global Rate Limiter
+### The Solution: Global Rate Limiter + Explicit Request Timeouts
 
-**Multi-deployment round-robin**: The nano model is deployed across multiple Azure OpenAI deployments (e.g., 4 deployments x 250 RPM = 1000 RPM aggregate). Each worker is assigned to a deployment via `worker_id % num_deployments`:
-
-```
-AZURE_OPENAI_DEPLOYMENT_NANO=gpt-5-nano,gpt-5-nano-2,gpt-5-nano-3,gpt-5-nano-4
-```
-
-All deployments share the same Azure resource, endpoint, and API key — they are named slots within a single resource.
+Workers use a shared [`GlobalRateLimiter`](../src/parallel/rate_limiter.py) and explicit OpenRouter timeout settings configured in [`LLMClient`](../src/agent/llm.py).
 
 **Global token-bucket rate limiter** tracks aggregate RPM + TPM across all deployments:
 
@@ -89,10 +84,19 @@ All deployments share the same Azure resource, endpoint, and API key — they ar
 3. A background thread refills the TPM budget every 60 seconds.
 4. After the call completes, `release(actual_tokens)` adjusts the running count.
 
-**Configuration:**
+**Configuration (rate limits):**
 ```
-AZURE_OPENAI_RPM=1000         # aggregate across all nano deployments
-AZURE_OPENAI_TPM=1000000      # aggregate across all nano deployments
+LLM_RPM=120                    # or AZURE_OPENAI_RPM fallback
+LLM_TPM=150000                 # or AZURE_OPENAI_TPM fallback
+```
+
+**Configuration (timeouts/retries):**
+```
+OPENROUTER_TIMEOUT_SECONDS=120
+OPENROUTER_CONNECT_TIMEOUT_SECONDS=10
+OPENROUTER_READ_TIMEOUT_SECONDS=90
+OPENROUTER_WRITE_TIMEOUT_SECONDS=30
+OPENROUTER_MAX_RETRIES=3
 ```
 
 **Backoff on 429:**
@@ -226,6 +230,18 @@ Each worker must have fully isolated state to prevent cross-contamination:
 [14:32:01] [rate] API: 42/60 RPM, 61K/80K TPM | Disk: 28GB free
 ```
 
+**Implemented worker heartbeat/watchdog logs:**
+- Worker phase heartbeats from [`worker_loop()`](../src/parallel/worker.py): `disk_check`, `clone_start`, `clone_done`, `blueprint_start`, `blueprint_done`, `agent_start`, `agent_done`, `cleanup_start`.
+- Batch watchdog thread in [`main()`](../src/batch_runner.py) emits:
+  - informational heartbeat snapshots, or
+  - warnings for stale workers exceeding threshold.
+
+**Watchdog configuration:**
+```
+WORKER_HEARTBEAT_LOG_INTERVAL_SECONDS=60
+WORKER_HEARTBEAT_WARN_SECONDS=300
+```
+
 **Post-run summary:**
 ```
 Batch complete: 100 repos in 4h 12m
@@ -247,10 +263,11 @@ Batch complete: 100 repos in 4h 12m
 ```
 WORKERS=2
 DOCKER_BUILD_CONCURRENCY=1
-AZURE_OPENAI_RPM=60
-AZURE_OPENAI_TPM=80000
+LLM_RPM=60
+LLM_TPM=80000
 DISK_SPACE_THRESHOLD_GB=5
 DATABASE=sqlite:///results.db
+WORKER_HEARTBEAT_WARN_SECONDS=240
 ```
 
 ### Medium batch (20–100 repos, single VM)
@@ -258,11 +275,12 @@ DATABASE=sqlite:///results.db
 ```
 WORKERS=4
 DOCKER_BUILD_CONCURRENCY=2
-AZURE_OPENAI_RPM=120
-AZURE_OPENAI_TPM=150000
+LLM_RPM=120
+LLM_TPM=150000
 DISK_SPACE_THRESHOLD_GB=10
 DATABASE=sqlite:///results.db
 DOCKER_KEEP_STORAGE_GB=20
+WORKER_HEARTBEAT_WARN_SECONDS=300
 ```
 
 ### Large batch (100+ repos, dedicated VM)
@@ -270,11 +288,12 @@ DOCKER_KEEP_STORAGE_GB=20
 ```
 WORKERS=8
 DOCKER_BUILD_CONCURRENCY=3
-AZURE_OPENAI_RPM=300
-AZURE_OPENAI_TPM=400000
+LLM_RPM=300
+LLM_TPM=400000
 DISK_SPACE_THRESHOLD_GB=20
 DATABASE=postgresql://user:pass@host/buildagent
 DOCKER_KEEP_STORAGE_GB=50
+WORKER_HEARTBEAT_WARN_SECONDS=480
 ```
 
 ---
@@ -289,5 +308,5 @@ DOCKER_KEEP_STORAGE_GB=50
 | Crash recovery        | Lost on crash                        | Incremental DB writes; skips completed repos on restart |
 | Result storage        | Flat files (JSONL)                   | SQL database with queryable schema                      |
 | Build serialization   | All-or-nothing lock                  | Configurable concurrent build slots                     |
-| Observability         | Scattered log files                  | Live progress line + post-run summary + DB queries      |
+| Observability         | Scattered log files                  | Live progress + phase heartbeats + stale-worker watchdog |
 | Worker isolation      | Partially shared state               | Fully isolated (dirs, image names, logging, dedup)      |

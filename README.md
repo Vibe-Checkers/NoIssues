@@ -126,9 +126,18 @@ See `.env.example` for all available environment variables. Key settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AZURE_OPENAI_RPM` | 60 | Requests per minute limit |
-| `AZURE_OPENAI_TPM` | 80000 | Tokens per minute limit |
+| `LLM_RPM` | 60 | Requests per minute limit (`AZURE_OPENAI_RPM` fallback supported) |
+| `LLM_TPM` | 80000 | Tokens per minute limit (`AZURE_OPENAI_TPM` fallback supported) |
+| `OPENROUTER_TIMEOUT_SECONDS` | 120 | Total request timeout for LLM calls |
+| `OPENROUTER_CONNECT_TIMEOUT_SECONDS` | 10 | Connection timeout for LLM calls |
+| `OPENROUTER_READ_TIMEOUT_SECONDS` | 90 | Read timeout for LLM calls |
+| `OPENROUTER_WRITE_TIMEOUT_SECONDS` | 30 | Write timeout for LLM calls |
+| `OPENROUTER_MAX_RETRIES` | 3 | Transport retry count passed to LLM client |
 | `DOCKER_BUILD_CONCURRENCY` | 2 | Parallel Docker builds |
 | `MAX_ITERATIONS` | 3 | Agent retry iterations |
 | `WORKERS` | 4 | Parallel batch workers |
+| `WORKER_HEARTBEAT_LOG_INTERVAL_SECONDS` | 60 | Watchdog heartbeat log interval |
+| `WORKER_HEARTBEAT_WARN_SECONDS` | 300 | Stale-worker warning threshold |
 | `DATABASE_URL` | `sqlite:///results.db` | DB connection string |
+
+Batch execution now includes worker phase heartbeat logging and stale-worker watchdog warnings from [`worker_loop()`](src/parallel/worker.py) and [`main()`](src/batch_runner.py), plus clone retry hardening in [`clone_repo()`](src/parallel/worker.py) and explicit OpenRouter timeout settings in [`LLMClient`](src/agent/llm.py).
