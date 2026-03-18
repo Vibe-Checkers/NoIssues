@@ -103,6 +103,23 @@ python src/build_agent.py https://github.com/owner/repo --db sqlite:///results.d
 python src/batch_runner.py sampled_repos_urls.txt --workers 4 --db results.db
 ```
 
+### Docker Cleanup Cron Management
+```bash
+# Install/update a tagged cron entry (default every 30 minutes)
+python scripts/manage_docker_prune_cron.py install
+
+# Install with a custom cron schedule
+python scripts/manage_docker_prune_cron.py install --schedule "*/15 * * * *"
+
+# Check whether the tagged entry is installed
+python scripts/manage_docker_prune_cron.py status
+
+# Remove the tagged entry (safe if already absent)
+python scripts/manage_docker_prune_cron.py remove
+```
+
+Safety note: this cron job runs `docker system prune --force --filter "until=1h"`, which removes **unused** Docker resources older than one hour. Active containers/images in use are not pruned, but old dangling/unused artifacts and caches will be cleaned.
+
 ---
 
 ## Database
