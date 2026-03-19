@@ -81,7 +81,7 @@ def cron_command(root: Path, log_path: Path, prune_filter: str) -> str:
         f"cd {shell_quote(root_s)} && /bin/zsh -lc "
         + shell_quote(
             f"printf \"[%s] docker-prune start\\n\" \"$(date '{ts_fmt}')\" >> {shell_quote(log_s)}; "
-            + f"docker system prune --force --filter {shell_quote(prune_filter)} >> {shell_quote(log_s)} 2>&1; "
+            + f"yes | docker system prune --force --filter {shell_quote(prune_filter)} >> {shell_quote(log_s)} 2>&1; "
             + f"rc=$?; printf \"[%s] docker-prune exit=%s\\n\" \"$(date '{ts_fmt}')\" \"$rc\" >> {shell_quote(log_s)}"
         )
     )
