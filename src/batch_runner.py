@@ -110,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--ablation", default="default",
+        choices=["default", "no-metaprompt"],
         help="Ablation tag for this batch run (default: 'default')",
     )
     args = parser.parse_args(argv)
@@ -222,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
                     workdir=args.workdir,
                     heartbeat_registry=heartbeat_registry,
                     heartbeat_lock=heartbeat_lock,
+                    ablation=args.ablation,
                 )
                 futures[future] = url
 

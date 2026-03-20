@@ -121,6 +121,7 @@ def worker_loop(
     workdir: str = "workdir",
     heartbeat_registry: dict[str, dict] | None = None,
     heartbeat_lock: threading.Lock | None = None,
+    ablation: str = "default",
 ) -> None:
     """Process a single repository end-to-end.
 
@@ -182,11 +183,17 @@ def worker_loop(
         heartbeat("clone_done")
 
         # Phase 1: Blueprint
-        heartbeat("blueprint_start")
-        bp_t0 = time.monotonic()
-        blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
-        bp_dur = int((time.monotonic() - bp_t0) * 1000)
-        heartbeat("blueprint_done", f"duration_ms={bp_dur}")
+        if ablation == "no-metaprompt":
+            heartbeat("blueprint_skipped")
+            blueprint = {}
+            collected_context = None
+            bp_pt, bp_ct, bp_dur = 0, 0, 0
+        else:
+            heartbeat("blueprint_start")
+            bp_t0 = time.monotonic()
+            blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
+            bp_dur = int((time.monotonic() - bp_t0) * 1000)
+            heartbeat("blueprint_done", f"duration_ms={bp_dur}")
 
         run_record.context_blueprint = json.dumps(blueprint)
         run_record.detected_language = blueprint.get("language")
@@ -207,6 +214,7 @@ def worker_loop(
             db=db,
             run_record=run_record,
             collected_context=collected_context,
+            ablation=ablation,
         )
         heartbeat("agent_done", f"iterations={run_record.iteration_count}")
 

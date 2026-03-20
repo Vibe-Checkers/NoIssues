@@ -65,6 +65,37 @@ RULES:
 - If the blueprint's suggested base image doesn't work, use DockerImageSearch to find a better one.
 - If a build error is unclear, use SearchWeb to find solutions."""
 
+SYSTEM_PROMPT_SIMPLE = """\
+You are BuildAgent, an expert at creating Dockerfiles for open-source repositories. \
+Your goal is to generate a Dockerfile that builds the project from source and produces a working container.
+
+{lessons_section}
+
+REPOSITORY CONTEXT:
+The repository file tree and key build file contents are provided in the first message below. \
+You already have all the information needed to write the Dockerfile.
+
+WORKFLOW:
+1. Based on the repository context provided, write a Dockerfile using WriteFile. The Dockerfile must:
+   - Use an appropriate base image
+   - Install system dependencies if needed
+   - Copy source code
+   - Install project dependencies
+   - Build the project from source
+   - Set a proper CMD or ENTRYPOINT
+2. Write a .dockerignore file to exclude unnecessary files (.git, node_modules, etc.).
+3. Call VerifyBuild to test the Dockerfile. This is MANDATORY — never finish without calling VerifyBuild.
+4. If VerifyBuild reports issues, read the error carefully. Use ReadFile or ListDirectory ONLY to \
+investigate specific files mentioned in the error. Fix the Dockerfile and call VerifyBuild again.
+
+RULES:
+- Your first action should be WriteFile to create the Dockerfile.
+- Do NOT explore the repository — the file tree and build files are already provided.
+- Do NOT call ListDirectory(".") or ReadFile unless VerifyBuild has failed and you need to check a specific file.
+- You MUST call VerifyBuild at least once.
+- Do NOT write a Dockerfile that only installs a runtime without building the project.
+- If a build error is unclear, use SearchWeb to find solutions."""
+
 LESSONS_TEMPLATE = """\
 LESSONS FROM PREVIOUS ATTEMPTS:
 {lessons_text}
@@ -105,6 +136,7 @@ def run_agent(
     run_record: RunRecord,
     max_iterations: int = 3,
     collected_context: CollectedContext | None = None,
+    ablation: str = "default",
 ) -> RunRecord:
     """Outer loop: up to max_iterations attempts to generate a working Dockerfile."""
     lessons = None
@@ -117,7 +149,7 @@ def run_agent(
             dockerfile.unlink()
 
         # Build prompt
-        prompt = _build_prompt(blueprint, lessons)
+        prompt = _build_prompt(blueprint, lessons, ablation)
 
         # Create tools for this iteration
         tools = create_tools(repo_root)
@@ -419,11 +451,16 @@ def _make_messages_modifier(system_prompt: str):
     return modifier
 
 
-def _build_prompt(blueprint: dict, lessons: str | None) -> str:
+def _build_prompt(blueprint: dict, lessons: str | None, ablation: str = "default") -> str:
     """Build the system prompt with blueprint and optional lessons."""
     lessons_section = ""
     if lessons:
         lessons_section = LESSONS_TEMPLATE.format(lessons_text=lessons)
+
+    if ablation == "no-metaprompt":
+        return SYSTEM_PROMPT_SIMPLE.format(
+            lessons_section=lessons_section,
+        )
 
     base_image = blueprint.get("base_image", "auto-detect")
     blueprint_json = json.dumps(blueprint, indent=2)
