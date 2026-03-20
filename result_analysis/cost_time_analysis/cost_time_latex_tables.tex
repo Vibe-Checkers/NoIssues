@@ -1,0 +1,58 @@
+% Auto-generated LaTeX tables — cost & time analysis
+
+\begin{table}[h]
+\centering
+\caption{Overall Cost and Time Statistics (N=282)}
+\label{tab:cost-time-overall}
+\begin{tabular}{lrr}
+\toprule
+Metric & Total & Per Repo (mean) \\
+\midrule
+Cost (USD) & \$34.80 & \$0.1234 \\
+\quad Gemini Flash & \$31.08 & \$0.1102 \\
+\quad Claude Sonnet & \$3.71 & \$0.0132 \\
+Wall-clock time (hours) & 193.5 & 41.2 min \\
+Prompt tokens & 177,698,728 & 630,137 \\
+Completion tokens & 33,554,190 & 118,986 \\
+Iterations & --- & 1.86 \\
+Steps & --- & 30.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Cost and Time: Successful vs.\ Failed Repos}
+\label{tab:cost-success-fail}
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{Successful} & \multicolumn{2}{c}{Failed} \\
+Metric & Mean & Median & Mean & Median \\
+\midrule
+Cost (USD) & \$0.0756 & \$0.0467 & \$0.2323 & \$0.2313 \\
+Duration (min) & 23.6 & 15.4 & 81.2 & 69.0 \\
+Iterations & 1.4 & 1.0 & 2.9 & 3.0 \\
+Steps & 19.4 & 13.0 & 56.9 & 62.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Cost Breakdown by Pipeline Phase}
+\label{tab:cost-breakdown}
+\begin{tabular}{lrr}
+\toprule
+Phase & Cost (USD) & \% \\
+\midrule
+Blueprint (Gemini Flash) & \$1.0963 & 3.2 \\
+Agent steps (Gemini Flash) & \$18.9749 & 54.5 \\
+Verify review (Gemini Flash) & \$5.4900 & 15.8 \\
+Output summarization (Gemini Flash) & \$0.7366 & 2.1 \\
+Lesson extraction (Claude Sonnet 4) & \$3.7107 & 10.7 \\
+\midrule
+Total & \$34.7954 & 100.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+

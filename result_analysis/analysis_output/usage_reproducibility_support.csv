@@ -1,0 +1,4 @@
+category,value,n_success,avg_iterations,avg_steps,avg_prompt_tokens_k,avg_duration_min
+reproducibility_support,repro_ready,123,1.78,24.9,416.8,29.0
+reproducibility_support,no_ci_manual_only,70,1.61,19.7,301.3,24.3
+reproducibility_support,partial_repro,3,1.67,29.3,426.9,28.3

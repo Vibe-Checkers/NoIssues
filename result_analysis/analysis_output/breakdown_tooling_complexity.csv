@@ -1,0 +1,4 @@
+category,value,total,success,fail,success_rate
+tooling_complexity,single_layer_tool,209,146,63,69.86
+tooling_complexity,multi_layer_toolchains,62,43,19,69.35
+tooling_complexity,mixed_languages_and_bindings,11,7,4,63.64

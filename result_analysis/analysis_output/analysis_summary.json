@@ -1,0 +1,250 @@
+{
+  "total_repos": 282,
+  "success": 196,
+  "fail": 86,
+  "success_rate_pct": 69.5,
+  "statistical_tests": [
+    {
+      "dimension": "domain",
+      "chi2": 27.2227,
+      "dof": 10,
+      "p_value": 0.002401,
+      "cramers_v": 0.3107,
+      "significance": "**",
+      "n": 282
+    },
+    {
+      "dimension": "build_type",
+      "chi2": 80.2725,
+      "dof": 45,
+      "p_value": 0.000953,
+      "cramers_v": 0.5335,
+      "significance": "***",
+      "n": 282
+    },
+    {
+      "dimension": "automation_level",
+      "chi2": 6.4628,
+      "dof": 3,
+      "p_value": 0.09114,
+      "cramers_v": 0.1514,
+      "significance": "n.s.",
+      "n": 282
+    },
+    {
+      "dimension": "environment_specificity",
+      "chi2": 2.6874,
+      "dof": 4,
+      "p_value": 0.611425,
+      "cramers_v": 0.0976,
+      "significance": "n.s.",
+      "n": 282
+    },
+    {
+      "dimension": "dependency_transparency",
+      "chi2": 10.0234,
+      "dof": 3,
+      "p_value": 0.018369,
+      "cramers_v": 0.1885,
+      "significance": "*",
+      "n": 282
+    },
+    {
+      "dimension": "tooling_complexity",
+      "chi2": 0.1916,
+      "dof": 2,
+      "p_value": 0.908657,
+      "cramers_v": 0.0261,
+      "significance": "n.s.",
+      "n": 282
+    },
+    {
+      "dimension": "reproducibility_support",
+      "chi2": 3.4363,
+      "dof": 3,
+      "p_value": 0.329113,
+      "cramers_v": 0.1104,
+      "significance": "n.s.",
+      "n": 282
+    }
+  ],
+  "build_families": [
+    {
+      "family": "JavaScript/Node",
+      "total": 64,
+      "success": 49,
+      "fail": 15,
+      "success_rate": 76.56
+    },
+    {
+      "family": "Python",
+      "total": 47,
+      "success": 23,
+      "fail": 24,
+      "success_rate": 48.94
+    },
+    {
+      "family": "C/C++",
+      "total": 34,
+      "success": 24,
+      "fail": 10,
+      "success_rate": 70.59
+    },
+    {
+      "family": "Java/JVM",
+      "total": 25,
+      "success": 20,
+      "fail": 5,
+      "success_rate": 80.0
+    },
+    {
+      "family": "None",
+      "total": 23,
+      "success": 18,
+      "fail": 5,
+      "success_rate": 78.26
+    },
+    {
+      "family": "Other",
+      "total": 16,
+      "success": 11,
+      "fail": 5,
+      "success_rate": 68.75
+    },
+    {
+      "family": "Go",
+      "total": 16,
+      "success": 16,
+      "fail": 0,
+      "success_rate": 100.0
+    },
+    {
+      "family": "Rust",
+      "total": 13,
+      "success": 6,
+      "fail": 7,
+      "success_rate": 46.15
+    },
+    {
+      "family": "Swift/iOS",
+      "total": 13,
+      "success": 10,
+      "fail": 3,
+      "success_rate": 76.92
+    },
+    {
+      "family": ".NET/C#",
+      "total": 12,
+      "success": 4,
+      "fail": 8,
+      "success_rate": 33.33
+    },
+    {
+      "family": "Ruby",
+      "total": 7,
+      "success": 7,
+      "fail": 0,
+      "success_rate": 100.0
+    },
+    {
+      "family": "Docker",
+      "total": 5,
+      "success": 5,
+      "fail": 0,
+      "success_rate": 100.0
+    },
+    {
+      "family": "Dart/Flutter",
+      "total": 5,
+      "success": 2,
+      "fail": 3,
+      "success_rate": 40.0
+    },
+    {
+      "family": "Haskell",
+      "total": 2,
+      "success": 1,
+      "fail": 1,
+      "success_rate": 50.0
+    }
+  ],
+  "fisher_pairwise": [
+    {
+      "dimension": "domain",
+      "best_value": "devops",
+      "best_rate": 88.89,
+      "best_n": 18,
+      "worst_value": "data-science",
+      "worst_rate": 40.0,
+      "worst_n": 10,
+      "fisher_p": 0.011047,
+      "significance": "*"
+    },
+    {
+      "dimension": "build_type",
+      "best_value": "go-mod",
+      "best_rate": 100.0,
+      "best_n": 16,
+      "worst_value": "setuptools",
+      "worst_rate": 31.25,
+      "worst_n": 16,
+      "fisher_p": 6.8e-05,
+      "significance": "***"
+    },
+    {
+      "dimension": "automation_level",
+      "best_value": "manual",
+      "best_rate": 93.75,
+      "best_n": 16,
+      "worst_value": "semi_automated",
+      "worst_rate": 67.07,
+      "worst_n": 249,
+      "fisher_p": 0.025698,
+      "significance": "*"
+    },
+    {
+      "dimension": "environment_specificity",
+      "best_value": "cross_platform_generic",
+      "best_rate": 70.93,
+      "best_n": 227,
+      "worst_value": "custom_hardware_or_drivers",
+      "worst_rate": 50.0,
+      "worst_n": 8,
+      "fisher_p": 0.242752,
+      "significance": "n.s."
+    },
+    {
+      "dimension": "dependency_transparency",
+      "best_value": "explicit_machine_readable",
+      "best_rate": 75.0,
+      "best_n": 160,
+      "worst_value": "explicit_loose",
+      "worst_rate": 52.73,
+      "worst_n": 55,
+      "fisher_p": 0.003638,
+      "significance": "**"
+    },
+    {
+      "dimension": "tooling_complexity",
+      "best_value": "single_layer_tool",
+      "best_rate": 69.86,
+      "best_n": 209,
+      "worst_value": "mixed_languages_and_bindings",
+      "worst_rate": 63.64,
+      "worst_n": 11,
+      "fisher_p": 0.739126,
+      "significance": "n.s."
+    },
+    {
+      "dimension": "reproducibility_support",
+      "best_value": "no_ci_manual_only",
+      "best_rate": 73.68,
+      "best_n": 95,
+      "worst_value": "repro_ready",
+      "worst_rate": 67.58,
+      "worst_n": 182,
+      "fisher_p": 0.336146,
+      "significance": "n.s."
+    }
+  ]
+}

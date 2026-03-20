@@ -1,0 +1,5 @@
+category,value,total,success,fail,success_rate
+reproducibility_support,repro_ready,182,123,59,67.58
+reproducibility_support,no_ci_manual_only,95,70,25,73.68
+reproducibility_support,partial_repro,4,3,1,75.0
+reproducibility_support,broken_or_outdated,1,0,1,0.0

@@ -1,0 +1,6 @@
+root_cause,count,pct
+build_always_failed,44,51.2
+smoke_test_failure,38,44.2
+all_rejected,2,2.3
+no_verify_attempt,1,1.2
+no_iterations,1,1.2

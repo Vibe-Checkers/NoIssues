@@ -1,0 +1,9 @@
+tool,fail_avg,success_avg,diff
+DockerImageSearch,2.77,0.47,2.29
+FindFiles,0.37,0.08,0.29
+GrepFiles,0.22,0.13,0.09
+ListDirectory,0.5,0.24,0.26
+ReadFile,3.02,0.85,2.18
+SearchWeb,0.66,0.13,0.53
+VerifyBuild,23.67,7.55,16.12
+WriteFile,32.77,9.94,22.82

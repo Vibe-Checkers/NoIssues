@@ -1,0 +1,12 @@
+category,value,total,success,fail,success_rate
+domain,utilities,66,44,22,66.67
+domain,web-development,57,47,10,82.46
+domain,systems-programming,32,19,13,59.38
+domain,machine-learning,30,14,16,46.67
+domain,mobile-development,29,23,6,79.31
+domain,security,18,14,4,77.78
+domain,devops,18,16,2,88.89
+domain,education,13,10,3,76.92
+domain,data-science,10,4,6,40.0
+domain,game-development,5,4,1,80.0
+domain,scientific-computing,4,1,3,25.0

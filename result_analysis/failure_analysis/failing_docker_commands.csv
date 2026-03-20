@@ -1,0 +1,10 @@
+command_type,count
+other RUN,531
+RUN npm/yarn/pnpm install,181
+RUN apt/apk install,138
+RUN make/cmake,87
+COPY/ADD,64
+RUN cargo build/install,59
+RUN pip install,39
+RUN gradle/maven,23
+RUN dotnet build,20

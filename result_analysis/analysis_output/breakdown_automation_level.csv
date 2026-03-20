@@ -1,0 +1,5 @@
+category,value,total,success,fail,success_rate
+automation_level,semi_automated,249,167,82,67.07
+automation_level,manual,16,15,1,93.75
+automation_level,fully_automated,11,9,2,81.82
+automation_level,reverse_engineering,6,5,1,83.33
