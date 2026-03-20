@@ -115,7 +115,7 @@ class RunRecord:
     repo_url: str = ""
     repo_slug: str = ""
     status: str = "pending"  # 'success', 'failure', 'error', 'skipped'
-    started_at: datetime = field(default_factory=_now)
+    started_at: datetime | None = None
     finished_at: datetime | None = None
     duration_ms: int | None = None
     iteration_count: int = 0
@@ -155,6 +155,7 @@ class BatchRun:
     total_completion_tokens: int = 0
     config_json: str | None = None
     tag: str | None = None
+    ablation: str = "default"
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -108,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
         "--workdir", default="workdir",
         help="Working directory for cloned repos (default: workdir)",
     )
+    parser.add_argument(
+        "--ablation", default="default",
+        help="Ablation tag for this batch run (default: 'default')",
+    )
     args = parser.parse_args(argv)
 
     heartbeat_warn_s = int(os.environ.get("WORKER_HEARTBEAT_WARN_SECONDS", "300"))
@@ -153,8 +157,15 @@ def main(argv: list[str] | None = None) -> int:
         worker_count=args.workers,
         repo_count=len(repos),
         config_json=json.dumps(config),
+        ablation=args.ablation,
     )
     db.write_batch_start(batch)
+
+    # Pre-insert all runs in 'waiting' state (if they don't exist)
+    for url in repos:
+        slug = make_slug(url)
+        if not db.run_exists(batch.id, slug):
+            db.pre_insert_run(batch.id, url, slug)
 
     # Crash recovery: skip already-successful repos
     completed = db.get_successful_slugs(batch.id)

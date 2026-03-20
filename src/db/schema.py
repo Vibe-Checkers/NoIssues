@@ -21,7 +21,8 @@ TABLES_SQL = [
         total_prompt_tokens     INTEGER DEFAULT 0,
         total_completion_tokens INTEGER DEFAULT 0,
         config_json     TEXT,
-        tag             TEXT
+        tag             TEXT,
+		ablation        TEXT
     )
     """,
 
@@ -33,7 +34,7 @@ TABLES_SQL = [
         repo_url        TEXT NOT NULL,
         repo_slug       TEXT NOT NULL,
         status          TEXT NOT NULL,
-        started_at      TIMESTAMP NOT NULL,
+        started_at      TIMESTAMP,
         finished_at     TIMESTAMP,
         duration_ms     INTEGER,
         iteration_count INTEGER DEFAULT 0,

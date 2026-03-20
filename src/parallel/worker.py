@@ -132,14 +132,27 @@ def worker_loop(
     llm = LLMClient(rate_limiter, worker_id=worker_id)
     docker_ops = DockerOps(build_semaphore=build_semaphore)
 
-    run_record = RunRecord(
-        batch_id=batch_id,
-        repo_url=repo_url,
-        repo_slug=slug,
-        status="running",
-        worker_id=worker_id,
-    )
-    db.write_run_start(run_record)
+    run_id = db.get_run_id_for_repo(batch_id, slug)
+    if run_id:
+        run_record = RunRecord(
+            id=run_id,
+            batch_id=batch_id,
+            repo_url=repo_url,
+            repo_slug=slug,
+            status="running",
+            worker_id=worker_id,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.update_run_start(run_record)
+    else:
+        run_record = RunRecord(
+            batch_id=batch_id,
+            repo_url=repo_url,
+            repo_slug=slug,
+            status="running",
+            worker_id=worker_id,
+        )
+        db.write_run_start(run_record)
 
     t0 = time.monotonic()
 

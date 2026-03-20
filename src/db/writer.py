@@ -104,11 +104,11 @@ class DBWriter:
     def write_batch_start(self, batch: BatchRun) -> None:
         self._execute(
             """INSERT INTO batch_run (id, started_at, finished_at, worker_count, repo_count,
-                success_count, failure_count, total_prompt_tokens, total_completion_tokens, config_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                success_count, failure_count, total_prompt_tokens, total_completion_tokens, config_json, ablation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (batch.id, batch.started_at, batch.finished_at, batch.worker_count,
              batch.repo_count, batch.success_count, batch.failure_count,
-             batch.total_prompt_tokens, batch.total_completion_tokens, batch.config_json),
+             batch.total_prompt_tokens, batch.total_completion_tokens, batch.config_json, batch.ablation),
         )
 
     def write_batch_finish(self, batch: BatchRun) -> None:
@@ -139,14 +139,41 @@ class DBWriter:
             (sc or 0, fc or 0, pt, ct, batch_id),
         )
 
-    # ── Run operations ──
+    def run_exists(self, batch_id: str, repo_slug: str) -> bool:
+        rows = self._query(
+            "SELECT 1 FROM run WHERE batch_id=? AND repo_slug=? LIMIT 1",
+            (batch_id, repo_slug),
+        )
+        return len(rows) > 0
+
+    def pre_insert_run(self, batch_id: str, repo_url: str, repo_slug: str) -> None:
+        self._execute(
+            """INSERT INTO run (id, batch_id, repo_url, repo_slug, status)
+                VALUES (?, ?, ?, ?, ?)""",
+            (_new_id(), batch_id, repo_url, repo_slug, "waiting"),
+        )
+
+    def get_run_id_for_repo(self, batch_id: str, repo_slug: str) -> str | None:
+        rows = self._query(
+            "SELECT id FROM run WHERE batch_id=? AND repo_slug=?",
+            (batch_id, repo_slug),
+        )
+        return rows[0][0] if rows else None
 
     def write_run_start(self, run: RunRecord) -> None:
+        """Insert a new run (legacy/fallback)."""
         self._execute(
             """INSERT INTO run (id, batch_id, repo_url, repo_slug, status, started_at,
                 worker_id) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (run.id, run.batch_id, run.repo_url, run.repo_slug, run.status,
              run.started_at, run.worker_id),
+        )
+
+    def update_run_start(self, run: RunRecord) -> None:
+        """Update an existing 'waiting' run to 'running' state."""
+        self._execute(
+            """UPDATE run SET status=?, started_at=?, worker_id=? WHERE id=?""",
+            (run.status, run.started_at, run.worker_id, run.id),
         )
 
     def update_run_blueprint(self, run: RunRecord) -> None:
