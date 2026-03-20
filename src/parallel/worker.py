@@ -183,17 +183,11 @@ def worker_loop(
         heartbeat("clone_done")
 
         # Phase 1: Blueprint
-        if ablation == "no-metaprompt":
-            heartbeat("blueprint_skipped")
-            blueprint = {}
-            collected_context = None
-            bp_pt, bp_ct, bp_dur = 0, 0, 0
-        else:
-            heartbeat("blueprint_start")
-            bp_t0 = time.monotonic()
-            blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
-            bp_dur = int((time.monotonic() - bp_t0) * 1000)
-            heartbeat("blueprint_done", f"duration_ms={bp_dur}")
+        heartbeat("blueprint_start")
+        bp_t0 = time.monotonic()
+        blueprint, collected_context, bp_pt, bp_ct = generate_blueprint(str(clone_dir), image_catalog, llm)
+        bp_dur = int((time.monotonic() - bp_t0) * 1000)
+        heartbeat("blueprint_done", f"duration_ms={bp_dur}")
 
         run_record.context_blueprint = json.dumps(blueprint)
         run_record.detected_language = blueprint.get("language")
