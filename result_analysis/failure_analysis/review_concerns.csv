@@ -1,0 +1,11 @@
+concern_theme,count
+dependency_install,1172
+copy_path_issues,1113
+version_pinning,965
+multi_stage,627
+entrypoint_cmd,568
+env_variables,407
+port_expose,396
+security,316
+caching_optimization,109
+workdir,12

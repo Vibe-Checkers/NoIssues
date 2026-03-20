@@ -1,0 +1,8 @@
+dimension,chi2,dof,p_value,cramers_v,significance,n
+domain,27.2227,10,0.002401,0.3107,**,282
+build_type,80.2725,45,0.000953,0.5335,***,282
+automation_level,6.4628,3,0.09114,0.1514,n.s.,282
+environment_specificity,2.6874,4,0.611425,0.0976,n.s.,282
+dependency_transparency,10.0234,3,0.018369,0.1885,*,282
+tooling_complexity,0.1916,2,0.908657,0.0261,n.s.,282
+reproducibility_support,3.4363,3,0.329113,0.1104,n.s.,282

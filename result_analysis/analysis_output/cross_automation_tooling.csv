@@ -1,0 +1,11 @@
+automation_level,tooling_complexity,total,success,fail,success_rate
+fully_automated,multi_layer_toolchains,1,1,0,100.0
+fully_automated,single_layer_tool,10,8,2,80.0
+manual,mixed_languages_and_bindings,2,2,0,100.0
+manual,multi_layer_toolchains,3,2,1,66.67
+manual,single_layer_tool,11,11,0,100.0
+reverse_engineering,mixed_languages_and_bindings,1,1,0,100.0
+reverse_engineering,single_layer_tool,5,4,1,80.0
+semi_automated,mixed_languages_and_bindings,8,4,4,50.0
+semi_automated,multi_layer_toolchains,58,40,18,68.97
+semi_automated,single_layer_tool,183,123,60,67.21

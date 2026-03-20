@@ -1,0 +1,49 @@
+{
+  "repo_url": "https://github.com/xai-org/grok-1",
+  "slug": "xai-org/grok-1",
+  "overall_result": "FAIL",
+  "run_count": 1,
+  "runs": [
+    {
+      "id": "c07dd893-119d-4d83-84c9-d0baa3e52142",
+      "batch_id": "9c718fc2-2e31-4ebf-8488-7052fc7b33ae",
+      "repo_url": "https://github.com/xai-org/grok-1",
+      "repo_slug": "xai-org-grok-1",
+      "status": "running",
+      "started_at": "2026-03-18T17:48:29.525478",
+      "finished_at": null,
+      "duration_ms": null,
+      "iteration_count": 0,
+      "detected_language": null,
+      "repo_type": null,
+      "context_blueprint": null,
+      "blueprint_tokens_prompt": 0,
+      "blueprint_tokens_completion": 0,
+      "blueprint_duration_ms": null,
+      "final_dockerfile": null,
+      "verify_score": null,
+      "smoke_test_passed": null,
+      "total_prompt_tokens": 0,
+      "total_completion_tokens": 0,
+      "total_steps": 0,
+      "error_message": null,
+      "worker_id": 3,
+      "iterations": [],
+      "artifacts": [],
+      "batch_info": {
+        "id": "9c718fc2-2e31-4ebf-8488-7052fc7b33ae",
+        "started_at": "2026-03-18T11:26:33.458829",
+        "finished_at": null,
+        "worker_count": 4,
+        "repo_count": 40,
+        "success_count": 21,
+        "failure_count": 7,
+        "total_prompt_tokens": 13311475,
+        "total_completion_tokens": 1491945,
+        "config_json": "{\"workers\": 4, \"database\": \"postgresql://neondb_owner:npg_NRtmXhij2JP8@ep-curly-rain-al6tqu0g-pooler.c-3.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require\", \"max_iterations\": 3}",
+        "tag": "our 61-100 stuck",
+        "ablation": "default"
+      }
+    }
+  ]
+}

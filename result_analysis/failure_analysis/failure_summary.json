@@ -1,0 +1,224 @@
+{
+  "total_failed_repos": 86,
+  "root_cause_distribution": {
+    "build_always_failed": 44,
+    "smoke_test_failure": 38,
+    "no_verify_attempt": 1,
+    "all_rejected": 2,
+    "no_iterations": 1
+  },
+  "build_error_taxonomy": {
+    "unclassified": 69,
+    "network_error": 17,
+    "dependency_not_found": 58,
+    "version_mismatch": 22,
+    "compilation_error": 61,
+    "dockerfile_syntax": 43,
+    "missing_source_file": 52,
+    "missing_system_dep": 52,
+    "resource_exhaustion": 4,
+    "permission_error": 5
+  },
+  "smoke_error_taxonomy": {
+    "version_error": 33,
+    "unclassified": 27,
+    "missing_binary": 8,
+    "timeout": 5,
+    "config_error": 1
+  },
+  "iteration_progression": {
+    "total_multi_iter_repos": 85,
+    "error_changed": 57,
+    "error_same": 6,
+    "got_further": 17,
+    "regressed": 14
+  },
+  "dockerfile_stats": {
+    "repos_with_dockerfile": 85,
+    "repos_without_dockerfile": 1,
+    "avg_stages": 1.7,
+    "avg_lines": 25.3
+  },
+  "top_base_images": {
+    "ubuntu": 23,
+    "python": 21,
+    "node": 14,
+    "rust": 6,
+    "debian": 3,
+    "swift": 3,
+    "eclipse-temurin": 2,
+    "mcr.microsoft.com/windows/servercore": 2,
+    "dart": 1,
+    "mcr.microsoft.com/dotnet/sdk": 1,
+    "elixir": 1,
+    "microsoft/windowsservercore": 1,
+    "haskell": 1,
+    "windowsservercore-ltsc2025": 1,
+    "maven": 1
+  },
+  "failing_command_types": {
+    "RUN cargo build/install": 59,
+    "other RUN": 531,
+    "COPY/ADD": 64,
+    "RUN apt/apk install": 138,
+    "RUN gradle/maven": 23,
+    "RUN dotnet build": 20,
+    "RUN make/cmake": 87,
+    "RUN pip install": 39,
+    "RUN npm/yarn/pnpm install": 181
+  },
+  "review_concern_themes": {
+    "dependency_install": 1172,
+    "copy_path_issues": 1113,
+    "version_pinning": 965,
+    "port_expose": 396,
+    "env_variables": 407,
+    "entrypoint_cmd": 568,
+    "multi_stage": 627,
+    "security": 316,
+    "caching_optimization": 109,
+    "workdir": 12
+  },
+  "error_examples": {
+    "dependency_not_found": [
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Error summary\n\n- Failing command/step: [wasm-build 5/9] RUN cargo install wasm-pack (Dockerfile:14)\n- Exit code: 101\n\nExact error messages (preserved)\n\n- error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installxpENqz`\n- Caused by:\n  - failed to download replaced source registry `crates-io`\n- Caused by:\n  - failed to parse manifest at `/usr/local/carg"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary of Docker build error\n\n- Failing step / command\n  - wasm-build 5/9: RUN cargo install wasm-pack\n\n- Exact error message and exit code\n  - error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installgtRTaO`.\n  - Caused by:\n  - failed to download replaced source registry `crates-io`\n  - Caused by:\n  - failed to parse manifest at `/usr/local/cargo/re"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary (under 1500 chars):\n\n- Exact error message and exit code:\n  - error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installOWy8px`\n  - Caused by:\n    - failed to download replaced source registry `crates-io`\n    - failed to parse manifest at `/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/sysinfo-0.37.2/Cargo.toml`\n    - failed to "
+      }
+    ],
+    "version_mismatch": [
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Error summary\n\n- Failing command/step: [wasm-build 5/9] RUN cargo install wasm-pack (Dockerfile:14)\n- Exit code: 101\n\nExact error messages (preserved)\n\n- error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installxpENqz`\n- Caused by:\n  - failed to download replaced source registry `crates-io`\n- Caused by:\n  - failed to parse manifest at `/usr/local/carg"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "- Failing step (command/step): [wasm-build 5/9] RUN cargo install wasm-pack\n- Exit code: 101\n- Exact error messages (preserved):\n  error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-install6A0Yvs`.\n  To reuse those artifacts with a future compilation, set the environment variable `CARGO_TARGET_DIR` to that path.\n  \n  Caused by:\n  failed to parse manife"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "- Exact error message and exit code\n  - ERROR: process \"/bin/sh -c cargo install wasm-pack\" did not complete successfully: exit code: 101\n  - Caused by:\n    - failed to parse manifest at `/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/cargo-platform-0.3.2/Cargo.toml`\n  - Caused by:\n    - feature `edition2024` is required\n  - The package requires the Cargo feature called `edition202"
+      }
+    ],
+    "compilation_error": [
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Error summary\n\n- Failing command/step: [wasm-build 5/9] RUN cargo install wasm-pack (Dockerfile:14)\n- Exit code: 101\n\nExact error messages (preserved)\n\n- error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installxpENqz`\n- Caused by:\n  - failed to download replaced source registry `crates-io`\n- Caused by:\n  - failed to parse manifest at `/usr/local/carg"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "- Failing step (command/step): [wasm-build 5/9] RUN cargo install wasm-pack\n- Exit code: 101\n- Exact error messages (preserved):\n  error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-install6A0Yvs`.\n  To reuse those artifacts with a future compilation, set the environment variable `CARGO_TARGET_DIR` to that path.\n  \n  Caused by:\n  failed to parse manife"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary of Docker build error\n\n- Failing step / command\n  - wasm-build 5/9: RUN cargo install wasm-pack\n\n- Exact error message and exit code\n  - error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installgtRTaO`.\n  - Caused by:\n  - failed to download replaced source registry `crates-io`\n  - Caused by:\n  - failed to parse manifest at `/usr/local/cargo/re"
+      }
+    ],
+    "network_error": [
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Error summary\n\n- Failing command/step: [wasm-build 5/9] RUN cargo install wasm-pack (Dockerfile:14)\n- Exit code: 101\n\nExact error messages (preserved)\n\n- error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installxpENqz`\n- Caused by:\n  - failed to download replaced source registry `crates-io`\n- Caused by:\n  - failed to parse manifest at `/usr/local/carg"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary of Docker build error\n\n- Failing step / command\n  - wasm-build 5/9: RUN cargo install wasm-pack\n\n- Exact error message and exit code\n  - error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installgtRTaO`.\n  - Caused by:\n  - failed to download replaced source registry `crates-io`\n  - Caused by:\n  - failed to parse manifest at `/usr/local/cargo/re"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary (under 1500 chars):\n\n- Exact error message and exit code:\n  - error: failed to compile `wasm-pack v0.14.0`, intermediate artifacts can be found at `/tmp/cargo-installOWy8px`\n  - Caused by:\n    - failed to download replaced source registry `crates-io`\n    - failed to parse manifest at `/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/sysinfo-0.37.2/Cargo.toml`\n    - failed to "
+      }
+    ],
+    "unclassified": [
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Build timed out after 600s"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Build timed out after 600s"
+      },
+      {
+        "repo": "Automattic/harper",
+        "error_snippet": "Summary of the Docker build error\n\n- Exact error message and exit code\n  - gzip: stdin: not in gzip format\n  - tar: Child returned status 1\n  - The RUN command failed with exit code: 2\n  - Full failure note: failed to solve: process \"/bin/sh -c curl -L -o /tmp/wasm-pack.tar.gz https://github.com/rustwasm/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-gnu.tar.gz &&     t"
+      }
+    ],
+    "dockerfile_syntax": [
+      {
+        "repo": "BlinkDL/ChatRWKV",
+        "error_snippet": "#0 building with \"default\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 1.59kB done\n#1 DONE 0.0s\nDockerfile:40\n--------------------\n  38 |     # Entry point wrapper to group quick checks and allow interactive use\n  39 |     RUN printf '%s\n  40 | >>> ' \"#!/bin/sh\" \"set -e\" \"python - <<'PY'\" \"import sys, importlib\" \"for m in ['rwkv','r"
+      },
+      {
+        "repo": "ComicSparks/jasmine",
+        "error_snippet": "- Exact error message (including exit info): \n  \"ERROR: failed to calculate checksum of ref dm0crafjnw8l43ifl6uhde0ck::m1c47oydgfcxaf7xqwls9ujoj: \\\"/pubspec.lock\\\": not found\"\n  (Exit code not shown in the log)\n\n- Failing command/step:\n  [10/14] COPY pubspec.lock pubspec.lock\n\n- Missing files / packages mentioned:\n  - pubspec.lock is not found in the build context for the COPY step.\n  - .dockerign"
+      },
+      {
+        "repo": "ComicSparks/jasmine",
+        "error_snippet": "#0 building with \"default\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 4.17kB done\n#1 DONE 0.0s\nDockerfile:65\n--------------------\n  64 |     RUN bash -lc '\n  65 | >>>   set -e; \\\n  66 | >>>   mkdir -p native/jmbackend/platforms/linux; \\\n  67 | >>>   if [ -f native/jmbackend/platforms/linux/Cargo.toml ]; then echo \"Rust cargo manife"
+      }
+    ],
+    "missing_source_file": [
+      {
+        "repo": "BlinkDL/ChatRWKV",
+        "error_snippet": "- Exact error message and exit code:\n  - Exit code: not shown in the log\n  - Error messages:\n    - ERROR: failed to prepare extraction snapshot \"extract-18202245-DN4X sha256:363c80c87d386a7e3890725a4c112d3948fdde190d9eb23f3febb13a84538564\": parent snapshot sha256:f922c784e78dcd216dd704282b1d365e6b066fe8a54d0958dd556cb582ab7c1c does not exist: not found\n    - > exporting to image:\n    - ERROR: fail"
+      },
+      {
+        "repo": "ComicSparks/jasmine",
+        "error_snippet": "Summary of Docker build error\n\n- Failing step (command/step):\n  - RUN flutter build linux --release (Dockerfile: line 71)\n\n- Exact error message and exit code:\n  - /workspace/linux/main.cc:2:10: fatal error: 'rust.h' file not found\n  - /workspace/linux/methods_plugin.cc:10:10: fatal error: 'rust.h' file not found\n  - Build process failed\n  - Exit code: 1\n\n- Missing packages or files mentioned:\n  -"
+      },
+      {
+        "repo": "ComicSparks/jasmine",
+        "error_snippet": "Error details to investigate:\n- Exact error messages (exit code 1):\n  - fatal error: 'rust.h' file not found\n    - Location: /workspace/linux/main.cc:2:10\n  - fatal error: 'rust.h' file not found\n    - Location: /workspace/linux/methods_plugin.cc:10:10\n- Failing command/step:\n  - RUN flutter build linux --release\n  - Step: [11/18] in the Dockerfile (Dockerfile:71)\n- Missing files/packages mentione"
+      }
+    ],
+    "missing_system_dep": [
+      {
+        "repo": "ComicSparks/jasmine",
+        "error_snippet": "Summary of Docker build error\n\n- Exact error messages and exit code\n  - tar (child): xz: Cannot exec: No such file or directory\n  - tar (child): Error is not recoverable: exiting now\n  - tar: Child returned status 2\n  - tar: Error is not recoverable: exiting now\n  - Exit code reported for the failing command: 2\n\n- Failing command/step\n  - [ 8/15] RUN bash -lc \"set -e; curl -fL -o flutter.tar.xz ht"
+      },
+      {
+        "repo": "FuelLabs/fuel-core",
+        "error_snippet": "Failing step\n- [builder 5/5] RUN cargo build --release --manifest-path bin/fuel-core/Cargo.toml\n\nExact error message and exit code\n- error: failed to run custom build command for `librocksdb-sys v0.11.0+8.1.1`\n\n- Caused by:\n  - process didn't exit successfully: `/workspace/target/release/build/librocksdb-sys-4196eafa8cf101a2/build-script-build` (exit status: 101)\n\n- --- stderr (excerpt) ---\n  - th"
+      },
+      {
+        "repo": "IzzelAliz/Arclight",
+        "error_snippet": "- Exact error message and exit code\n  - E: Unable to locate package openjdk-21-jdk-headless\n  - Exit code: 100\n\n- Failing command/step\n  - [2/8] RUN apt-get update     && apt-get install -y --no-install-recommends         curl         unzip         git         ca-certificates         openjdk-21-jdk-headless     && rm -rf /var/lib/apt/lists/*\n\n- Missing packages or files mentioned\n  - openjdk-21-jd"
+      }
+    ],
+    "resource_exhaustion": [
+      {
+        "repo": "IzzelAliz/Arclight",
+        "error_snippet": "Summary (under 1500 chars):\n\n- Exact error message and exit code\n  - Error: Plugin [id: 'dev.architectury.loom', apply: false] was not found in any of the following sources:\n    - Gradle Core Plugins (plugin is not in 'org.gradle' namespace)\n    - Included Builds (No included builds contain this plugin)\n    - Plugin Repositories (plugin dependency must include a version number for this source)\n  -"
+      },
+      {
+        "repo": "IzzelAliz/Arclight",
+        "error_snippet": "Summary of Docker build error\n\n- Failing step (Dockerfile step):\n  - builder 7/7: RUN ./gradlew clean build --no-daemon --stacktrace\n- Exit code:\n  - 1 (BUILD FAILED in 1m 11s; the container step did not complete successfully: exit code: 1)\n- Exact error message(s) to preserve:\n  - A problem occurred evaluating root project 'arclight'. > Could not find method officialMojingMappings() for arguments"
+      },
+      {
+        "repo": "cirruslabs/tart",
+        "error_snippet": "- Exact error message and exit code\n  - Error: ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref mqpnlh3la2bzegxdamkvycc7g::vv0qpybkkp5p9oomj3dqbchpg: \"/Package.resolved\": not found\n  - Exit code: not shown in log (build failed)\n\n- Failing command/step\n  - [builder 4/8] COPY Package.swift Package.resolved ./\n\n- Missing packages or files menti"
+      }
+    ],
+    "permission_error": [
+      {
+        "repo": "demopark/electron-api-demos-Zh_CN",
+        "error_snippet": "ERROR: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock\n"
+      },
+      {
+        "repo": "fossasia/badgemagic-app",
+        "error_snippet": "- Exact error message and exit code\n  - E: List directory /var/lib/apt/lists/partial is missing. - Acquire (13: Permission denied)\n  - Exit code: 100\n\n- Failing command/step\n  - [builder 2/8] RUN apt-get update   && apt-get install -y --no-install-recommends     build-essential     pkg-config     libgtk-3-dev     libblkid1     liblzma5     libstdc++6     curl     unzip     xz-utils     zip     ca-"
+      },
+      {
+        "repo": "fossasia/badgemagic-app",
+        "error_snippet": "Summary (under 1500 chars):\n\n- Exact error message and exit code:\n  - \"mkdir: cannot create directory '/var/lib/apt/lists/partial': Permission denied\"\n  - exit code: 1\n\n- Failing command/step:\n  - Builder step 2/8:\n    RUN mkdir -p /var/lib/apt/lists/partial   && apt-get update   && apt-get install -y --no-install-recommends     build-essential     pkg-config     libgtk-3-dev     libblkid1     lib"
+      }
+    ]
+  }
+}

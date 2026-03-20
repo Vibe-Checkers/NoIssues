@@ -1,0 +1,8 @@
+dimension,best_value,best_rate,best_n,worst_value,worst_rate,worst_n,fisher_p,significance
+domain,devops,88.89,18,data-science,40.0,10,0.011047,*
+build_type,go-mod,100.0,16,setuptools,31.25,16,6.8e-05,***
+automation_level,manual,93.75,16,semi_automated,67.07,249,0.025698,*
+environment_specificity,cross_platform_generic,70.93,227,custom_hardware_or_drivers,50.0,8,0.242752,n.s.
+dependency_transparency,explicit_machine_readable,75.0,160,explicit_loose,52.73,55,0.003638,**
+tooling_complexity,single_layer_tool,69.86,209,mixed_languages_and_bindings,63.64,11,0.739126,n.s.
+reproducibility_support,no_ci_manual_only,73.68,95,repro_ready,67.58,182,0.336146,n.s.

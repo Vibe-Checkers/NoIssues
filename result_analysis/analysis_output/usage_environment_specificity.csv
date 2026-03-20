@@ -1,0 +1,6 @@
+category,value,n_success,avg_iterations,avg_steps,avg_prompt_tokens_k,avg_duration_min
+environment_specificity,cross_platform_generic,161,1.69,22.4,365.4,27.0
+environment_specificity,specific_os,27,1.78,25.8,425.9,22.6
+environment_specificity,custom_hardware_or_drivers,4,2.25,26.0,430.9,45.4
+environment_specificity,specific_stack_versions,3,1.67,24.3,292.2,27.5
+environment_specificity,specific_hardware_or_drivers,1,3.0,52.0,707.9,127.4

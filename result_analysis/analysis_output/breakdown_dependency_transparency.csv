@@ -1,0 +1,5 @@
+category,value,total,success,fail,success_rate
+dependency_transparency,explicit_machine_readable,160,120,40,75.0
+dependency_transparency,implicit,66,46,20,69.7
+dependency_transparency,explicit_loose,55,29,26,52.73
+dependency_transparency,opaque,1,1,0,100.0

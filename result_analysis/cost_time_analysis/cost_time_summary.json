@@ -1,0 +1,80 @@
+{
+  "total_repos": 282,
+  "pricing": {
+    "gemini_flash_input_per_M": 0.1,
+    "gemini_flash_output_per_M": 0.4,
+    "sonnet_input_per_M": 3.0,
+    "sonnet_output_per_M": 15.0
+  },
+  "totals": {
+    "total_cost_usd": 34.7954,
+    "total_gemini_cost_usd": 31.0846,
+    "total_sonnet_cost_usd": 3.7107,
+    "total_wall_clock_hours": 193.49,
+    "total_prompt_tokens": 177698728,
+    "total_completion_tokens": 33554190,
+    "total_tokens": 211252918
+  },
+  "cost_breakdown_usd": {
+    "blueprint": 1.0963,
+    "agent_steps": 18.9749,
+    "verify_review": 5.49,
+    "output_summarization": 0.7366,
+    "lesson_extraction_sonnet": 3.7107
+  },
+  "time_breakdown_hours": {
+    "blueprint": 4.12,
+    "docker_builds": 87.27,
+    "smoke_tests": 1.09,
+    "llm_review": 35.69,
+    "other": 65.32
+  },
+  "per_repo_stats": {
+    "cost": {
+      "mean": 0.123388,
+      "median": 0.085463,
+      "std": 0.108522,
+      "min": 0.0,
+      "p25": 0.028017,
+      "p75": 0.205034,
+      "p90": 0.287826,
+      "p95": 0.322305,
+      "max": 0.436348
+    },
+    "duration_min": {
+      "mean": 41.17,
+      "median": 25.19,
+      "std": 45.19,
+      "min": 0.0,
+      "p25": 9.69,
+      "p75": 55.62,
+      "p90": 96.54,
+      "p95": 141.52,
+      "max": 245.73
+    },
+    "iterations": {
+      "mean": 1.86,
+      "median": 2.0
+    }
+  },
+  "success_vs_fail": {
+    "success": {
+      "n": 196,
+      "total_cost_usd": 14.8215,
+      "avg_cost_usd": 0.07562,
+      "median_cost_usd": 0.046664,
+      "total_duration_hours": 77.06,
+      "avg_duration_min": 23.59,
+      "median_duration_min": 15.39
+    },
+    "fail": {
+      "n": 86,
+      "total_cost_usd": 19.9739,
+      "avg_cost_usd": 0.232255,
+      "median_cost_usd": 0.231282,
+      "total_duration_hours": 116.43,
+      "avg_duration_min": 81.23,
+      "median_duration_min": 69.02
+    }
+  }
+}

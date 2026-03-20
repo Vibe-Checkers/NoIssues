@@ -1,0 +1,6 @@
+category,value,total,success,fail,success_rate
+environment_specificity,cross_platform_generic,227,161,66,70.93
+environment_specificity,specific_os,42,27,15,64.29
+environment_specificity,custom_hardware_or_drivers,8,4,4,50.0
+environment_specificity,specific_stack_versions,4,3,1,75.0
+environment_specificity,specific_hardware_or_drivers,1,1,0,100.0

@@ -1,0 +1,11 @@
+category,repos_affected,pct
+unclassified,69,84.1
+compilation_error,61,74.4
+dependency_not_found,58,70.7
+missing_source_file,52,63.4
+missing_system_dep,52,63.4
+dockerfile_syntax,43,52.4
+version_mismatch,22,26.8
+network_error,17,20.7
+permission_error,5,6.1
+resource_exhaustion,4,4.9
