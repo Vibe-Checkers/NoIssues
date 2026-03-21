@@ -1,0 +1,21 @@
+combination,success,fail,total,rate
+no_ci_manual_only + data-science,3,0,3,100.0
+no_ci_manual_only + game-development,4,0,4,100.0
+repro_ready + devops,12,1,13,92.3
+repro_ready + security,10,1,11,90.9
+no_ci_manual_only + education,6,1,7,85.7
+repro_ready + web-development,33,6,39,84.6
+no_ci_manual_only + mobile-development,11,2,13,84.6
+repro_ready + mobile-development,12,3,15,80.0
+no_ci_manual_only + web-development,13,4,17,76.5
+no_ci_manual_only + devops,3,1,4,75.0
+no_ci_manual_only + utilities,13,5,18,72.2
+repro_ready + education,4,2,6,66.7
+no_ci_manual_only + systems-programming,6,3,9,66.7
+repro_ready + utilities,31,17,48,64.6
+no_ci_manual_only + security,3,2,5,60.0
+repro_ready + systems-programming,13,10,23,56.5
+no_ci_manual_only + machine-learning,7,7,14,50.0
+repro_ready + machine-learning,7,9,16,43.8
+repro_ready + data-science,1,6,7,14.3
+repro_ready + scientific-computing,0,3,3,0.0

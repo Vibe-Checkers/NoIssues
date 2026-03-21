@@ -1,0 +1,21 @@
+concern,count
+No Dockerfile found at repo root,25
+COPY config.json may fail if config.json is not provided in the build context.,2
+COPY --from=build references a stage named 'build' which is not present in this snippet; this will f,1
+"CMD [""bash""] starts an interactive shell; for headless containers it's better to run a non-interacti",1
+"If this image is intended to ship built desktop binaries, ensure that necessary runtime dependencies",1
+FROM image syntax is invalid: there is an extra space after the colon (FROM ubuntu: jammy-20260217).,1
+The same spacing issue appears in the final stage (FROM ubuntu: jammy-20260217).,1
+Potential mismatch between published output layout and the ENTRYPOINT path: ensure the binary actual,1
+RUN rustup toolchain install is missing a toolchain spec (needs a specific toolchain like stable) an,1
+COPY --from=node-build /usr/build/node_modules /usr/build/packages/web/node_modules copies the wrong,1
+"Minor improvements: consider EXPOSE 3000 and pin base images (e.g., node:lts-bookworm and rust:...) ",1
+The Dockerfile uses 'RUN apt-get update -y' which is invalid usage; update does not take -y. This wi,1
+The line 'RUN apt-get update -y && apt-get install -y clang pkg-config libssl-dev build-essential &&,1
+There is a redundant '-y' after 'parallel' in 'apt-get install -y git parallel -y'; this treats '-y',1
+COPY ./packages/web/drizzle /usr/build/packages/web/build.drizzle appears to copy to an invalid path,1
+"No EXPOSE directive for port 3000; while not fatal, adding EXPOSE 3000 would document the public por",1
+"ENTRYPOINT relies on a script named 'index' in the build directory; ensure the file exists (e.g., in",1
+COPY --from=node-build /usr/build/node_modules /usr/build/packages/web/node_modules uses an incorrec,1
+"Potential ordering issue: copying the entire /usr/build/packages/web/build from node-build, then att",1
+"ENTRYPOINT relies on node index, but the final build directory may not guarantee an index script exi",1

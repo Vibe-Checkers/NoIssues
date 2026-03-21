@@ -1,0 +1,23 @@
+{
+  "total_repos": 282,
+  "total_verifybuild_calls": 3884,
+  "calls_in_successful_repos": 1850,
+  "calls_in_failed_repos": 2034,
+  "outcome_distribution": {
+    "build_failed": 2430,
+    "accepted": 193,
+    "rejected": 573,
+    "smoke_failed": 688
+  },
+  "avg_calls_per_successful_repo": 9.4,
+  "avg_calls_per_failed_repo": 23.7,
+  "avg_failures_before_first_accept": 8.2,
+  "first_try_success_count": 20,
+  "first_try_success_rate": 10.2,
+  "total_review_rejections": 573,
+  "rejections_in_successful_repos": 301,
+  "total_smoke_failures": 688,
+  "smoke_failures_in_successful_repos": 265,
+  "repos_that_regressed": 25,
+  "failed_repos_that_reached_smoke": 38
+}

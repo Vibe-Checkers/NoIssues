@@ -1,0 +1,8 @@
+combination,success,fail,total,rate
+manual + explicit_loose,3,0,3,100.0
+manual + implicit,10,1,11,90.9
+reverse_engineering + implicit,5,1,6,83.3
+semi_automated + explicit_machine_readable,113,38,151,74.8
+fully_automated + explicit_machine_readable,5,2,7,71.4
+semi_automated + implicit,29,18,47,61.7
+semi_automated + explicit_loose,24,26,50,48.0

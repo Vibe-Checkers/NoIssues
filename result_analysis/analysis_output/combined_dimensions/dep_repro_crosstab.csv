@@ -1,0 +1,7 @@
+combination,success,fail,total,rate
+explicit_loose + no_ci_manual_only,13,4,17,76.5
+explicit_machine_readable + repro_ready,91,29,120,75.8
+implicit + no_ci_manual_only,30,10,40,75.0
+explicit_machine_readable + no_ci_manual_only,27,11,38,71.1
+implicit + repro_ready,15,8,23,65.2
+explicit_loose + repro_ready,16,22,38,42.1

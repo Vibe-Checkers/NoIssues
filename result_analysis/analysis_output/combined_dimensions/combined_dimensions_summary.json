@@ -1,0 +1,89 @@
+{
+  "total_repos": 282,
+  "dimension_pairs_tested": 21,
+  "significant_pairs_005": 12,
+  "top_3_pairs": [
+    {
+      "dims": "automation_level x build_type",
+      "p": 0.000154,
+      "V": 0.5094
+    },
+    {
+      "dims": "dependency_transparency x build_type",
+      "p": 0.000638,
+      "V": 0.5023
+    },
+    {
+      "dims": "tooling_complexity x build_type",
+      "p": 0.000897,
+      "V": 0.5055
+    }
+  ],
+  "fisher_contrasts": [
+    {
+      "contrast": "Loose+CI vs Pinned+CI",
+      "group_a": "explicit_loose + repro_ready",
+      "group_b": "explicit_machine_readable + repro_ready",
+      "success_a": 16,
+      "n_a": 38,
+      "rate_a": 42.1,
+      "success_b": 91,
+      "n_b": 120,
+      "rate_b": 75.8,
+      "odds_ratio": 0.2318,
+      "p_value": 0.000248
+    },
+    {
+      "contrast": "Loose+CI vs Implicit+NoCI",
+      "group_a": "explicit_loose + repro_ready",
+      "group_b": "implicit + no_ci_manual_only",
+      "success_a": 16,
+      "n_a": 38,
+      "rate_a": 42.1,
+      "success_b": 30,
+      "n_b": 40,
+      "rate_b": 75.0,
+      "odds_ratio": 0.2424,
+      "p_value": 0.005377
+    },
+    {
+      "contrast": "SemiAuto+Loose vs Manual+Implicit",
+      "group_a": "semi_automated + explicit_loose",
+      "group_b": "manual + implicit",
+      "success_a": 24,
+      "n_a": 50,
+      "rate_a": 48.0,
+      "success_b": 10,
+      "n_b": 11,
+      "rate_b": 90.9,
+      "odds_ratio": 0.0923,
+      "p_value": 0.016158
+    },
+    {
+      "contrast": "CI+DataScience vs NoCI+DataScience",
+      "group_a": "repro_ready + data-science",
+      "group_b": "no_ci_manual_only + data-science",
+      "success_a": 1,
+      "n_a": 7,
+      "rate_a": 14.3,
+      "success_b": 3,
+      "n_b": 3,
+      "rate_b": 100.0,
+      "odds_ratio": 0.0,
+      "p_value": 0.033333
+    },
+    {
+      "contrast": "Pinned+NoCI vs Loose+CI",
+      "group_a": "explicit_machine_readable + no_ci_manual_only",
+      "group_b": "explicit_loose + repro_ready",
+      "success_a": 27,
+      "n_a": 38,
+      "rate_a": 71.1,
+      "success_b": 16,
+      "n_b": 38,
+      "rate_b": 42.1,
+      "odds_ratio": 3.375,
+      "p_value": 0.020007
+    }
+  ]
+}
