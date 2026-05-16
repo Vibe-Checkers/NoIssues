@@ -31,7 +31,7 @@ from db.writer import DBWriter
 from agent.llm import LLMClient
 from agent.blueprint import ImageCatalog, generate_blueprint
 from agent.react_loop import run_agent
-from agent.docker_ops import DockerOps
+from agent.ops_factory import get_ops
 from parallel.rate_limiter import GlobalRateLimiter
 from parallel.disk_monitor import DiskSpaceMonitor
 from parallel.worker import make_slug, clone_repo
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     disk_monitor = DiskSpaceMonitor()
     db = DBWriter(args.db)
-    docker_ops = DockerOps(build_semaphore=build_semaphore)
+    docker_ops = get_ops(build_semaphore=build_semaphore)
     llm = LLMClient(rate_limiter)
 
     # Create batch (even for single repo, keeps DB schema consistent)

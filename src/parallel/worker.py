@@ -22,7 +22,7 @@ from db.writer import DBWriter
 from agent.llm import LLMClient
 from agent.blueprint import generate_blueprint
 from agent.react_loop import run_agent
-from agent.docker_ops import DockerOps
+from agent.ops_factory import get_ops
 from parallel.rate_limiter import GlobalRateLimiter
 from parallel.disk_monitor import DiskSpaceMonitor
 
@@ -131,7 +131,7 @@ def worker_loop(
     clone_dir = Path(workdir) / batch_id / str(worker_id) / slug
     image_name = f"buildagent-{slug}-{worker_id}"
     llm = LLMClient(rate_limiter, worker_id=worker_id)
-    docker_ops = DockerOps(build_semaphore=build_semaphore)
+    docker_ops = get_ops(build_semaphore=build_semaphore)
 
     run_id = db.get_run_id_for_repo(batch_id, slug)
     if run_id:

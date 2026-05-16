@@ -101,14 +101,20 @@ class DockerOps:
     def run_container(
         self, image_name: str, command: str, timeout: int = 30,
     ) -> tuple[int, str, bool]:
-        """Run a command in a container.
+        """Run a command in a container under strict shell mode.
+
+        `set -e -o pipefail` ensures that a failure anywhere in a pipe
+        (e.g. `curl X | grep Y`) bubbles up as a non-zero exit. Without it,
+        the LLM's smoke commands routinely "pass" while producing output
+        like `curl: not found` because only the last stage's exit matters.
 
         Returns (exit_code, output, timed_out).
         """
+        wrapped = f"set -e -o pipefail\n{command}"
         try:
             proc = subprocess.run(
                 ["docker", "run", "--rm", "--entrypoint", "",
-                 image_name, "sh", "-c", command],
+                 image_name, "sh", "-c", wrapped],
                 capture_output=True, text=True, timeout=timeout,
             )
             output = (proc.stdout + proc.stderr)[:2000]

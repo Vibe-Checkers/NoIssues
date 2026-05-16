@@ -42,15 +42,98 @@ It should be REJECTED if:
 - It's essentially empty or placeholder
 
 TASK 2 — SMOKE TESTS:
-Design 1 to 3 shell commands to verify the container works after building. \
-These commands will run inside the container with \
-`docker run --rm --entrypoint "" <image> sh -c "<command>"`.
+Design 1 to 3 shell commands that EXERCISE REAL FUNCTIONALITY of the built \
+artifact. Each command you return will be executed VERBATIM by us via \
+`sh -c "<your command>"` INSIDE the already-built container, like \
+`docker run --rm --entrypoint "" <image> sh -c "<your command>"`.
 
-Examples by repo type:
-- Library: python -c "import {{package}}; print('ok')" or node -e "require('{{package}}')"
-- CLI tool: /app/binary --version or which binary_name
-- Web service: test -f /app/server or ls /app/dist/index.html
-- Compiled project: find /app -name "*.jar" | head -1 or test -x /app/build/main
+EXECUTION CONTEXT — read carefully:
+- You are writing the part that goes after `sh -c`. DO NOT include \
+`docker run`, `--entrypoint`, an image name, or the wrapping `sh -c` \
+yourself. Just write the command(s) that run INSIDE the container.
+- Wrong: `docker run --rm --entrypoint "" myimg:latest sh -c 'mytool --help'`
+- Right: `mytool input.txt | grep -q expected_output`
+- We will additionally prepend `set -e -o pipefail` so any failing stage \
+in a pipe (or missing binary) bubbles up as a non-zero exit — design your \
+command to rely on that strict mode.
+
+QUOTING HYGIENE — get this right or your smoke test will fail with a \
+shell syntax error instead of testing anything:
+- Every `'` MUST be closed by another `'`. Every `"` MUST be closed by \
+another `"`. Count them before returning.
+- Prefer the single-quote outer / double-quote inner pattern (or vice \
+versa). E.g. `python -c "from x import f; assert f(2)==4; print('ok')"`.
+- Avoid mixing both quote styles at the same nesting level when you can \
+help it. Avoid backticks.
+- Keep each command to ONE LINE. No literal newlines in the command.
+- If you cannot express what you need cleanly on one line with balanced \
+quotes, pick a simpler smoke test (e.g. `pytest -q tests/smoke/ -x` \
+instead of an ad-hoc Python heredoc).
+
+Each command MUST do at least one of these (level 2):
+  A. Invoke the project's CLI/binary on a real input and inspect meaningful \
+output (not just --version or --help).
+  B. Run a documented example end-to-end (e.g. README quick-start snippet).
+  C. Start the service and curl a healthcheck endpoint, validating the \
+response BODY content (not just HTTP 200).
+  D. Run a repo-provided integration/smoke script (`health.sh`, `smoke.sh`, \
+`examples/run.sh`, …).
+  E. Run the project's own test suite (or a fast smoke subset of it).
+
+REJECT THESE — they are presence/version checks, not smoke tests:
+- Bare presence: `which X`, `test -f /app/X`, `ls /app/...`, \
+`find / -name '*.X'`, `test -x /app/build/main`.
+- Bare version/help: `X --version`, `X -V`, `X --help`, `X -h`.
+- Bare import: `python -c "import X"`, `node -e "require('X')"` without \
+calling and asserting anything.
+- Anything that confirms only that the runtime/binary exists.
+
+EXIT-CODE RULES (your command MUST fail loudly when the thing being \
+tested is broken or missing):
+- DO NOT use `|| echo FAIL`, `|| echo SKIP`, `|| echo NO_SMOKE_SCRIPT`, \
+or any `|| <success-looking-echo>` pattern. Those swallow the failure \
+and make the smoke pass even when the artifact is broken. Use \
+`|| (echo FAIL; exit 1)` instead, or just let the failing command \
+exit non-zero directly.
+- DO NOT use `if [ -x /path/script ]; then run; else echo NO_SMOKE_SCRIPT; fi` \
+fallbacks. If a script you need does not exist, that is a smoke FAIL — \
+do not pick a smoke command that depends on it.
+- Every command MUST: exit non-zero when the thing under test does not work, \
+and rely ONLY on artifacts that the Dockerfile demonstrably produces \
+(binaries from RUN, files from COPY) or that the project ships in its \
+source tree (visible upstream).
+- DO NOT propose a smoke test that requires a helper script the Dockerfile \
+does not already COPY from the repo or produce as part of `RUN`. \
+Specifically: do not assume `/app/scripts/smoke.sh`, `/app/health.sh`, \
+or similar exist unless you saw a COPY/RUN line creating them.
+
+If using language imports, the command MUST call a function and assert a \
+result, e.g.:
+- `python -c "from pkg import f; assert f(2)==4; print('ok')"`
+- `node -e "const x=require('lodash'); \
+console.assert(x.chunk([1,2,3,4],2).length===2); console.log('ok')"`
+
+Examples (level 2) by repo type:
+- Library (Python): `python -c "from requests.utils import unquote; \
+assert unquote('a%20b')=='a b'; print('ok')"`
+- CLI tool: `/app/bin/tool convert /app/examples/in.txt - | grep -q \
+expected_token && echo PASS`
+- Web service: `/app/start & sleep 2; curl -fsS localhost:8080/health | \
+grep -q '\"status\":\"ok\"'`
+- Compiled binary: `/app/build/main --input /app/examples/in.json | \
+grep -q expected_output`
+- Test suite: `cd /app && pytest -q tests/smoke/ -x` or \
+`cd /app && npm test -- --testPathPattern=smoke`
+- Repo script: `sh /app/scripts/smoke.sh`
+
+PREFERENCE ORDER when picking smoke tests:
+1. Project's own smoke/integration script (if one exists in the repo).
+2. Project's own test suite (or a fast subset).
+3. Documented example from README/docs.
+4. CLI/binary on a hand-rolled real input + output assertion.
+5. Library function call + assertion.
+
+Avoid commands that depend on external network access.
 
 Return ONLY valid JSON:
 {{
@@ -59,11 +142,15 @@ Return ONLY valid JSON:
   "smoke_test_commands": ["<cmd1>", "<cmd2>"]
 }}
 
-smoke_test_commands must have 1 to 3 commands. Never return an empty list."""
+smoke_test_commands must have 1 to 3 commands. Never return an empty list. \
+Every command must satisfy at least one of A–E above."""
 
+# Degraded fallback used only when the LLM call itself fails. It does not
+# satisfy the level-2 rubric — it just keeps the pipeline moving so the run
+# can still produce a build outcome.
 REVIEW_FALLBACK = {
     "approved": True,
-    "concerns": ["LLM review failed — building without review"],
+    "concerns": ["LLM review failed — building without review (degraded smoke)"],
     "smoke_test_commands": ["ls /app || ls /usr/src || echo 'checking root' && ls /"],
 }
 

@@ -50,12 +50,13 @@ class DiskSpaceMonitor:
 
     @staticmethod
     def _prune() -> None:
-        """Run Docker prune to reclaim space."""
-        subprocess.run(
+        """Reclaim disk space. Uses docker if available, otherwise buildctl."""
+        for cmd in (
             ["docker", "image", "prune", "-f"],
-            capture_output=True,
-        )
-        subprocess.run(
             ["docker", "container", "prune", "-f"],
-            capture_output=True,
-        )
+            ["buildctl", "prune"],
+        ):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=60)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
